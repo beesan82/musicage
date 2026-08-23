@@ -1,12 +1,34 @@
 import { StyleSheet, Text, View } from 'react-native';
+import { useEffect } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
+
+function statusLabel(status: ReturnType<typeof useMicrophoneAnalysis>['status']): string {
+  switch (status) {
+    case 'listening':
+      return 'LISTENING';
+    case 'denied':
+      return 'MIC OFF';
+    case 'error':
+      return 'MIC ERROR';
+    default:
+      return 'IDLE';
+  }
+}
+
 export function MusicageApp() {
+  const { start, status } = useMicrophoneAnalysis();
+
+  useEffect(() => {
+    void start();
+  }, [start]);
+
   return (
     <SafeAreaView style={styles.root} testID="musicage-root">
       <View style={styles.wordmarkRow}>
         <Text style={styles.wordmark}>MUSICAGE</Text>
-        <Text style={styles.status}>IDLE</Text>
+        <Text style={styles.status}>{statusLabel(status)}</Text>
       </View>
     </SafeAreaView>
   );
