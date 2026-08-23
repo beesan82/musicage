@@ -305,6 +305,16 @@ it('reports a stronger transient after a quiet buffer becomes loud', () => {
   const result = processor.process(sine(220, 48_000, 2_048, 0.9), 48_000, 100);
   expect(result.transient).toBeGreaterThan(0.4);
 });
+
+it('clears smoothed energy and transient history when reset', () => {
+  const processor = createFeatureProcessor();
+  processor.process(sine(220, 48_000, 2_048, 0.9), 48_000, 0);
+  processor.reset();
+  const result = processor.process(new Float32Array(2_048), 48_000, 100);
+  expect(result.energy).toBe(0);
+  expect(result.transient).toBe(0);
+  expect(result.silence).toBe(true);
+});
 ```
 
 - [ ] **Step 2: Run the feature tests to verify they fail.**
