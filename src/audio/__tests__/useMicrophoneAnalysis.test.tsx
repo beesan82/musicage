@@ -25,6 +25,12 @@ describe('useMicrophoneAnalysis', () => {
     start = jest.fn().mockResolvedValue(undefined);
     stop = jest.fn();
     stream = { start, stop };
+    appStateDescriptor = Object.getOwnPropertyDescriptor(AppState, 'currentState');
+    Object.defineProperty(AppState, 'currentState', {
+      configurable: true,
+      value: 'active',
+      writable: true,
+    });
 
     (AudioModule.requestRecordingPermissionsAsync as jest.Mock).mockResolvedValue({
       granted: true,
@@ -156,12 +162,6 @@ describe('useMicrophoneAnalysis', () => {
     const remove = jest.fn();
     let appStateListener: ((state: AppStateStatus) => void) | undefined;
 
-    appStateDescriptor = Object.getOwnPropertyDescriptor(AppState, 'currentState');
-    Object.defineProperty(AppState, 'currentState', {
-      configurable: true,
-      value: 'active',
-      writable: true,
-    });
     jest.spyOn(AppState, 'addEventListener').mockImplementation((_eventType, listener) => {
       appStateListener = listener;
 
@@ -190,5 +190,41 @@ describe('useMicrophoneAnalysis', () => {
 
     expect(remove).toHaveBeenCalledTimes(1);
     expect(stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not start a pending permission request after the app becomes inactive', async () => {
+    const remove = jest.fn();
+    let appStateListener: ((state: AppStateStatus) => void) | undefined;
+    let resolvePermission: (response: { granted: boolean; canAskAgain: boolean }) => void;
+    let pendingStart: Promise<void>;
+
+    jest.spyOn(AppState, 'addEventListener').mockImplementation((_eventType, listener) => {
+      appStateListener = listener;
+
+      return { remove } as ReturnType<typeof AppState.addEventListener>;
+    });
+    (AudioModule.requestRecordingPermissionsAsync as jest.Mock).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePermission = resolve;
+        }),
+    );
+
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(() => {
+      pendingStart = result.current.start();
+    });
+    await act(() => {
+      appStateListener?.('background');
+    });
+    await act(async () => {
+      resolvePermission({ granted: true, canAskAgain: true });
+      await pendingStart;
+    });
+
+    expect(setAudioModeAsync).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(result.current.status).toBe('idle');
   });
 });

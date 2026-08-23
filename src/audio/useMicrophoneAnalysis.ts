@@ -55,6 +55,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   const statusRef = useRef<ListeningStatus>('idle');
   const appStateRef = useRef(AppState.currentState ?? 'active');
   const resumeWhenActiveRef = useRef(false);
+  const startAttemptRef = useRef(0);
 
   const setListeningStatus = useCallback((nextStatus: ListeningStatus) => {
     statusRef.current = nextStatus;
@@ -88,6 +89,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   });
 
   const stop = useCallback(() => {
+    startAttemptRef.current += 1;
     resumeWhenActiveRef.current = false;
     stream.stop();
     resetFeatures();
@@ -96,11 +98,20 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   }, [resetFeatures, setListeningStatus, stream]);
 
   const start = useCallback(async () => {
+    const startAttempt = startAttemptRef.current + 1;
+    startAttemptRef.current = startAttempt;
     setListeningStatus('requesting');
     setErrorMessage(null);
 
     try {
       const permission = await AudioModule.requestRecordingPermissionsAsync();
+
+      if (
+        startAttemptRef.current !== startAttempt ||
+        appStateRef.current !== 'active'
+      ) {
+        return;
+      }
 
       if (!permission.granted) {
         resetFeatures();
@@ -113,9 +124,30 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
         playsInSilentMode: true,
         interruptionMode: 'mixWithOthers',
       });
+
+      if (
+        startAttemptRef.current !== startAttempt ||
+        appStateRef.current !== 'active'
+      ) {
+        return;
+      }
+
       await stream.start();
+
+      if (
+        startAttemptRef.current !== startAttempt ||
+        appStateRef.current !== 'active'
+      ) {
+        stream.stop();
+        return;
+      }
+
       setListeningStatus('listening');
     } catch {
+      if (startAttemptRef.current !== startAttempt) {
+        return;
+      }
+
       resetFeatures();
       setErrorMessage(MICROPHONE_ERROR_MESSAGE);
       setListeningStatus('error');
@@ -128,12 +160,16 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
       appStateRef.current = nextAppState;
 
       if (wasActive && nextAppState !== 'active') {
+        startAttemptRef.current += 1;
         const wasListening = statusRef.current === 'listening';
         resumeWhenActiveRef.current = wasListening;
 
         if (wasListening) {
           stream.stop();
           resetFeatures();
+        } else if (statusRef.current === 'requesting') {
+          resetFeatures();
+          setListeningStatus('idle');
         }
       }
 
@@ -144,11 +180,12 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     });
 
     return () => {
+      startAttemptRef.current += 1;
       subscription.remove();
       stream.stop();
       processor.reset();
     };
-  }, [processor, resetFeatures, start, stream]);
+  }, [processor, resetFeatures, setListeningStatus, start, stream]);
 
   return {
     status,
