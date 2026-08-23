@@ -1,0 +1,20 @@
+{
+  "expo": {
+    "name": "MUSICAGE",
+    "slug": "musicage",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "周囲で流れている音楽に反応する映像を表示するため、マイクを使用します。音声を保存・送信することはありません。",
+          "enableBackgroundRecording": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
+      "expo-asset"
+    ]
+  }
+}

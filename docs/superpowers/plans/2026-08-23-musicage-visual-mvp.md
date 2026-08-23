@@ -6,7 +6,7 @@
 
 **Architecture:** The app captures PCM microphone buffers with `expo-audio`, derives smoothed spectral features in pure TypeScript, and turns those features into a stable `VisualState` through a pure style engine. A scene renderer and typography layer consume `VisualState` only, keeping future ShazamKit and licensed-lyrics work isolated from the visual system.
 
-**Tech Stack:** Expo (current SDK installed by `expo install`), React Native, TypeScript, `expo-audio`, `react-native-svg`, `fft.js`, Jest via `jest-expo`, React Native Testing Library.
+**Tech Stack:** Expo (current SDK installed by `expo install`), React Native, TypeScript, `expo-audio`, `react-native-svg`, `react-native-safe-area-context`, `fft.js`, Jest via `jest-expo`, React Native Testing Library v14.
 
 **Spec:** `docs/superpowers/specs/2026-08-23-musicage-visual-mvp-design.md`
 
@@ -94,6 +94,7 @@ npm pkg set name="musicage" version="0.1.0" private=true main="node_modules/expo
 npm install expo@^57.0.0
 npx expo install --fix
 npx expo install expo-audio expo-status-bar react-native-svg
+npx expo install react-native-safe-area-context
 npm uninstall expo-av @expo/vector-icons
 npm install fft.js
 npx expo install jest-expo -- --save-dev
@@ -127,7 +128,7 @@ Create `tsconfig.json`:
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
-    "baseUrl": "."
+    "types": ["jest"]
   },
   "include": ["App.tsx", "src/**/*.ts", "src/**/*.tsx"]
 }
@@ -150,8 +151,8 @@ Create `src/app/MusicageApp.test.tsx`:
 import { render } from '@testing-library/react-native';
 import { MusicageApp } from './MusicageApp';
 
-it('renders the portrait visual-object shell', () => {
-  const screen = render(<MusicageApp />);
+it('renders the portrait visual-object shell', async () => {
+  const screen = await render(<MusicageApp />);
   expect(screen.getByTestId('musicage-root')).toBeTruthy();
   expect(screen.getByText('MUSICAGE')).toBeTruthy();
 });
@@ -172,7 +173,8 @@ Expected: FAIL because `MusicageApp` does not exist.
 Create `src/app/MusicageApp.tsx` and keep the initial implementation deliberately small:
 
 ```tsx
-import { SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 export function MusicageApp() {
   return (
@@ -541,7 +543,7 @@ it('starts a PCM stream after microphone permission is granted', async () => {
   const start = jest.fn().mockResolvedValue(undefined);
   (AudioModule.requestRecordingPermissionsAsync as jest.Mock).mockResolvedValue({ granted: true, canAskAgain: true });
   (useAudioStream as jest.Mock).mockReturnValue({ stream: { start, stop: jest.fn() }, isStreaming: false });
-  const { result } = renderHook(() => useMicrophoneAnalysis());
+  const { result } = await renderHook(() => useMicrophoneAnalysis());
 
   await act(async () => { await result.current.start(); });
 
@@ -656,14 +658,14 @@ import { JazzScene } from '../JazzScene';
 const ambient = { style: 'ambient' as const, intensity: 0.2, motion: 0.1, textScale: 0.95, accent: 0.1, changedAtMs: 0 };
 const jazz = { style: 'jazz' as const, intensity: 0.55, motion: 0.4, textScale: 1, accent: 0.3, changedAtMs: 0 };
 
-it('renders the forward landscape markers for Ambient', () => {
-  const screen = render(<AmbientScene visual={ambient} reducedMotion />);
+it('renders the forward landscape markers for Ambient', async () => {
+  const screen = await render(<AmbientScene visual={ambient} reducedMotion />);
   expect(screen.getByTestId('scene-ambient')).toBeTruthy();
   expect(screen.getByTestId('ambient-horizon-near')).toBeTruthy();
 });
 
-it('renders individual band-response markers for Jazz', () => {
-  const screen = render(<JazzScene visual={jazz} reducedMotion />);
+it('renders individual band-response markers for Jazz', async () => {
+  const screen = await render(<JazzScene visual={jazz} reducedMotion />);
   expect(screen.getByTestId('scene-jazz')).toBeTruthy();
   expect(screen.getByTestId('jazz-bass')).toBeTruthy();
   expect(screen.getByTestId('jazz-percussion')).toBeTruthy();
@@ -776,8 +778,8 @@ Append to `src/scenes/__tests__/SceneRenderer.test.tsx`:
 ```tsx
 import { SceneRenderer } from '../SceneRenderer';
 
-it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)('routes %s to one scene root', (style) => {
-  const screen = render(<SceneRenderer visual={{ style, intensity: 0.5, motion: 0.5, textScale: 1, accent: 0.5, changedAtMs: 0 }} reducedMotion />);
+it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)('routes %s to one scene root', async (style) => {
+  const screen = await render(<SceneRenderer visual={{ style, intensity: 0.5, motion: 0.5, textScale: 1, accent: 0.5, changedAtMs: 0 }} reducedMotion />);
   expect(screen.getByTestId(`scene-${style}`)).toBeTruthy();
 });
 ```
@@ -788,16 +790,16 @@ Create `src/components/__tests__/ListeningControls.test.tsx`:
 import { fireEvent, render } from '@testing-library/react-native';
 import { ListeningControls } from '../ListeningControls';
 
-it('offers retry when access is denied', () => {
+it('offers retry when access is denied', async () => {
   const onRetry = jest.fn();
-  const screen = render(<ListeningControls status="denied" errorMessage={null} onRetry={onRetry} onStart={jest.fn()} onStop={jest.fn()} />);
+  const screen = await render(<ListeningControls status="denied" errorMessage={null} onRetry={onRetry} onStart={jest.fn()} onStop={jest.fn()} />);
   fireEvent.press(screen.getByRole('button', { name: 'マイクをもう一度試す' }));
   expect(onRetry).toHaveBeenCalledTimes(1);
 });
 
-it('offers a stop control while listening', () => {
+it('offers a stop control while listening', async () => {
   const onStop = jest.fn();
-  const screen = render(<ListeningControls status="listening" errorMessage={null} onRetry={jest.fn()} onStart={jest.fn()} onStop={onStop} />);
+  const screen = await render(<ListeningControls status="listening" errorMessage={null} onRetry={jest.fn()} onStart={jest.fn()} onStop={onStop} />);
   fireEvent.press(screen.getByRole('button', { name: 'マイクを止める' }));
   expect(onStop).toHaveBeenCalledTimes(1);
 });
@@ -905,8 +907,8 @@ jest.mock('../audio/useMicrophoneAnalysis', () => ({
   }),
 }));
 
-it('composes a responsive visual scene without player controls', () => {
-  const screen = render(<MusicageApp />);
+it('composes a responsive visual scene without player controls', async () => {
+  const screen = await render(<MusicageApp />);
   expect(screen.getByTestId('musicage-root')).toBeTruthy();
   expect(screen.getByTestId('scene-dance')).toBeTruthy();
   expect(screen.getByText('VISUAL COPY')).toBeTruthy();

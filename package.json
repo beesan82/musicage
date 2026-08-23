@@ -1,0 +1,38 @@
+{
+  "name": "musicage",
+  "version": "0.1.0",
+  "description": "",
+  "main": "node_modules/expo/AppEntry.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "start": "expo start",
+    "start:tunnel": "expo start --tunnel",
+    "test": "jest --runInBand",
+    "test:watch": "jest --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "private": true,
+  "dependencies": {
+    "expo": "^57.0.15",
+    "expo-asset": "~57.0.13",
+    "expo-audio": "~57.0.4",
+    "expo-status-bar": "~57.0.1",
+    "fft.js": "^4.0.4",
+    "jest-expo": "~57.0.4",
+    "react": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-svg": "15.15.4"
+  },
+  "devDependencies": {
+    "@testing-library/react-native": "^14.0.1",
+    "@types/jest": "^29.5.14",
+    "typescript": "~6.0.3"
+  }
+}
