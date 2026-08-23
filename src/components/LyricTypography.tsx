@@ -12,7 +12,13 @@ const COPY_INDEX_BY_STYLE: Record<VisualStyle, number> = {
   rock: 2,
 };
 
-export function LyricTypography({ visual }: { visual: VisualState }) {
+export function LyricTypography({
+  visual,
+  reducedMotion = false,
+}: {
+  visual: VisualState;
+  reducedMotion?: boolean;
+}) {
   const expression = useRef(new Animated.Value(visual.intensity)).current;
   const copyLine = useMemo(
     () => SAMPLE_VISUAL_COPY[COPY_INDEX_BY_STYLE[visual.style]],
@@ -20,6 +26,11 @@ export function LyricTypography({ visual }: { visual: VisualState }) {
   );
 
   useEffect(() => {
+    if (reducedMotion) {
+      expression.setValue(visual.intensity);
+      return;
+    }
+
     const animation = Animated.timing(expression, {
       toValue: visual.intensity,
       duration: 720,
@@ -28,7 +39,7 @@ export function LyricTypography({ visual }: { visual: VisualState }) {
 
     animation.start();
     return () => animation.stop();
-  }, [expression, visual.intensity]);
+  }, [expression, reducedMotion, visual.intensity]);
 
   const opacity = expression.interpolate({
     inputRange: [0, 1],
