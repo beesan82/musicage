@@ -64,17 +64,17 @@ src/
     color.ts                             # Shared color interpolation helper
 ```
 
-## Task 1: Replace the preliminary bootstrap with an Expo Go–compatible foundation
+## Task 1: Create an Expo Go–compatible foundation
 
-The existing untracked `App.tsx`, `app.json`, and `package.json` are an earlier visual sketch. Replace them rather than preserving their music-player-style UI. Keep the approved spec and this plan untouched.
+The isolated worktree intentionally starts from the approved documentation commit and excludes the earlier untracked visual sketch. Create the application foundation afresh here; keep the approved spec and this plan untouched.
 
 **Files:**
 
-- Modify: `package.json`
-- Modify: `app.json`
+- Create: `package.json`
+- Create: `app.json`
 - Create: `tsconfig.json`
 - Create: `jest.config.js`
-- Modify: `App.tsx`
+- Create: `App.tsx`
 - Create: `src/app/MusicageApp.tsx`
 - Test: `src/app/MusicageApp.test.tsx`
 
@@ -89,6 +89,8 @@ The existing untracked `App.tsx`, `app.json`, and `package.json` are an earlier 
 Run from the repository root. Upgrade the preliminary SDK 53 sketch to SDK 57 first: Expo Go on physical iPhones only supports the current SDK, and `useAudioStream` is required for real-time PCM input.
 
 ```powershell
+npm init -y
+npm pkg set name="musicage" version="0.1.0" private=true main="node_modules/expo/AppEntry.js"
 npm install expo@^57.0.0
 npx expo install --fix
 npx expo install expo-audio expo-status-bar react-native-svg
