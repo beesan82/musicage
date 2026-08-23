@@ -1,7 +1,9 @@
 import { act, render } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 
 import { AmbientScene } from '../AmbientScene';
 import { JazzScene } from '../JazzScene';
+import { SceneRenderer } from '../SceneRenderer';
 import { LyricTypography } from '../../components/LyricTypography';
 
 const ambient = {
@@ -54,4 +56,49 @@ it('labels the local typography as visual copy rather than lyrics', async () => 
   } finally {
     jest.useRealTimers();
   }
+});
+
+it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)(
+  'routes %s to one scene root',
+  async (style) => {
+    const screen = await render(
+      <SceneRenderer
+        visual={{
+          style,
+          intensity: 0.5,
+          motion: 0.5,
+          textScale: 1,
+          accent: 0.5,
+          changedAtMs: 0,
+        }}
+        reducedMotion
+      />,
+    );
+
+    expect(screen.getByTestId(`scene-${style}`)).toBeTruthy();
+  },
+);
+
+it('keeps the Pop poster card tilt while it responds to motion', async () => {
+  const screen = await render(
+    <SceneRenderer
+      visual={{
+        style: 'pop',
+        intensity: 0.5,
+        motion: 0.5,
+        textScale: 1,
+        accent: 0.5,
+        changedAtMs: 0,
+      }}
+      reducedMotion
+    />,
+  );
+
+  const style = StyleSheet.flatten(
+    screen.getByTestId('pop-card-pink').props.style,
+  );
+
+  expect(style.transform).toEqual(
+    expect.arrayContaining([{ rotate: '8deg' }]),
+  );
 });
