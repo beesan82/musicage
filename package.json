@@ -19,8 +19,8 @@
   "type": "commonjs",
   "private": true,
   "dependencies": {
-    "expo": "^57.0.15",
-    "expo-asset": "~57.0.13",
+    "expo": "~57.0.16",
+    "expo-asset": "~57.0.14",
     "expo-audio": "~57.0.4",
     "expo-status-bar": "~57.0.1",
     "fft.js": "^4.0.4",
