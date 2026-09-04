@@ -144,7 +144,17 @@ export function useSongRecognition({
       const token = await getAudDToken();
 
       if (mountedRef.current) {
-        setHasToken(hasUsableToken(token));
+        const tokenIsUsable = hasUsableToken(token);
+
+        setHasToken(tokenIsUsable);
+
+        if (tokenIsUsable) {
+          setState((current) => (
+            current.phase === 'setup_required'
+              ? idleState(lastSuccessfulResultRef.current)
+              : current
+          ));
+        }
       }
     } catch {
       if (mountedRef.current) {

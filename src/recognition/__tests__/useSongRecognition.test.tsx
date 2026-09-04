@@ -132,6 +132,29 @@ describe('useSongRecognition', () => {
     expect(deleteTemporaryRecording).not.toHaveBeenCalled();
   });
 
+  it('returns to an idle recognition action after a token is saved from setup', async () => {
+    (getAudDToken as jest.Mock).mockResolvedValue(null);
+    const { result } = await renderRecognition();
+
+    await act(async () => {
+      await result.current.recognize();
+    });
+    expect(result.current.state.phase).toBe('setup_required');
+
+    (getAudDToken as jest.Mock).mockResolvedValue('owner-token');
+    await act(async () => {
+      await result.current.refreshTokenPresence();
+    });
+
+    expect(result.current.hasToken).toBe(true);
+    expect(result.current.state).toEqual({
+      phase: 'idle',
+      result: null,
+      message: null,
+      retryable: false,
+    });
+  });
+
   it('pauses the meter, captures, resumes, resolves once, and deletes the clip on success', async () => {
     const events: string[] = [];
     pauseForRecognition.mockImplementation(async () => {

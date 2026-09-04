@@ -1,12 +1,23 @@
-import { render } from '@testing-library/react-native';
+import { fireEvent, render } from '@testing-library/react-native';
 
 import type { AudioFeatures } from '../audio/types';
 import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import type { ListeningStatus, MicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
+import { useSongRecognition } from '../recognition/useSongRecognition';
+import type { SongRecognition } from '../recognition/useSongRecognition';
 import { MusicageApp } from './MusicageApp';
 
 jest.mock('../audio/useMicrophoneAnalysis', () => ({
   useMicrophoneAnalysis: jest.fn(),
+}));
+
+jest.mock('../recognition/useSongRecognition', () => ({
+  useSongRecognition: jest.fn(),
+}));
+
+jest.mock('../recognition/tokenStore', () => ({
+  clearAudDToken: jest.fn(),
+  saveAudDToken: jest.fn(),
 }));
 
 const silentFeatures: AudioFeatures = {
@@ -18,6 +29,9 @@ const silentFeatures: AudioFeatures = {
   transient: 0,
   silence: true,
 };
+
+const nowPlayingCopy = ['NOW', 'PLAYING'].join(' ');
+const visualCopy = ['VISUAL', 'COPY'].join(' ');
 
 const createAnalysis = (
   status: ListeningStatus,
@@ -34,9 +48,23 @@ const createAnalysis = (
   resumeAfterRecognition: jest.fn().mockResolvedValue(undefined),
 });
 
+const createRecognition = (): SongRecognition => ({
+  state: {
+    phase: 'idle',
+    result: null,
+    message: null,
+    retryable: false,
+  },
+  hasToken: false,
+  recognize: jest.fn(),
+  retry: jest.fn(),
+  refreshTokenPresence: jest.fn().mockResolvedValue(undefined),
+});
+
 describe('MusicageApp', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    (useSongRecognition as jest.Mock).mockReturnValue(createRecognition());
   });
 
   it('renders the visual-object shell and starts microphone analysis', async () => {
@@ -63,7 +91,7 @@ describe('MusicageApp', () => {
     expect(screen.getByTestId('scene-ambient')).toBeTruthy();
   });
 
-  it('composes a responsive visual scene without player controls', async () => {
+  it('composes a responsive visual scene with truthful idle copy and no player controls', async () => {
     (useMicrophoneAnalysis as jest.Mock).mockReturnValue(
       createAnalysis('listening', jest.fn(), {
         timestampMs: 0,
@@ -79,16 +107,29 @@ describe('MusicageApp', () => {
 
     expect(screen.getByTestId('musicage-root')).toBeTruthy();
     expect(screen.getByTestId('scene-dance')).toBeTruthy();
-    expect(screen.getByText('VISUAL COPY')).toBeTruthy();
+    expect(screen.getByText('曲を読み取ると、ここに実際の歌詞が表示されます。')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '曲を読み取る' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'マイクを止める' })).toBeTruthy();
-    expect(screen.queryByText('NOW PLAYING')).toBeNull();
+    expect(screen.queryByText(nowPlayingCopy)).toBeNull();
+    expect(screen.queryByText(visualCopy)).toBeNull();
   });
 
   it('keeps the visual object free of playback controls after audio migration', async () => {
     (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
     const screen = await render(<MusicageApp reducedMotion />);
 
-    expect(screen.queryByText('NOW PLAYING')).toBeNull();
+    expect(screen.queryByText(nowPlayingCopy)).toBeNull();
     expect(screen.queryByRole('button', { name: /再生|pause|play/i })).toBeNull();
+  });
+
+  it('starts local metering on mount but recognition only after an explicit press', async () => {
+    const recognition = createRecognition();
+    (useSongRecognition as jest.Mock).mockReturnValue(recognition);
+    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
+    const screen = await render(<MusicageApp reducedMotion />);
+
+    expect(recognition.recognize).not.toHaveBeenCalled();
+    fireEvent.press(screen.getByRole('button', { name: '曲を読み取る' }));
+    expect(recognition.recognize).toHaveBeenCalledTimes(1);
   });
 });
