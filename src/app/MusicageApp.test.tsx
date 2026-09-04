@@ -83,4 +83,12 @@ describe('MusicageApp', () => {
     expect(screen.getByRole('button', { name: 'マイクを止める' })).toBeTruthy();
     expect(screen.queryByText('NOW PLAYING')).toBeNull();
   });
+
+  it('keeps the visual object free of playback controls after audio migration', async () => {
+    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
+    const screen = await render(<MusicageApp reducedMotion />);
+
+    expect(screen.queryByText('NOW PLAYING')).toBeNull();
+    expect(screen.queryByRole('button', { name: /再生|pause|play/i })).toBeNull();
+  });
 });

@@ -80,10 +80,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#101112',
   },
   sceneLayer: {
-    ...StyleSheet.absoluteFill,
+    ...StyleSheet.absoluteFillObject,
   },
   scrim: {
-    ...StyleSheet.absoluteFill,
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: '#0B0C0C',
     opacity: 0.2,
   },

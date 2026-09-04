@@ -5,7 +5,7 @@ import {
   useAudioRecorder,
   useAudioRecorderState,
 } from 'expo-audio';
-import type { RecordingStatus } from 'expo-audio';
+import type { RecorderState, RecordingStatus } from 'expo-audio';
 import { AppState } from 'react-native';
 import type { AppStateStatus } from 'react-native';
 
@@ -25,7 +25,7 @@ jest.mock('../deleteTemporaryRecording', () => ({
 }));
 
 type RecorderDouble = {
-  id: string;
+  id: number;
   isRecording: boolean;
   uri: string | null;
   prepareToRecordAsync: jest.Mock;
@@ -48,6 +48,7 @@ describe('useMicrophoneAnalysis', () => {
   let prepareToRecordAsync: jest.Mock;
   let record: jest.Mock;
   let recorder: RecorderDouble;
+  let meterState: RecorderState;
   let statusListener: ((status: RecordingStatus) => void) | undefined;
   let stopRecording: jest.Mock;
 
@@ -75,7 +76,7 @@ describe('useMicrophoneAnalysis', () => {
       recorder.isRecording = false;
     });
     recorder = {
-      id: 'meter-recorder',
+      id: 1,
       isRecording: false,
       uri: 'file:///cache/meter-a.m4a',
       prepareToRecordAsync,
@@ -101,14 +102,15 @@ describe('useMicrophoneAnalysis', () => {
       statusListener = listener;
       return recorder;
     });
-    (useAudioRecorderState as jest.Mock).mockImplementation(() => ({
+    meterState = {
       canRecord: true,
       durationMillis: 0,
       isRecording: recorder.isRecording,
       mediaServicesDidReset: false,
       metering: -8,
       url: recorder.uri,
-    }));
+    };
+    (useAudioRecorderState as jest.Mock).mockImplementation(() => meterState);
     jest.spyOn(AppState, 'addEventListener').mockImplementation((_eventType, listener) => {
       appStateListener = listener;
       return { remove: jest.fn() } as ReturnType<typeof AppState.addEventListener>;
@@ -280,10 +282,7 @@ describe('useMicrophoneAnalysis', () => {
     expect(result.current.status).toBe('listening');
   });
 
-  it.each([
-    { error: 'native interruption', hasError: true, mediaServicesDidReset: false },
-    { error: null, hasError: false, mediaServicesDidReset: true },
-  ])('cleans the active segment and enters recovery after native recorder status %#', async (nativeStatus) => {
+  it('cleans the active segment and enters recovery after a native recorder error', async () => {
     jest.useFakeTimers();
     const { result } = await renderHook(() => useMicrophoneAnalysis());
 
@@ -294,13 +293,39 @@ describe('useMicrophoneAnalysis', () => {
 
     await act(async () => {
       statusListener?.({
-        id: 'meter-recorder',
+        id: 1,
         isFinished: false,
-        hasError: nativeStatus.hasError,
-        error: nativeStatus.error,
-        mediaServicesDidReset: nativeStatus.mediaServicesDidReset,
+        hasError: true,
+        error: 'native interruption',
         url: 'file:///cache/meter-a.m4a',
       });
+      await flushMicrotasks();
+    });
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(stopRecording).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe('error');
+    expect(result.current.errorMessage).toBe(MICROPHONE_ERROR_MESSAGE);
+    expect(result.current.features).toMatchObject({ energy: 0, silence: true });
+
+    await act(async () => {
+      jest.advanceTimersByTime(45_000);
+      await flushMicrotasks();
+    });
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans the active segment and enters recovery after a media-services reset', async () => {
+    jest.useFakeTimers();
+    const { result, rerender } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    await act(async () => {
+      meterState = { ...meterState, mediaServicesDidReset: true };
+      rerender(undefined);
       await flushMicrotasks();
     });
 
@@ -327,7 +352,7 @@ describe('useMicrophoneAnalysis', () => {
 
     await act(async () => {
       statusListener?.({
-        id: 'meter-recorder',
+        id: 1,
         isFinished: true,
         hasError: false,
         error: null,
@@ -353,7 +378,7 @@ describe('useMicrophoneAnalysis', () => {
       eventLog.push('stop');
       recorder.isRecording = false;
       statusListener?.({
-        id: 'meter-recorder',
+        id: 1,
         isFinished: true,
         hasError: false,
         error: null,

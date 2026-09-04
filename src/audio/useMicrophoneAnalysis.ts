@@ -66,7 +66,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   const appStateRef = useRef(AppState.currentState ?? 'active');
   const mountedRef = useRef(true);
   const nativeFailureHandlerRef = useRef<(() => void) | null>(null);
-  const recorderIdRef = useRef<string | null>(null);
+  const recorderIdRef = useRef<number | null>(null);
   const expectedFinishedUrisRef = useRef(new Set<string>());
   const recognitionPauseRef = useRef(false);
   const resumeWhenActiveRef = useRef(false);
@@ -100,7 +100,6 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
       && expectedFinishedUrisRef.current.delete(nativeStatus.url);
     const failed = nativeStatus.hasError
       || nativeStatus.error !== null
-      || nativeStatus.mediaServicesDidReset === true
       || (nativeStatus.isFinished && !expectedFinish);
 
     if (
