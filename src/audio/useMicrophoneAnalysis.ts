@@ -67,6 +67,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   const mountedRef = useRef(true);
   const nativeFailureHandlerRef = useRef<(() => void) | null>(null);
   const recorderIdRef = useRef<string | null>(null);
+  const expectedFinishedUrisRef = useRef(new Set<string>());
   const recognitionPauseRef = useRef(false);
   const resumeWhenActiveRef = useRef(false);
   const rotationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -94,9 +95,13 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
 
   const onNativeRecorderStatus = useCallback((nativeStatus: RecordingStatus) => {
     const recorderId = recorderIdRef.current;
+    const expectedFinish = nativeStatus.isFinished
+      && nativeStatus.url !== null
+      && expectedFinishedUrisRef.current.delete(nativeStatus.url);
     const failed = nativeStatus.hasError
       || nativeStatus.error !== null
-      || nativeStatus.mediaServicesDidReset === true;
+      || nativeStatus.mediaServicesDidReset === true
+      || (nativeStatus.isFinished && !expectedFinish);
 
     if (
       !mountedRef.current
@@ -129,9 +134,16 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     let stopError: unknown;
 
     if (meterRecorder.isRecording) {
+      if (uri) {
+        expectedFinishedUrisRef.current.add(uri);
+      }
+
       try {
         await meterRecorder.stop();
       } catch (error) {
+        if (uri) {
+          expectedFinishedUrisRef.current.delete(uri);
+        }
         stopError = error;
       }
     }
@@ -419,6 +431,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
       mountedRef.current = false;
       startAttemptRef.current += 1;
       clearRotationTimer();
+      expectedFinishedUrisRef.current.clear();
       subscription.remove();
       void stopAndDeleteMeterSegment().catch(() => undefined);
       processor.reset();

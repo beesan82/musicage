@@ -317,6 +317,71 @@ describe('useMicrophoneAnalysis', () => {
     expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
   });
 
+  it('cleans the active segment when the recorder unexpectedly finishes without an error', async () => {
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    await act(async () => {
+      statusListener?.({
+        id: 'meter-recorder',
+        isFinished: true,
+        hasError: false,
+        error: null,
+        url: 'file:///cache/meter-a.m4a',
+      });
+      await flushMicrotasks();
+    });
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(result.current.status).toBe('error');
+    expect(result.current.errorMessage).toBe(MICROPHONE_ERROR_MESSAGE);
+
+    await act(async () => {
+      jest.advanceTimersByTime(45_000);
+      await flushMicrotasks();
+    });
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores the expected finished status emitted by its own segment rotation', async () => {
+    jest.useFakeTimers();
+    stopRecording.mockImplementationOnce(async () => {
+      eventLog.push('stop');
+      recorder.isRecording = false;
+      statusListener?.({
+        id: 'meter-recorder',
+        isFinished: true,
+        hasError: false,
+        error: null,
+        url: recorder.uri,
+      });
+    });
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+    eventLog = [];
+
+    await act(async () => {
+      jest.advanceTimersByTime(45_000);
+      await flushMicrotasks();
+    });
+
+    expect(eventLog).toEqual([
+      'stop',
+      'delete:file:///cache/meter-a.m4a',
+      'prepare',
+      'record',
+    ]);
+    expect(result.current.status).toBe('listening');
+    expect(recorder.isRecording).toBe(true);
+  });
+
   it('deletes and leaves a non-resumable recovery state when recognition pause stop rejects', async () => {
     stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
     const { result } = await renderHook(() => useMicrophoneAnalysis());
