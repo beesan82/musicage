@@ -1,10 +1,11 @@
-import { act, renderHook, waitFor } from '@testing-library/react-native';
+import { act, renderHook } from '@testing-library/react-native';
 import {
   AudioModule,
   setAudioModeAsync,
   useAudioRecorder,
   useAudioRecorderState,
 } from 'expo-audio';
+import type { RecordingStatus } from 'expo-audio';
 import { AppState } from 'react-native';
 import type { AppStateStatus } from 'react-native';
 
@@ -23,61 +24,99 @@ jest.mock('../deleteTemporaryRecording', () => ({
   deleteTemporaryRecording: jest.fn(),
 }));
 
+type RecorderDouble = {
+  id: string;
+  isRecording: boolean;
+  uri: string | null;
+  prepareToRecordAsync: jest.Mock;
+  record: jest.Mock;
+  stop: jest.Mock;
+};
+
+const MICROPHONE_ERROR_MESSAGE =
+  'マイクを開始できませんでした。もう一度試してください。';
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe('useMicrophoneAnalysis', () => {
-  let prepareToRecordAsync: jest.Mock;
-  let record: jest.Mock;
-  let stopRecording: jest.Mock;
-  let recorder: {
-    isRecording: boolean;
-    uri: string | null;
-    prepareToRecordAsync: jest.Mock;
-    record: jest.Mock;
-    stop: jest.Mock;
-  };
   let appStateDescriptor: PropertyDescriptor | undefined;
   let appStateListener: ((state: AppStateStatus) => void) | undefined;
+  let eventLog: string[];
+  let prepareToRecordAsync: jest.Mock;
+  let record: jest.Mock;
+  let recorder: RecorderDouble;
+  let statusListener: ((status: RecordingStatus) => void) | undefined;
+  let stopRecording: jest.Mock;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    prepareToRecordAsync = jest.fn().mockResolvedValue(undefined);
-    record = jest.fn();
-    stopRecording = jest.fn().mockResolvedValue(undefined);
+    eventLog = [];
+    const preparedUris = [
+      'file:///cache/meter-a.m4a',
+      'file:///cache/meter-b.m4a',
+      'file:///cache/meter-c.m4a',
+    ];
+    let prepareCount = 0;
+
+    prepareToRecordAsync = jest.fn().mockImplementation(async () => {
+      recorder.uri = preparedUris[prepareCount] ?? `file:///cache/meter-${prepareCount}.m4a`;
+      prepareCount += 1;
+      eventLog.push('prepare');
+    });
+    record = jest.fn(() => {
+      recorder.isRecording = true;
+      eventLog.push('record');
+    });
+    stopRecording = jest.fn().mockImplementation(async () => {
+      eventLog.push('stop');
+      recorder.isRecording = false;
+    });
     recorder = {
+      id: 'meter-recorder',
       isRecording: false,
-      uri: 'file:///cache/meter.m4a',
+      uri: 'file:///cache/meter-a.m4a',
       prepareToRecordAsync,
       record,
       stop: stopRecording,
     };
+
+    (deleteTemporaryRecording as jest.Mock).mockImplementation((uri: string | null) => {
+      eventLog.push(`delete:${uri}`);
+    });
     appStateDescriptor = Object.getOwnPropertyDescriptor(AppState, 'currentState');
     Object.defineProperty(AppState, 'currentState', {
       configurable: true,
       value: 'active',
       writable: true,
     });
-
     (AudioModule.requestRecordingPermissionsAsync as jest.Mock).mockResolvedValue({
       granted: true,
       canAskAgain: true,
     });
     (setAudioModeAsync as jest.Mock).mockResolvedValue(undefined);
-    (useAudioRecorder as jest.Mock).mockReturnValue(recorder);
-    (useAudioRecorderState as jest.Mock).mockReturnValue({
+    (useAudioRecorder as jest.Mock).mockImplementation((_options, listener) => {
+      statusListener = listener;
+      return recorder;
+    });
+    (useAudioRecorderState as jest.Mock).mockImplementation(() => ({
       canRecord: true,
       durationMillis: 0,
-      isRecording: false,
+      isRecording: recorder.isRecording,
       mediaServicesDidReset: false,
       metering: -8,
       url: recorder.uri,
-    });
+    }));
     jest.spyOn(AppState, 'addEventListener').mockImplementation((_eventType, listener) => {
       appStateListener = listener;
-
       return { remove: jest.fn() } as ReturnType<typeof AppState.addEventListener>;
     });
   });
 
   afterEach(() => {
+    jest.useRealTimers();
     jest.restoreAllMocks();
 
     if (appStateDescriptor) {
@@ -100,9 +139,8 @@ describe('useMicrophoneAnalysis', () => {
       playsInSilentMode: true,
     });
     expect(useAudioRecorderState).toHaveBeenCalledWith(recorder, 120);
-    expect(prepareToRecordAsync.mock.invocationCallOrder[0]).toBeLessThan(
-      record.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
-    );
+    expect(eventLog).toEqual(['prepare', 'record']);
+    expect(recorder.isRecording).toBe(true);
     expect(result.current.status).toBe('listening');
     expect(result.current.features.energy).toBeGreaterThan(0);
     expect(result.current.features.silence).toBe(false);
@@ -141,79 +179,256 @@ describe('useMicrophoneAnalysis', () => {
     });
 
     expect(result.current.status).toBe('error');
-    expect(result.current.errorMessage).toBe(
-      'マイクを開始できませんでした。もう一度試してください。',
-    );
+    expect(result.current.errorMessage).toBe(MICROPHONE_ERROR_MESSAGE);
   });
 
-  it('deletes the meter segment after an explicit stop', async () => {
-    const hook = await renderHook(() => useMicrophoneAnalysis());
+  it('rotates one segment in stop, delete, prepare, record order after 45 seconds', async () => {
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
 
     await act(async () => {
-      await hook.result.current.start();
+      await result.current.start();
     });
-    recorder.isRecording = true;
+    eventLog = [];
 
     await act(async () => {
-      hook.result.current.stop();
+      jest.advanceTimersByTime(45_000);
+      await flushMicrotasks();
     });
 
-    await waitFor(() => {
-      expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
-    });
-    expect(stopRecording).toHaveBeenCalledTimes(1);
+    expect(eventLog).toEqual([
+      'stop',
+      'delete:file:///cache/meter-a.m4a',
+      'prepare',
+      'record',
+    ]);
+    expect(result.current.status).toBe('listening');
+    expect(recorder.isRecording).toBe(true);
   });
 
-  it('deletes the meter segment when the native stop reports an error', async () => {
-    stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
-    const hook = await renderHook(() => useMicrophoneAnalysis());
+  it('waits for a deferred stop before a new explicit start can prepare the shared recorder', async () => {
+    let resolveStop: (() => void) | undefined;
+    stopRecording.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveStop = () => {
+        recorder.isRecording = false;
+        resolve();
+      };
+    }));
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
 
     await act(async () => {
-      await hook.result.current.start();
+      await result.current.start();
     });
-    recorder.isRecording = true;
 
+    let restarted: Promise<void> | undefined;
     await act(async () => {
-      hook.result.current.stop();
+      result.current.stop();
+      restarted = result.current.start();
+      await flushMicrotasks();
     });
 
-    await waitFor(() => {
-      expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
-    });
+    try {
+      expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
+      expect(resolveStop).toBeDefined();
+    } finally {
+      await act(async () => {
+        resolveStop?.();
+        await restarted;
+      });
+    }
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(2);
+    expect(record).toHaveBeenCalledTimes(2);
+    expect(recorder.isRecording).toBe(true);
+    expect(result.current.status).toBe('listening');
   });
 
-  it('deletes the meter segment after an AppState background transition', async () => {
-    const hook = await renderHook(() => useMicrophoneAnalysis());
+  it('waits for background cleanup before automatic foreground recovery records again', async () => {
+    let resolveStop: (() => void) | undefined;
+    stopRecording.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveStop = () => {
+        recorder.isRecording = false;
+        resolve();
+      };
+    }));
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
 
     await act(async () => {
-      await hook.result.current.start();
+      await result.current.start();
     });
-    recorder.isRecording = true;
 
     await act(async () => {
       appStateListener?.('background');
-      await Promise.resolve();
+      appStateListener?.('active');
+      await flushMicrotasks();
     });
 
-    await waitFor(() => {
-      expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
-    });
-    expect(stopRecording).toHaveBeenCalledTimes(1);
+    try {
+      expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
+      expect(resolveStop).toBeDefined();
+    } finally {
+      await act(async () => {
+        resolveStop?.();
+        await flushMicrotasks();
+      });
+    }
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(2);
+    expect(recorder.isRecording).toBe(true);
+    expect(result.current.status).toBe('listening');
   });
 
-  it('deletes the active meter segment on unmount', async () => {
+  it.each([
+    { error: 'native interruption', hasError: true, mediaServicesDidReset: false },
+    { error: null, hasError: false, mediaServicesDidReset: true },
+  ])('cleans the active segment and enters recovery after native recorder status %#', async (nativeStatus) => {
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(statusListener).toEqual(expect.any(Function));
+
+    await act(async () => {
+      statusListener?.({
+        id: 'meter-recorder',
+        isFinished: false,
+        hasError: nativeStatus.hasError,
+        error: nativeStatus.error,
+        mediaServicesDidReset: nativeStatus.mediaServicesDidReset,
+        url: 'file:///cache/meter-a.m4a',
+      });
+      await flushMicrotasks();
+    });
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(stopRecording).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe('error');
+    expect(result.current.errorMessage).toBe(MICROPHONE_ERROR_MESSAGE);
+    expect(result.current.features).toMatchObject({ energy: 0, silence: true });
+
+    await act(async () => {
+      jest.advanceTimersByTime(45_000);
+      await flushMicrotasks();
+    });
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes and leaves a non-resumable recovery state when recognition pause stop rejects', async () => {
+    stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    let shouldResume: boolean | undefined;
+    await act(async () => {
+      shouldResume = await result.current.pauseForRecognition();
+    });
+
+    expect(shouldResume).toBe(false);
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(result.current.status).toBe('error');
+    expect(result.current.errorMessage).toBe(MICROPHONE_ERROR_MESSAGE);
+
+    await act(async () => {
+      await result.current.resumeAfterRecognition(true);
+    });
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the fixed startup error after cleanup stop rejects', async () => {
+    recorder.isRecording = true;
+    stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
+    (setAudioModeAsync as jest.Mock).mockRejectedValueOnce(new Error('audio mode failure'));
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(result.current.status).toBe('error');
+    expect(result.current.errorMessage).toBe(MICROPHONE_ERROR_MESSAGE);
+  });
+
+  it('keeps an explicit user stop idle when native stop rejects', async () => {
+    stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      result.current.stop();
+      await flushMicrotasks();
+    });
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(result.current.status).toBe('idle');
+  });
+
+  it('keeps a backgrounded recorder idle when native stop rejects', async () => {
+    stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      appStateListener?.('background');
+      await flushMicrotasks();
+    });
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(result.current.status).toBe('idle');
+  });
+
+  it('deletes the meter segment after an explicit stop and does not revive it from an obsolete timer', async () => {
+    jest.useFakeTimers();
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      result.current.stop();
+      await flushMicrotasks();
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(45_000);
+      await flushMicrotasks();
+    });
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(stopRecording).toHaveBeenCalledTimes(1);
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe('idle');
+  });
+
+  it('deletes the active meter segment on unmount without letting its timer start another segment', async () => {
+    jest.useFakeTimers();
     const { result, unmount } = await renderHook(() => useMicrophoneAnalysis());
 
     await act(async () => {
       await result.current.start();
     });
-    recorder.isRecording = true;
-    unmount();
-
-    await waitFor(() => {
-      expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
+    await act(async () => {
+      unmount();
+      await flushMicrotasks();
     });
-    expect(stopRecording).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      jest.advanceTimersByTime(45_000);
+      await flushMicrotasks();
+    });
+
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
+    expect(stopRecording).toHaveBeenCalled();
+    expect(eventLog).toEqual(['prepare', 'record', 'stop', 'delete:file:///cache/meter-a.m4a']);
   });
 
   it('pauses for recognition and resumes only when the handoff owns an active meter', async () => {
@@ -222,7 +437,6 @@ describe('useMicrophoneAnalysis', () => {
     await act(async () => {
       await result.current.start();
     });
-    recorder.isRecording = true;
 
     let shouldResume: boolean | undefined;
     await act(async () => {
@@ -231,7 +445,7 @@ describe('useMicrophoneAnalysis', () => {
 
     expect(shouldResume).toBe(true);
     expect(stopRecording).toHaveBeenCalledTimes(1);
-    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
 
     await act(async () => {
       await result.current.resumeAfterRecognition(true);
