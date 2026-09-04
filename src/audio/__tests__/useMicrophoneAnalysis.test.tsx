@@ -1,30 +1,54 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
-import { AudioModule, setAudioModeAsync, useAudioStream } from 'expo-audio';
-import type { AudioStreamOptions } from 'expo-audio';
+import {
+  AudioModule,
+  setAudioModeAsync,
+  useAudioRecorder,
+  useAudioRecorderState,
+} from 'expo-audio';
 import { AppState } from 'react-native';
 import type { AppStateStatus } from 'react-native';
 
+import { deleteTemporaryRecording } from '../deleteTemporaryRecording';
 import { useMicrophoneAnalysis } from '../useMicrophoneAnalysis';
 
 jest.mock('expo-audio', () => ({
   AudioModule: { requestRecordingPermissionsAsync: jest.fn() },
+  RecordingPresets: { LOW_QUALITY: { isMeteringEnabled: false } },
   setAudioModeAsync: jest.fn(),
-  useAudioStream: jest.fn(),
+  useAudioRecorder: jest.fn(),
+  useAudioRecorderState: jest.fn(),
+}));
+
+jest.mock('../deleteTemporaryRecording', () => ({
+  deleteTemporaryRecording: jest.fn(),
 }));
 
 describe('useMicrophoneAnalysis', () => {
-  let audioStreamOptions: AudioStreamOptions | undefined;
-  let start: jest.Mock;
-  let stop: jest.Mock;
-  let stream: { start: jest.Mock; stop: jest.Mock };
+  let prepareToRecordAsync: jest.Mock;
+  let record: jest.Mock;
+  let stopRecording: jest.Mock;
+  let recorder: {
+    isRecording: boolean;
+    uri: string | null;
+    prepareToRecordAsync: jest.Mock;
+    record: jest.Mock;
+    stop: jest.Mock;
+  };
   let appStateDescriptor: PropertyDescriptor | undefined;
+  let appStateListener: ((state: AppStateStatus) => void) | undefined;
 
   beforeEach(() => {
     jest.clearAllMocks();
-    audioStreamOptions = undefined;
-    start = jest.fn().mockResolvedValue(undefined);
-    stop = jest.fn();
-    stream = { start, stop };
+    prepareToRecordAsync = jest.fn().mockResolvedValue(undefined);
+    record = jest.fn();
+    stopRecording = jest.fn().mockResolvedValue(undefined);
+    recorder = {
+      isRecording: false,
+      uri: 'file:///cache/meter.m4a',
+      prepareToRecordAsync,
+      record,
+      stop: stopRecording,
+    };
     appStateDescriptor = Object.getOwnPropertyDescriptor(AppState, 'currentState');
     Object.defineProperty(AppState, 'currentState', {
       configurable: true,
@@ -37,13 +61,19 @@ describe('useMicrophoneAnalysis', () => {
       canAskAgain: true,
     });
     (setAudioModeAsync as jest.Mock).mockResolvedValue(undefined);
-    (useAudioStream as jest.Mock).mockImplementation((options: AudioStreamOptions) => {
-      audioStreamOptions = options;
+    (useAudioRecorder as jest.Mock).mockReturnValue(recorder);
+    (useAudioRecorderState as jest.Mock).mockReturnValue({
+      canRecord: true,
+      durationMillis: 0,
+      isRecording: false,
+      mediaServicesDidReset: false,
+      metering: -8,
+      url: recorder.uri,
+    });
+    jest.spyOn(AppState, 'addEventListener').mockImplementation((_eventType, listener) => {
+      appStateListener = listener;
 
-      return {
-        stream,
-        isStreaming: false,
-      };
+      return { remove: jest.fn() } as ReturnType<typeof AppState.addEventListener>;
     });
   });
 
@@ -56,43 +86,24 @@ describe('useMicrophoneAnalysis', () => {
     }
   });
 
-  it('starts a PCM stream after microphone permission is granted', async () => {
+  it('prepares then records with non-silent meter features after permission is granted', async () => {
     const { result } = await renderHook(() => useMicrophoneAnalysis());
 
     await act(async () => {
       await result.current.start();
     });
 
-    expect(setAudioModeAsync).toHaveBeenCalledWith(
-      expect.objectContaining({
-        allowsRecording: true,
-        playsInSilentMode: true,
-      }),
+    expect(setAudioModeAsync).toHaveBeenCalledWith({
+      allowsRecording: true,
+      allowsBackgroundRecording: false,
+      interruptionMode: 'mixWithOthers',
+      playsInSilentMode: true,
+    });
+    expect(useAudioRecorderState).toHaveBeenCalledWith(recorder, 120);
+    expect(prepareToRecordAsync.mock.invocationCallOrder[0]).toBeLessThan(
+      record.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
-    expect(start).toHaveBeenCalledTimes(1);
     expect(result.current.status).toBe('listening');
-  });
-
-  it('turns microphone PCM buffers into local audio features', async () => {
-    const { result } = await renderHook(() => useMicrophoneAnalysis());
-    const samples = new Float32Array(2_048).fill(0.5);
-
-    expect(useAudioStream).toHaveBeenCalledTimes(1);
-
-    await act(() => {
-      audioStreamOptions?.onBuffer?.({
-        data: samples.buffer,
-        sampleRate: 48_000,
-        channels: 1,
-        timestamp: 1,
-      });
-    });
-
-    expect(audioStreamOptions).toMatchObject({
-      sampleRate: 48_000,
-      channels: 1,
-      encoding: 'float32',
-    });
     expect(result.current.features.energy).toBeGreaterThan(0);
     expect(result.current.features.silence).toBe(false);
   });
@@ -108,7 +119,7 @@ describe('useMicrophoneAnalysis', () => {
       await result.current.start();
     });
 
-    expect(start).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
     expect(result.current.status).toBe('denied');
     expect(result.current.errorMessage).toBeNull();
     expect(result.current.features).toMatchObject({
@@ -135,96 +146,112 @@ describe('useMicrophoneAnalysis', () => {
     );
   });
 
-  it('stops the native stream and clears the visual features', async () => {
-    const { result } = await renderHook(() => useMicrophoneAnalysis());
-    const samples = new Float32Array(2_048).fill(0.5);
+  it('deletes the meter segment after an explicit stop', async () => {
+    const hook = await renderHook(() => useMicrophoneAnalysis());
 
     await act(async () => {
-      await result.current.start();
-      audioStreamOptions?.onBuffer?.({
-        data: samples.buffer,
-        sampleRate: 48_000,
-        channels: 1,
-        timestamp: 1,
-      });
+      await hook.result.current.start();
     });
-    await act(() => {
-      result.current.stop();
+    recorder.isRecording = true;
+
+    await act(async () => {
+      hook.result.current.stop();
     });
 
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(result.current.status).toBe('idle');
-    expect(result.current.features.silence).toBe(true);
-    expect(result.current.features.energy).toBe(0);
+    await waitFor(() => {
+      expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
+    });
+    expect(stopRecording).toHaveBeenCalledTimes(1);
   });
 
-  it('pauses in the background and resumes only after an active listening state', async () => {
-    const remove = jest.fn();
-    let appStateListener: ((state: AppStateStatus) => void) | undefined;
+  it('deletes the meter segment when the native stop reports an error', async () => {
+    stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
+    const hook = await renderHook(() => useMicrophoneAnalysis());
 
-    jest.spyOn(AppState, 'addEventListener').mockImplementation((_eventType, listener) => {
-      appStateListener = listener;
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    recorder.isRecording = true;
 
-      return { remove } as ReturnType<typeof AppState.addEventListener>;
+    await act(async () => {
+      hook.result.current.stop();
     });
 
+    await waitFor(() => {
+      expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
+    });
+  });
+
+  it('deletes the meter segment after an AppState background transition', async () => {
+    const hook = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    recorder.isRecording = true;
+
+    await act(async () => {
+      appStateListener?.('background');
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
+    });
+    expect(stopRecording).toHaveBeenCalledTimes(1);
+  });
+
+  it('deletes the active meter segment on unmount', async () => {
     const { result, unmount } = await renderHook(() => useMicrophoneAnalysis());
 
     await act(async () => {
       await result.current.start();
     });
-    await act(() => {
-      appStateListener?.('background');
-    });
+    recorder.isRecording = true;
+    unmount();
 
-    expect(stop).toHaveBeenCalledTimes(1);
-
-    await act(() => {
-      appStateListener?.('active');
-    });
     await waitFor(() => {
-      expect(start).toHaveBeenCalledTimes(2);
+      expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
     });
-
-    await unmount();
-
-    expect(remove).toHaveBeenCalledTimes(1);
-    expect(stop).toHaveBeenCalledTimes(2);
+    expect(stopRecording).toHaveBeenCalledTimes(1);
   });
 
-  it('does not start a pending permission request after the app becomes inactive', async () => {
-    const remove = jest.fn();
-    let appStateListener: ((state: AppStateStatus) => void) | undefined;
-    let resolvePermission: (response: { granted: boolean; canAskAgain: boolean }) => void;
-    let pendingStart: Promise<void>;
-
-    jest.spyOn(AppState, 'addEventListener').mockImplementation((_eventType, listener) => {
-      appStateListener = listener;
-
-      return { remove } as ReturnType<typeof AppState.addEventListener>;
-    });
-    (AudioModule.requestRecordingPermissionsAsync as jest.Mock).mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolvePermission = resolve;
-        }),
-    );
-
+  it('pauses for recognition and resumes only when the handoff owns an active meter', async () => {
     const { result } = await renderHook(() => useMicrophoneAnalysis());
 
-    await act(() => {
-      pendingStart = result.current.start();
-    });
-    await act(() => {
-      appStateListener?.('background');
-    });
     await act(async () => {
-      resolvePermission({ granted: true, canAskAgain: true });
-      await pendingStart;
+      await result.current.start();
+    });
+    recorder.isRecording = true;
+
+    let shouldResume: boolean | undefined;
+    await act(async () => {
+      shouldResume = await result.current.pauseForRecognition();
     });
 
-    expect(setAudioModeAsync).not.toHaveBeenCalled();
-    expect(start).not.toHaveBeenCalled();
-    expect(result.current.status).toBe('idle');
+    expect(shouldResume).toBe(true);
+    expect(stopRecording).toHaveBeenCalledTimes(1);
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter.m4a');
+
+    await act(async () => {
+      await result.current.resumeAfterRecognition(true);
+    });
+
+    expect(prepareToRecordAsync).toHaveBeenCalledTimes(2);
+    expect(record).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not restart a user-stopped meter when recognition has no active handoff', async () => {
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    let shouldResume: boolean | undefined;
+    await act(async () => {
+      shouldResume = await result.current.pauseForRecognition();
+      await result.current.resumeAfterRecognition(true);
+    });
+
+    expect(shouldResume).toBe(false);
+    expect(prepareToRecordAsync).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
   });
 });

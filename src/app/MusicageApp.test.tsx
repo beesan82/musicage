@@ -30,6 +30,8 @@ const createAnalysis = (
   start,
   stop: jest.fn(),
   retry: jest.fn(),
+  pauseForRecognition: jest.fn().mockResolvedValue(false),
+  resumeAfterRecognition: jest.fn().mockResolvedValue(undefined),
 });
 
 describe('MusicageApp', () => {

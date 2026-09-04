@@ -8,15 +8,6 @@ export interface AudioFeatures {
   silence: boolean;
 }
 
-export interface FeatureProcessor {
-  process(
-    samples: Float32Array,
-    sampleRate: number,
-    timestampMs: number,
-  ): AudioFeatures;
-  reset(): void;
-}
-
 export interface MeterFeatureProcessor {
   process(meterDb: number | undefined, timestampMs: number): AudioFeatures;
   reset(): void;
