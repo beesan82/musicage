@@ -16,3 +16,8 @@ export interface FeatureProcessor {
   ): AudioFeatures;
   reset(): void;
 }
+
+export interface MeterFeatureProcessor {
+  process(meterDb: number | undefined, timestampMs: number): AudioFeatures;
+  reset(): void;
+}
