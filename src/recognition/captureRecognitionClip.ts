@@ -11,6 +11,7 @@ export interface RecognitionRecorder {
 export interface CaptureDeps {
   wait(durationMs: number): Promise<void>;
   now(): number;
+  signal?: AbortSignal;
 }
 
 export interface CapturedClip {
@@ -18,11 +19,21 @@ export interface CapturedClip {
   captureStartedMonotonicMs: number;
 }
 
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    const error = new Error('Recognition was cancelled.');
+    error.name = 'AbortError';
+    throw error;
+  }
+}
+
 export async function captureRecognitionClip(
   recorder: RecognitionRecorder,
   deps: CaptureDeps,
 ): Promise<CapturedClip> {
+  throwIfAborted(deps.signal);
   await recorder.prepareToRecordAsync();
+  throwIfAborted(deps.signal);
 
   const captureStartedMonotonicMs = deps.now();
   recorder.record({ forDuration: MAX_RECOGNITION_SECONDS });

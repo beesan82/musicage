@@ -121,13 +121,12 @@ export function useSongRecognition({
   const cancelActiveRecognition = useCallback((publishIdleState: boolean) => {
     const active = activeRecognitionRef.current;
 
-    if (!active) {
+    if (!active || active.cancelled) {
       return;
     }
 
     active.cancelled = true;
     active.controller.abort();
-    activeRecognitionRef.current = null;
 
     if (active.ownsRecorder) {
       const uri = active.clipUri ?? recognitionRecorder.uri;
@@ -208,6 +207,7 @@ export function useSongRecognition({
         active.ownsRecorder = true;
         clip = await captureRecognitionClip(recognitionRecorder, {
           now: () => performance.now(),
+          signal: active.controller.signal,
           wait: (durationMs) => waitForDuration(durationMs, active.controller.signal),
         });
         active.clipUri = clip.uri;

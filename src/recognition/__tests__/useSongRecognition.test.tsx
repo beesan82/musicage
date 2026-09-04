@@ -271,6 +271,37 @@ describe('useSongRecognition', () => {
     expect(recognizeAudD).toHaveBeenCalledTimes(1);
   });
 
+  it('cleans a recorder URI that appears after background cancellation during preparation', async () => {
+    recorder.uri = null;
+    recorder.isRecording = false;
+    let resolveCapture: ((clip: { uri: string; captureStartedMonotonicMs: number }) => void) | undefined;
+    (captureRecognitionClip as jest.Mock).mockImplementation(
+      () => new Promise((resolve) => {
+        resolveCapture = resolve;
+      }),
+    );
+    const { result } = await renderRecognition();
+    let recognition: Promise<void> | undefined;
+
+    await act(async () => {
+      recognition = result.current.recognize();
+      await flushMicrotasks();
+      appStateListener?.('background');
+      await flushMicrotasks();
+    });
+
+    await act(async () => {
+      recorder.uri = 'file:///cache/late-recognition.m4a';
+      recorder.isRecording = true;
+      resolveCapture?.({ uri: 'file:///cache/late-recognition.m4a', captureStartedMonotonicMs: 1234 });
+      await recognition;
+    });
+
+    expect(recorder.stop).toHaveBeenCalledTimes(1);
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/late-recognition.m4a');
+    expect(recognizeAudD).not.toHaveBeenCalled();
+  });
+
   it('ignores a second recognition press while capture is in flight', async () => {
     let resolveCapture: ((clip: { uri: string; captureStartedMonotonicMs: number }) => void) | undefined;
     (captureRecognitionClip as jest.Mock).mockImplementation(

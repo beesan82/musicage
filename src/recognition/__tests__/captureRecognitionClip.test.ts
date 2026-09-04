@@ -35,4 +35,27 @@ describe('captureRecognitionClip', () => {
       captureStartedMonotonicMs: 1234,
     });
   });
+
+  it('does not start recording when cancellation happens while native preparation is pending', async () => {
+    let finishPreparation: (() => void) | undefined;
+    const recorder = createRecorder();
+    recorder.prepareToRecordAsync.mockImplementation(
+      () => new Promise<void>((resolve) => {
+        finishPreparation = resolve;
+      }),
+    );
+    const controller = new AbortController();
+    const capture = captureRecognitionClip(recorder, {
+      wait: jest.fn().mockResolvedValue(undefined),
+      now: () => 1234,
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    finishPreparation?.();
+
+    await expect(capture).rejects.toMatchObject({ name: 'AbortError' });
+    expect(recorder.record).not.toHaveBeenCalled();
+    expect(recorder.stop).not.toHaveBeenCalled();
+  });
 });
