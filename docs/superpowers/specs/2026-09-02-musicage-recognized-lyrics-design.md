@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved direction in chat on 2026-09-02; written for user review before implementation.
+Superseded on 2026-09-05 by [`2026-09-05-musicage-personal-direct-lyrics-design.md`](2026-09-05-musicage-personal-direct-lyrics-design.md). This historical proposal assumed a Worker and Musixmatch; neither is part of the approved personal-use direction.
 
 ## Product intent
 
