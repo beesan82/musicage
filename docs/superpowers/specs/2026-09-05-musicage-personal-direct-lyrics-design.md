@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved direction in chat on 2026-09-05. This document is ready for user review before implementation.
+Approved direction in chat on 2026-09-05. SDK target revised from 54 to 57 on 2026-09-05 after the physical iPhone's App Store Expo Go reported that it supports SDK 57 only.
 
 ## Product intent
 
@@ -12,7 +12,7 @@ The experience must be honest. A lyric-like placeholder must never be presented 
 
 ## Scope and non-negotiable decisions
 
-- Development is on Windows and testing is on an iPhone through the App Store version of Expo Go. The project will target Expo SDK 54 so this works without USB re-signing, a Mac, or a paid Apple Developer membership during this phase.
+- Development is on Windows and testing is on an iPhone through the App Store version of Expo Go. The project targets Expo SDK 57, matching the physical device's installed Expo Go, so this works without USB re-signing, a Mac, or a paid Apple Developer membership during this phase.
 - The app is iPhone-first and portrait-only. It is for the owner's personal use and is not distributed to other people or the App Store in this phase.
 - MUSICAGE has no music playback, player controls, song history, accounts, analytics, or cloud storage.
 - The existing five visual worlds remain: Ambient, Jazz, Pop, Dance, and Rock. They react to microphone loudness and motion; they do not claim to classify the actual genre.
@@ -35,7 +35,7 @@ The approved choice is option 3.
 ## Direct-service data flow
 
 ```text
-iPhone / Expo Go (SDK 54)
+iPhone / Expo Go (SDK 57)
   ├─ local microphone meter → AudioFeatures → style engine → five visual scenes
   └─ owner taps 「曲を読み取る」
         └─ separate 12-second temporary recording
@@ -65,7 +65,7 @@ The direct integration must use the AudD token only at runtime after the owner h
 
 ### Local visual response
 
-The current visual MVP relies on raw audio stream data available in Expo SDK 57. SDK 54's Expo Go-compatible path uses `expo-audio` recorder metering instead.
+The visual MVP uses `expo-audio` recorder metering under Expo SDK 57. This keeps normal visualization local while avoiding raw-audio streaming and preserving compatibility with the App Store Expo Go path.
 
 - A `MeterSession` owns one active low-impact recorder with metering enabled.
 - Recorder-meter values are smoothed and converted into the existing platform-neutral `AudioFeatures` shape. Low/mid/high values are visual envelopes, not a factual spectrum analysis claim.
@@ -186,7 +186,7 @@ Within the app's control:
 
 ### Integration and iPhone checks
 
-- Align all Expo dependencies to SDK 54, run Expo Doctor, and start from Windows with `npx expo start`.
+- Align all Expo dependencies to SDK 57, run Expo Doctor, and start from Windows with `npx expo start`.
 - Scan the QR code with App Store Expo Go and verify the project opens without the SDK mismatch screen.
 - Test microphone permission, portrait layout, all five visual worlds, and no-upload normal listening on the physical iPhone.
 - With an owner-entered nonproduction AudD token, test one recognized track with timestamped lyrics, one plain-only result, and one lyrics-unavailable result.
@@ -197,7 +197,7 @@ Within the app's control:
 
 - An iPhone opens the project in the App Store Expo Go without USB re-signing, Xcode, a Mac, or a paid Apple Developer membership.
 - MUSICAGE stays portrait-only, visual-first, and playback-free.
-- Room audio visibly affects all five scenes under SDK 54 recorder-meter limits.
+- Room audio visibly affects all five scenes under SDK 57 recorder-meter limits.
 - No room audio leaves the device unless the owner taps `曲を読み取る`; that upload is capped at 12 seconds and goes directly to AudD.
 - An owner supplies their own AudD token locally; no token is bundled, committed, or logged.
 - A supported recognized track can display real synchronized or plain lyrics. Missing data has a truthful state rather than invented text.
@@ -215,7 +215,7 @@ Within the app's control:
 ## Source checkpoints
 
 - Expo Go and SDK compatibility: <https://docs.expo.dev/troubleshooting/expo-go-version-mismatch/>
-- Expo SDK 54 recorder and metering: <https://docs.expo.dev/versions/v54.0.0/sdk/audio/>
-- Expo SDK 54 secure local storage: <https://docs.expo.dev/versions/v54.0.0/sdk/securestore/>
+- Expo SDK 57 recorder and metering: <https://docs.expo.dev/versions/v57.0.0/sdk/audio/>
+- Expo SDK 57 secure local storage: <https://docs.expo.dev/versions/v57.0.0/sdk/securestore/>
 - AudD pricing and standard recognition: <https://www.audd.io/> and <https://docs.audd.io/>
 - LRCLIB API and identification header: <https://lrclib.net/docs>

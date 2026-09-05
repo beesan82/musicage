@@ -5,17 +5,17 @@
 ## Prerequisites
 
 - Node.js LTS
-- App Store版のExpo Go（Expo SDK 54対応）を入れたiPhone
-- Windows PC and the phone on the same network, or use the tunnel command
+- App Store版のExpo Go（Expo SDK 57対応）を入れたiPhone
+- Windows PC and the phone on the same Wi-Fi
 
 ## Run
 
 1. `npm install`
-2. `npm run start:tunnel`
+2. `npm run start -- --lan`
 3. Scan the QR code with Expo Go
 4. Allow microphone access
 
-If the tunnel cannot connect, put the Windows PC and iPhone on the same Wi-Fi and run `npm run start -- --lan` instead.
+LAN接続できない環境では、`npm run start:tunnel` を試してください。
 
 ## What it does
 
@@ -26,7 +26,7 @@ If the tunnel cannot connect, put the Windows PC and iPhone on the same Wi-Fi an
 ## Real lyrics setup
 
 1. AudDのアカウントを自分で作成してAPIトークンを取得します。トークンはこのリポジトリやチャットに追加しないでください。
-2. `npm run start:tunnel` を起動し、App Store版Expo GoでQRを読み取ります。アプリ内の「AudDキーを設定」を開き、iPhone上だけでトークンを入力します。
+2. PCとiPhoneを同じWi-Fiに接続して `npm run start -- --lan` を起動し、App Store版Expo GoでQRを読み取ります。アプリ内の「AudDキーを設定」を開き、iPhone上だけでトークンを入力します。
 3. 通常の表示はローカルのままです。「曲を読み取る」を押したときだけ、最大12秒のクリップをAudDへ直接送信します。LRCLIBへ送るのは、認識できた曲のメタデータだけです。
 4. 設定でトークンを削除すると、次回から認識は無効になります。
 
