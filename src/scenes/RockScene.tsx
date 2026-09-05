@@ -113,7 +113,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   grain: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   grainPoint: {
     position: 'absolute',

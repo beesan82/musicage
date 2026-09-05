@@ -83,7 +83,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   grid: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   rings: {
     height: 310,

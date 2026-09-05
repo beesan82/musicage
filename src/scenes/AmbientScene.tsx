@@ -157,19 +157,19 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   sky: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   farLayer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     left: '-10%',
     width: '120%',
   },
   mistLayer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     left: '-24%',
     width: '150%',
   },
   nearLayer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
 });

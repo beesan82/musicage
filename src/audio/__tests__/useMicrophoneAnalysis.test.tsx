@@ -25,7 +25,7 @@ jest.mock('../deleteTemporaryRecording', () => ({
 }));
 
 type RecorderDouble = {
-  id: number;
+  id: string;
   isRecording: boolean;
   uri: string | null;
   prepareToRecordAsync: jest.Mock;
@@ -76,7 +76,7 @@ describe('useMicrophoneAnalysis', () => {
       recorder.isRecording = false;
     });
     recorder = {
-      id: 1,
+      id: 'meter-recorder',
       isRecording: false,
       uri: 'file:///cache/meter-a.m4a',
       prepareToRecordAsync,
@@ -293,7 +293,7 @@ describe('useMicrophoneAnalysis', () => {
 
     await act(async () => {
       statusListener?.({
-        id: 1,
+        id: 'meter-recorder',
         isFinished: false,
         hasError: true,
         error: 'native interruption',
@@ -352,7 +352,7 @@ describe('useMicrophoneAnalysis', () => {
 
     await act(async () => {
       statusListener?.({
-        id: 1,
+        id: 'meter-recorder',
         isFinished: true,
         hasError: false,
         error: null,
@@ -378,7 +378,7 @@ describe('useMicrophoneAnalysis', () => {
       eventLog.push('stop');
       recorder.isRecording = false;
       statusListener?.({
-        id: 1,
+        id: 'meter-recorder',
         isFinished: true,
         hasError: false,
         error: null,

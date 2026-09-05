@@ -160,7 +160,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   stage: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
   },
   bass: {
     bottom: '17%',
