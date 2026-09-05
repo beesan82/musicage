@@ -45,6 +45,7 @@ export interface AudDCalibration {
 }
 
 export type DiagnosticInvalidReason =
+  | 'invalid_schema_version'
   | 'unsupported_clip_duration'
   | 'invalid_capture_start'
   | 'invalid_capture_end'

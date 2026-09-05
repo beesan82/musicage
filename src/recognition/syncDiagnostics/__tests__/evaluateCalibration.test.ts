@@ -118,6 +118,21 @@ describe('evaluateCalibration', () => {
     expect(summary.maxAbsoluteResidualMs).toBe(100);
   });
 
+  it('averages unequal middle offsets and uses ceil(0.9 * count) - 1 for p90', () => {
+    const summary = evaluateDuration(samplesAtDuration(3_000, [
+      3_000, 3_100, 3_200, 3_300, 3_400,
+      4_000, 4_100, 4_200, 4_300, 5_000,
+    ]), 3_000);
+
+    expect(summary).toMatchObject({
+      status: 'failed',
+      validSampleCount: 10,
+      medianAnchorOffsetMs: 3_700,
+      p90AbsoluteResidualMs: 700,
+      maxAbsoluteResidualMs: 1_300,
+    });
+  });
+
   it('validates only supported selected recording durations', () => {
     expect(isClipDurationMs(3_000)).toBe(true);
     expect(isClipDurationMs(4_000)).toBe(false);
@@ -130,6 +145,25 @@ describe('evaluateCalibration', () => {
     });
 
     expect(validateDiagnosticSample(malformed)).toContain('unsupported_clip_duration');
+  });
+
+  it('rejects a non-v1 schema sample and excludes it from calibration math', () => {
+    const unsupportedSchema = sample({
+      id: 'schema-v2',
+      schemaVersion: 2 as SyncDiagnosticSample['schemaVersion'],
+    });
+    const summary = evaluateDuration([
+      ...samplesAtDuration(3_000, Array(8).fill(4_000)),
+      unsupportedSchema,
+    ], 3_000);
+
+    expect(validateDiagnosticSample(unsupportedSchema)).toContain('invalid_schema_version');
+    expect(summary).toMatchObject({
+      status: 'insufficient',
+      totalSampleCount: 9,
+      validSampleCount: 8,
+      medianAnchorOffsetMs: null,
+    });
   });
 
   it('requires video ground truth, safe evidence, and sane numeric capture fields', () => {

@@ -27,6 +27,10 @@ export function validateDiagnosticSample(
   const lrclib = sample?.lrclib;
   const groundTruth = sample?.groundTruth;
 
+  if (sample?.schemaVersion !== 1) {
+    reasons.push('invalid_schema_version');
+  }
+
   if (!isClipDurationMs(capture?.requestedDurationMs)) {
     reasons.push('unsupported_clip_duration');
   }
