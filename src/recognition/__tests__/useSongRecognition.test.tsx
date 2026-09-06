@@ -22,7 +22,6 @@ jest.mock('expo-file-system', () => ({ File: jest.fn() }));
 jest.mock('../../audio/deleteTemporaryRecording', () => ({ deleteTemporaryRecording: jest.fn() }));
 jest.mock('../auddClient', () => ({ recognizeAudD: jest.fn() }));
 jest.mock('../captureRecognitionClip', () => ({
-  MAX_RECOGNITION_SECONDS: 12,
   captureRecognitionClip: jest.fn(),
 }));
 jest.mock('../lrclibClient', () => ({ lookupLrclib: jest.fn() }));
@@ -40,7 +39,8 @@ const track: Track = {
   artist: 'Test Artist',
   album: null,
   durationSeconds: null,
-  timecodeSeconds: 72,
+  timecodeRaw: '01:12',
+  timecodeMs: 72_000,
 };
 
 const lyricResult: LyricResult = {
@@ -90,10 +90,13 @@ describe('useSongRecognition', () => {
     (getAudDToken as jest.Mock).mockResolvedValue('owner-token');
     (captureRecognitionClip as jest.Mock).mockResolvedValue({
       uri: 'file:///cache/recognition.m4a',
-      captureStartedMonotonicMs: 1234,
+      requestedDurationMs: 12_000,
+      startedMonotonicMs: 1_000,
+      endedMonotonicMs: 13_000,
     });
     (recognizeAudD as jest.Mock).mockResolvedValue(track);
     (lookupLrclib as jest.Mock).mockResolvedValue({
+      recordId: 42,
       instrumental: false,
       syncedLyrics: null,
       plainLyrics: 'real line',
@@ -163,7 +166,12 @@ describe('useSongRecognition', () => {
     });
     (captureRecognitionClip as jest.Mock).mockImplementation(async () => {
       events.push('capture');
-      return { uri: 'file:///cache/recognition.m4a', captureStartedMonotonicMs: 1234 };
+      return {
+        uri: 'file:///cache/recognition.m4a',
+        requestedDurationMs: 12_000,
+        startedMonotonicMs: 1_000,
+        endedMonotonicMs: 13_000,
+      };
     });
     resumeAfterRecognition.mockImplementation(async () => {
       events.push('resume-meter');
@@ -178,7 +186,12 @@ describe('useSongRecognition', () => {
     });
     (lookupLrclib as jest.Mock).mockImplementation(async () => {
       events.push('lrclib');
-      return { instrumental: false, syncedLyrics: null, plainLyrics: 'real line' };
+      return {
+        recordId: 42,
+        instrumental: false,
+        syncedLyrics: null,
+        plainLyrics: 'real line',
+      };
     });
     (resolveLyrics as jest.Mock).mockImplementation(() => {
       events.push('resolve');
@@ -206,6 +219,15 @@ describe('useSongRecognition', () => {
     ]);
     expect(recognizeAudD).toHaveBeenCalledTimes(1);
     expect(lookupLrclib).toHaveBeenCalledTimes(1);
+    expect(resolveLyrics).toHaveBeenCalledWith(
+      track,
+      expect.objectContaining({ plainLyrics: 'real line' }),
+      {
+        clipDurationMs: 12_000,
+        captureStartedMonotonicMs: 1_000,
+        auddTimecodeMs: 72_000,
+      },
+    );
     expect(result.current.state).toMatchObject({ phase: 'idle', result: lyricResult });
   });
 
@@ -226,7 +248,12 @@ describe('useSongRecognition', () => {
   });
 
   it('stops and deletes the active clip on unmount without starting provider calls afterward', async () => {
-    let resolveCapture: ((clip: { uri: string; captureStartedMonotonicMs: number }) => void) | undefined;
+    let resolveCapture: ((clip: {
+      uri: string;
+      requestedDurationMs: number;
+      startedMonotonicMs: number;
+      endedMonotonicMs: number;
+    }) => void) | undefined;
     (captureRecognitionClip as jest.Mock).mockImplementation(
       () => new Promise((resolve) => {
         resolveCapture = resolve;
@@ -249,7 +276,12 @@ describe('useSongRecognition', () => {
     expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/recognition.m4a');
 
     await act(async () => {
-      resolveCapture?.({ uri: 'file:///cache/recognition.m4a', captureStartedMonotonicMs: 1234 });
+      resolveCapture?.({
+        uri: 'file:///cache/recognition.m4a',
+        requestedDurationMs: 12_000,
+        startedMonotonicMs: 1_000,
+        endedMonotonicMs: 13_000,
+      });
       await recognition;
     });
 
@@ -267,7 +299,12 @@ describe('useSongRecognition', () => {
     recorder.isRecording = true;
     const stopCallsBeforeBackground = recorder.stop.mock.calls.length;
 
-    let resolveCapture: ((clip: { uri: string; captureStartedMonotonicMs: number }) => void) | undefined;
+    let resolveCapture: ((clip: {
+      uri: string;
+      requestedDurationMs: number;
+      startedMonotonicMs: number;
+      endedMonotonicMs: number;
+    }) => void) | undefined;
     (captureRecognitionClip as jest.Mock).mockImplementationOnce(
       () => new Promise((resolve) => {
         resolveCapture = resolve;
@@ -287,7 +324,12 @@ describe('useSongRecognition', () => {
     expect(result.current.state).toMatchObject({ phase: 'idle', result: lyricResult });
 
     await act(async () => {
-      resolveCapture?.({ uri: 'file:///cache/recognition.m4a', captureStartedMonotonicMs: 1234 });
+      resolveCapture?.({
+        uri: 'file:///cache/recognition.m4a',
+        requestedDurationMs: 12_000,
+        startedMonotonicMs: 1_000,
+        endedMonotonicMs: 13_000,
+      });
       await recognition;
     });
 
@@ -297,7 +339,12 @@ describe('useSongRecognition', () => {
   it('cleans a recorder URI that appears after background cancellation during preparation', async () => {
     recorder.uri = null;
     recorder.isRecording = false;
-    let resolveCapture: ((clip: { uri: string; captureStartedMonotonicMs: number }) => void) | undefined;
+    let resolveCapture: ((clip: {
+      uri: string;
+      requestedDurationMs: number;
+      startedMonotonicMs: number;
+      endedMonotonicMs: number;
+    }) => void) | undefined;
     (captureRecognitionClip as jest.Mock).mockImplementation(
       () => new Promise((resolve) => {
         resolveCapture = resolve;
@@ -316,7 +363,12 @@ describe('useSongRecognition', () => {
     await act(async () => {
       recorder.uri = 'file:///cache/late-recognition.m4a';
       recorder.isRecording = true;
-      resolveCapture?.({ uri: 'file:///cache/late-recognition.m4a', captureStartedMonotonicMs: 1234 });
+      resolveCapture?.({
+        uri: 'file:///cache/late-recognition.m4a',
+        requestedDurationMs: 12_000,
+        startedMonotonicMs: 1_000,
+        endedMonotonicMs: 13_000,
+      });
       await recognition;
     });
 
@@ -326,7 +378,12 @@ describe('useSongRecognition', () => {
   });
 
   it('ignores a second recognition press while capture is in flight', async () => {
-    let resolveCapture: ((clip: { uri: string; captureStartedMonotonicMs: number }) => void) | undefined;
+    let resolveCapture: ((clip: {
+      uri: string;
+      requestedDurationMs: number;
+      startedMonotonicMs: number;
+      endedMonotonicMs: number;
+    }) => void) | undefined;
     (captureRecognitionClip as jest.Mock).mockImplementation(
       () => new Promise((resolve) => {
         resolveCapture = resolve;
@@ -346,7 +403,12 @@ describe('useSongRecognition', () => {
     expect(recognizeAudD).not.toHaveBeenCalled();
 
     await act(async () => {
-      resolveCapture?.({ uri: 'file:///cache/recognition.m4a', captureStartedMonotonicMs: 1234 });
+      resolveCapture?.({
+        uri: 'file:///cache/recognition.m4a',
+        requestedDurationMs: 12_000,
+        startedMonotonicMs: 1_000,
+        endedMonotonicMs: 13_000,
+      });
       await firstRecognition;
     });
 

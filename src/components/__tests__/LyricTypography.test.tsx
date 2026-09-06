@@ -1,7 +1,7 @@
 import { render } from '@testing-library/react-native';
 
 import { LyricTypography } from '../LyricTypography';
-import type { LyricResult } from '../../recognition/types';
+import type { LyricResult, Track } from '../../recognition/types';
 import type { VisualState } from '../../style/types';
 
 const ambient: VisualState = {
@@ -13,36 +13,42 @@ const ambient: VisualState = {
   changedAtMs: 0,
 };
 
-const syncedResult: LyricResult = {
-  kind: 'synced',
-  track: {
-    title: 'Test Track',
-    artist: 'Test Artist',
-    album: null,
-    durationSeconds: null,
-    timecodeSeconds: 10,
-  },
+const track: Track = {
+  title: 'Test Track',
+  artist: 'Test Artist',
+  album: null,
+  durationSeconds: null,
+  timecodeRaw: '00:10',
+  timecodeMs: 10_000,
+};
+
+const timestampedResult: LyricResult = {
+  kind: 'timestamped',
+  track,
   lines: [
-    { startMs: 0, text: 'test previous line' },
-    { startMs: 10_000, text: 'test current line' },
-    { startMs: 20_000, text: 'test next line' },
+    { startMs: 0, text: 'test first line' },
+    { startMs: 10_000, text: 'test second line' },
+    { startMs: 20_000, text: 'test third line' },
   ],
-  positionAtCaptureMs: 10_000,
-  captureStartedMonotonicMs: performance.now(),
+  timingEvidence: {
+    clipDurationMs: 12_000,
+    captureStartedMonotonicMs: 1_000,
+    auddTimecodeMs: 10_000,
+  },
 };
 
 const visualCopy = ['VISUAL', 'COPY'].join(' ');
 
 describe('LyricTypography', () => {
-  it('renders a synchronized current line but no visual sample copy', async () => {
+  it('renders a static real LRC excerpt without claiming synchronization', async () => {
     const screen = await render(
-      <LyricTypography lyricResult={syncedResult} reducedMotion visual={ambient} />,
+      <LyricTypography lyricResult={timestampedResult} reducedMotion visual={ambient} />,
     );
 
-    expect(screen.getByText('同期歌詞')).toBeTruthy();
-    expect(screen.getByText('test previous line')).toBeTruthy();
-    expect(screen.getByText('test current line')).toBeTruthy();
-    expect(screen.getByText('test next line')).toBeTruthy();
+    expect(screen.getByText('歌詞')).toBeTruthy();
+    expect(screen.getByText('test first line')).toBeTruthy();
+    expect(screen.getByText('test second line\ntest third line')).toBeTruthy();
+    expect(screen.queryByText('同期歌詞')).toBeNull();
     expect(screen.queryByText(visualCopy)).toBeNull();
     expect(screen.queryByText('THE ROOM MOVES')).toBeNull();
   });
@@ -50,7 +56,7 @@ describe('LyricTypography', () => {
   it('renders plain and unavailable lyric states honestly', async () => {
     const plainResult: LyricResult = {
       kind: 'plain',
-      track: syncedResult.track,
+      track,
       text: 'first real phrase\nsecond real phrase\n\nnot in the first group',
     };
     const plain = await render(
@@ -64,7 +70,7 @@ describe('LyricTypography', () => {
 
     const unavailable = await render(
       <LyricTypography
-        lyricResult={{ kind: 'lyrics_unavailable', track: syncedResult.track }}
+        lyricResult={{ kind: 'lyrics_unavailable', track }}
         reducedMotion
         visual={ambient}
       />,

@@ -6,7 +6,8 @@ const testTrack: Track = {
   artist: 'Test Artist',
   album: 'Test Album',
   durationSeconds: 213,
-  timecodeSeconds: 72,
+  timecodeRaw: '01:12',
+  timecodeMs: 72_000,
 };
 
 function jsonResponse(payload: unknown, status = 200, retryAfter: string | null = null): Response {
@@ -22,13 +23,19 @@ describe('lookupLrclib', () => {
   it('uses direct LRCLIB signature parameters and the required client header', async () => {
     const fetchMock = jest.fn().mockResolvedValue(
       jsonResponse({
+        id: 42,
         instrumental: false,
         syncedLyrics: '[00:01.00]line',
         plainLyrics: 'line',
       }),
     );
 
-    await lookupLrclib(testTrack, fetchMock as unknown as typeof fetch);
+    await expect(lookupLrclib(testTrack, fetchMock as unknown as typeof fetch)).resolves.toEqual({
+      recordId: 42,
+      instrumental: false,
+      syncedLyrics: '[00:01.00]line',
+      plainLyrics: 'line',
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0][0])).toContain('track_name=Test+Track');
@@ -47,6 +54,25 @@ describe('lookupLrclib', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it.each([undefined, 'not-a-number'])(
+    'maps an absent or non-numeric LRCLIB id (%p) to null',
+    async (id) => {
+      const fetchMock = jest.fn().mockResolvedValue(jsonResponse({
+        id,
+        instrumental: false,
+        syncedLyrics: null,
+        plainLyrics: 'line',
+      }));
+
+      await expect(lookupLrclib(testTrack, fetchMock as unknown as typeof fetch)).resolves.toEqual({
+        recordId: null,
+        instrumental: false,
+        syncedLyrics: null,
+        plainLyrics: 'line',
+      });
+    },
+  );
 
   it('maps LRCLIB 429 to a non-retried rate-limit error with a positive Retry-After value', async () => {
     const fetchMock = jest.fn().mockResolvedValue(jsonResponse({ ignored: true }, 429, '7'));

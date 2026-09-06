@@ -88,7 +88,7 @@ export function parseAudDTimecode(value: unknown): number | null {
     return null;
   }
 
-  return hours * 3_600 + minutes * 60 + seconds;
+  return Math.round((hours * 3_600 + minutes * 60 + seconds) * 1_000);
 }
 
 function toTrack(result: AudDResult): Track | null {
@@ -99,12 +99,18 @@ function toTrack(result: AudDResult): Track | null {
     return null;
   }
 
+  const rawTimecode = typeof result.timecode === 'string' && result.timecode.trim()
+    ? result.timecode
+    : null;
+  const timecodeMs = rawTimecode === null ? null : parseAudDTimecode(rawTimecode);
+
   return {
     title,
     artist,
     album: optionalString(result.album),
     durationSeconds: optionalFiniteNumber(result.duration),
-    timecodeSeconds: parseAudDTimecode(result.timecode),
+    timecodeRaw: timecodeMs === null ? null : rawTimecode,
+    timecodeMs,
   };
 }
 

@@ -1,7 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { Animated, StyleSheet, View } from 'react-native';
 
-import { activeLyricIndex } from '../recognition/lrc';
 import type { LyricResult, Track } from '../recognition/types';
 import type { VisualState, VisualStyle } from '../style/types';
 
@@ -53,33 +52,27 @@ function contiguousPlainPhrases(text: string): string[] {
   return phrases;
 }
 
-function presentationFor(result: LyricResult | null, clockNow: number): LyricPresentation {
+function staticTimestampedPhrases(lines: readonly { text: string }[]): string[] {
+  return lines
+    .map((line) => line.text.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
+function presentationFor(result: LyricResult | null): LyricPresentation {
   if (!result) {
     return { label: null, track: null, previous: null, primary: IDLE_COPY, next: null };
   }
 
   switch (result.kind) {
-    case 'synced': {
-      const positionMs = result.positionAtCaptureMs + (clockNow - result.captureStartedMonotonicMs);
-      const activeIndex = Math.max(0, activeLyricIndex(result.lines, positionMs));
-      const current = result.lines[activeIndex];
-
-      if (!current) {
-        return {
-          label: null,
-          track: result.track,
-          previous: null,
-          primary: UNAVAILABLE_COPY,
-          next: null,
-        };
-      }
-
+    case 'timestamped': {
+      const phrases = staticTimestampedPhrases(result.lines);
       return {
-        label: '同期歌詞',
+        label: '歌詞',
         track: result.track,
-        previous: result.lines[activeIndex - 1]?.text ?? null,
-        primary: current.text,
-        next: result.lines[activeIndex + 1]?.text ?? null,
+        previous: null,
+        primary: phrases[0] ?? UNAVAILABLE_COPY,
+        next: phrases.slice(1).join('\n') || null,
       };
     }
     case 'plain': {
@@ -126,21 +119,6 @@ export function LyricTypography({
   reducedMotion = false,
 }: LyricTypographyProps) {
   const expression = useRef(new Animated.Value(visual.intensity)).current;
-  const [clockNow, setClockNow] = useState(() => performance.now());
-  const syncCaptureStart = lyricResult?.kind === 'synced'
-    ? lyricResult.captureStartedMonotonicMs
-    : null;
-
-  useEffect(() => {
-    if (syncCaptureStart === null) {
-      return;
-    }
-
-    setClockNow(performance.now());
-    const interval = setInterval(() => setClockNow(performance.now()), 250);
-
-    return () => clearInterval(interval);
-  }, [syncCaptureStart]);
 
   useEffect(() => {
     if (reducedMotion) {
@@ -159,8 +137,8 @@ export function LyricTypography({
   }, [expression, reducedMotion, visual.intensity]);
 
   const presentation = useMemo(
-    () => presentationFor(lyricResult, clockNow),
-    [clockNow, lyricResult],
+    () => presentationFor(lyricResult),
+    [lyricResult],
   );
   const palette = PALETTE_BY_STYLE[visual.style];
   const opacity = expression.interpolate({

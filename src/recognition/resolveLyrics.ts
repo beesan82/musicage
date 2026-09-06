@@ -1,11 +1,15 @@
 import type { LrclibLyricsRecord } from './lrclibClient';
 import { parseLrc } from './lrc';
-import type { LyricResult, Track } from './types';
+import type {
+  LyricResult,
+  TimestampedLyricTimingEvidence,
+  Track,
+} from './types';
 
 export function resolveLyrics(
   track: Track,
   record: LrclibLyricsRecord | null,
-  captureStartedMonotonicMs: number,
+  timingEvidence: TimestampedLyricTimingEvidence,
 ): LyricResult {
   if (!record) {
     return { kind: 'lyrics_unavailable', track };
@@ -17,13 +21,12 @@ export function resolveLyrics(
 
   const lines = parseLrc(record.syncedLyrics ?? '');
 
-  if (track.timecodeSeconds !== null && lines.length > 0) {
+  if (lines.length > 0) {
     return {
-      kind: 'synced',
+      kind: 'timestamped',
       track,
       lines,
-      positionAtCaptureMs: Math.round(track.timecodeSeconds * 1_000),
-      captureStartedMonotonicMs,
+      timingEvidence,
     };
   }
 

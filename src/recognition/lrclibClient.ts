@@ -4,6 +4,7 @@ const LRCLIB_ENDPOINT = 'https://lrclib.net/api/get';
 const LRCLIB_CLIENT = 'MUSICAGE/0.1 (personal-use Expo client)';
 
 export interface LrclibLyricsRecord {
+  recordId: number | null;
   instrumental: boolean;
   syncedLyrics: string | null;
   plainLyrics: string | null;
@@ -43,6 +44,10 @@ function nullableString(value: unknown): string | null | undefined {
   return value === undefined || value === null || typeof value === 'string' ? value : undefined;
 }
 
+function nullableRecordId(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 function parseRetryAfter(headers: Headers): number | null {
   const value = headers.get('Retry-After');
   const seconds = value ? Number(value) : NaN;
@@ -80,6 +85,7 @@ function toLyricsRecord(payload: unknown): LrclibLyricsRecord | null {
   }
 
   return {
+    recordId: nullableRecordId(payload.id),
     instrumental: payload.instrumental,
     syncedLyrics,
     plainLyrics,

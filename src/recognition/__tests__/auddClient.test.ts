@@ -51,7 +51,8 @@ describe('recognizeAudD', () => {
       artist: 'Test Artist',
       album: 'Test Album',
       durationSeconds: 213,
-      timecodeSeconds: 72,
+      timecodeRaw: '01:12',
+      timecodeMs: 72_000,
     });
   });
 
@@ -91,10 +92,34 @@ describe('recognizeAudD', () => {
   });
 
   it('parses supported AudD timecodes defensively', () => {
-    expect(parseAudDTimecode('01:12')).toBe(72);
-    expect(parseAudDTimecode('1:02.5')).toBe(62.5);
-    expect(parseAudDTimecode('01:02:03')).toBe(3723);
+    expect(parseAudDTimecode('01:12')).toBe(72_000);
+    expect(parseAudDTimecode('1:02.5')).toBe(62_500);
+    expect(parseAudDTimecode('01:02:03')).toBe(3_723_000);
     expect(parseAudDTimecode('01:99')).toBeNull();
     expect(parseAudDTimecode('not-a-timecode')).toBeNull();
+  });
+
+  it('keeps a recognized track but makes malformed or missing timecode safely nullable', async () => {
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce(jsonResponse({
+        status: 'success',
+        result: { artist: 'Test Artist', title: 'Bad Timecode', timecode: '01:99' },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        status: 'success',
+        result: { artist: 'Test Artist', title: 'No Timecode' },
+      }));
+
+    await expect(recognizeAudD({
+      token: 'owner-token',
+      file: fakeClipFile,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    })).resolves.toMatchObject({ timecodeRaw: null, timecodeMs: null });
+
+    await expect(recognizeAudD({
+      token: 'owner-token',
+      file: fakeClipFile,
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    })).resolves.toMatchObject({ timecodeRaw: null, timecodeMs: null });
   });
 });

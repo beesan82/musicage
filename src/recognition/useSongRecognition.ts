@@ -7,7 +7,7 @@ import { deleteTemporaryRecording } from '../audio/deleteTemporaryRecording';
 import { recognizeAudD } from './auddClient';
 import {
   captureRecognitionClip,
-  type CapturedClip,
+  type CapturedRecognitionClip,
 } from './captureRecognitionClip';
 import { lookupLrclib } from './lrclibClient';
 import { resolveLyrics } from './resolveLyrics';
@@ -16,6 +16,7 @@ import type { LyricResult, RecognitionViewState } from './types';
 
 const SETUP_REQUIRED_MESSAGE = 'AudDのトークンを設定してください。';
 const RECOGNITION_ERROR_MESSAGE = '曲を読み取れませんでした。もう一度試してください。';
+const DEFAULT_RECOGNITION_CLIP_DURATION_MS = 12_000;
 
 export interface MeterRecognitionHandoff {
   pauseForRecognition(): Promise<boolean>;
@@ -175,7 +176,7 @@ export function useSongRecognition({
       ownsRecorder: false,
     };
     activeRecognitionRef.current = active;
-    let clip: CapturedClip | null = null;
+    let clip: CapturedRecognitionClip | null = null;
 
     try {
       const token = await getAudDToken();
@@ -216,6 +217,7 @@ export function useSongRecognition({
         });
         active.ownsRecorder = true;
         clip = await captureRecognitionClip(recognitionRecorder, {
+          durationMs: DEFAULT_RECOGNITION_CLIP_DURATION_MS,
           now: () => performance.now(),
           signal: active.controller.signal,
           wait: (durationMs) => waitForDuration(durationMs, active.controller.signal),
@@ -265,7 +267,11 @@ export function useSongRecognition({
         return;
       }
 
-      const lyricResult = resolveLyrics(track, record, clip.captureStartedMonotonicMs);
+      const lyricResult = resolveLyrics(track, record, {
+        clipDurationMs: clip.requestedDurationMs,
+        captureStartedMonotonicMs: clip.startedMonotonicMs,
+        auddTimecodeMs: track.timecodeMs,
+      });
 
       if (isSuccessfulLyricResult(lyricResult)) {
         lastSuccessfulResultRef.current = lyricResult;
