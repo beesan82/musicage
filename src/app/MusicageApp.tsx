@@ -8,8 +8,10 @@ import { AudDTokenSheet } from '../components/AudDTokenSheet';
 import { ListeningControls } from '../components/ListeningControls';
 import { LyricTypography } from '../components/LyricTypography';
 import { RecognitionControls } from '../components/RecognitionControls';
+import { SyncDiagnosticsSheet } from '../components/SyncDiagnosticsSheet';
 import { clearAudDToken, saveAudDToken } from '../recognition/tokenStore';
 import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
+import type { RecognitionRequest } from '../recognition/types';
 import { useSongRecognition } from '../recognition/useSongRecognition';
 import { SceneRenderer } from '../scenes/SceneRenderer';
 import { createInitialVisualState, selectVisualState } from '../style/styleEngine';
@@ -40,12 +42,14 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
     refreshTokenPresence,
     retry: retryRecognition,
     state: recognitionState,
+    pendingDiagnosticTrial,
   } = useSongRecognition({
     pauseForRecognition: microphone.pauseForRecognition,
     resumeAfterRecognition: microphone.resumeAfterRecognition,
   });
   const diagnostics = useSyncDiagnostics();
   const [tokenSheetVisible, setTokenSheetVisible] = useState(false);
+  const [diagnosticsSheetVisible, setDiagnosticsSheetVisible] = useState(false);
   const visualRef = useRef<VisualState>(createInitialVisualState(0));
   const visual = useMemo(() => {
     const nowMs = Date.now();
@@ -81,6 +85,15 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
       clipDurationMs: diagnostics.approvedCalibration?.clipDurationMs ?? 12_000,
     });
   }, [diagnostics.approvedCalibration?.clipDurationMs, recognize]);
+
+  const openDiagnostics = useCallback(() => {
+    setTokenSheetVisible(false);
+    setDiagnosticsSheetVisible(true);
+  }, []);
+
+  const runDiagnosticTrial = useCallback((request: RecognitionRequest) => {
+    void recognize(request);
+  }, [recognize]);
 
   return (
     <View style={styles.root} testID="musicage-root">
@@ -123,8 +136,16 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
         hasToken={hasToken}
         onClear={clearToken}
         onClose={() => setTokenSheetVisible(false)}
+        onOpenDiagnostics={openDiagnostics}
         onSave={saveToken}
         visible={tokenSheetVisible}
+      />
+      <SyncDiagnosticsSheet
+        diagnostics={diagnostics}
+        onClose={() => setDiagnosticsSheetVisible(false)}
+        onRunTrial={runDiagnosticTrial}
+        pendingTrial={pendingDiagnosticTrial}
+        visible={diagnosticsSheetVisible}
       />
     </View>
   );

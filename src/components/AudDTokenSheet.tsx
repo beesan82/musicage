@@ -13,6 +13,7 @@ export interface AudDTokenSheetProps {
   hasToken: boolean;
   onSave(token: string): Promise<void>;
   onClear(): Promise<void>;
+  onOpenDiagnostics(): void;
   onClose(): void;
 }
 
@@ -23,6 +24,7 @@ export function AudDTokenSheet({
   hasToken,
   onSave,
   onClear,
+  onOpenDiagnostics,
   onClose,
 }: AudDTokenSheetProps) {
   const [draft, setDraft] = useState('');
@@ -137,6 +139,14 @@ export function AudDTokenSheet({
             </Pressable>
           </View>
           <Pressable
+            accessibilityLabel="同期診断"
+            accessibilityRole="button"
+            onPress={onOpenDiagnostics}
+            style={styles.diagnosticsButton}
+          >
+            <Text style={styles.diagnosticsButtonText}>同期診断</Text>
+          </Pressable>
+          <Pressable
             accessibilityLabel="閉じる"
             accessibilityRole="button"
             onPress={onClose}
@@ -240,6 +250,19 @@ const styles = StyleSheet.create({
   },
   removeButtonText: {
     color: '#E3E0D6',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  diagnosticsButton: {
+    alignItems: 'center',
+    borderColor: '#62675F',
+    borderRadius: 15,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 48,
+  },
+  diagnosticsButtonText: {
+    color: '#B7BCA5',
     fontSize: 13,
     fontWeight: '700',
   },

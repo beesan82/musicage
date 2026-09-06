@@ -1,4 +1,4 @@
-import { fireEvent, render } from '@testing-library/react-native';
+import { fireEvent, render, userEvent } from '@testing-library/react-native';
 
 import type { AudioFeatures } from '../audio/types';
 import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
@@ -161,6 +161,21 @@ describe('MusicageApp', () => {
     fireEvent.press(screen.getByRole('button', { name: '曲を読み取る' }));
 
     expect(recognition.recognize).toHaveBeenCalledWith({ mode: 'normal', clipDurationMs: 5_000 });
+  });
+
+  it('closes token settings before opening owner-only sync diagnostics', async () => {
+    const recognition = createRecognition();
+    recognition.state = { ...recognition.state, phase: 'setup_required' };
+    (useSongRecognition as jest.Mock).mockReturnValue(recognition);
+    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
+    const screen = await render(<MusicageApp reducedMotion />);
+    const user = userEvent.setup();
+
+    await user.press(screen.getByRole('button', { name: 'AudDキーを設定' }));
+    await user.press(screen.getByRole('button', { name: '同期診断' }));
+
+    expect(screen.getByText('動画の再生位置と録音開始フラッシュを照合して保存します。')).toBeTruthy();
+    expect(screen.queryByText('PRIVATE SETUP')).toBeNull();
   });
 
 });

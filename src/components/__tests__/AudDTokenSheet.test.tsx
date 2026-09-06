@@ -10,6 +10,7 @@ describe('AudDTokenSheet', () => {
         hasToken
         onClear={jest.fn().mockResolvedValue(undefined)}
         onClose={jest.fn()}
+        onOpenDiagnostics={jest.fn()}
         onSave={save}
         visible
       />,
@@ -37,6 +38,7 @@ describe('AudDTokenSheet', () => {
         hasToken={false}
         onClear={jest.fn().mockResolvedValue(undefined)}
         onClose={jest.fn()}
+        onOpenDiagnostics={jest.fn()}
         onSave={jest.fn().mockRejectedValue(new Error('private failure detail'))}
         visible
       />,
@@ -55,6 +57,25 @@ describe('AudDTokenSheet', () => {
 
     expect(screen.getByText('トークンを保存できませんでした。')).toBeTruthy();
     expect(screen.queryByText('private failure detail')).toBeNull();
+    expect(screen.queryByText('owner-private-token')).toBeNull();
+  });
+
+  it('opens owner-only sync diagnostics from settings without exposing the token', async () => {
+    const openDiagnostics = jest.fn();
+    const screen = await render(
+      <AudDTokenSheet
+        hasToken
+        onClear={jest.fn().mockResolvedValue(undefined)}
+        onClose={jest.fn()}
+        onOpenDiagnostics={openDiagnostics}
+        onSave={jest.fn().mockResolvedValue(undefined)}
+        visible
+      />,
+    );
+
+    fireEvent.press(screen.getByRole('button', { name: '同期診断' }));
+
+    expect(openDiagnostics).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('owner-private-token')).toBeNull();
   });
 });

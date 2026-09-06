@@ -2,7 +2,7 @@ import { render, userEvent } from '@testing-library/react-native';
 
 import { SyncDiagnosticsContent } from '../SyncDiagnosticsSheet';
 import type { SyncDiagnosticsController } from '../../recognition/syncDiagnostics/useSyncDiagnostics';
-import type { SyncDiagnosticSample } from '../../recognition/syncDiagnostics/types';
+import type { DurationEvaluation, SyncDiagnosticSample } from '../../recognition/syncDiagnostics/types';
 
 const sample: SyncDiagnosticSample = {
   schemaVersion: 1, id: 'safe-trial',
@@ -18,6 +18,22 @@ function controller(): SyncDiagnosticsController {
     notifyCaptureStarted: jest.fn(), saveTrial: jest.fn().mockResolvedValue(undefined),
     approveRecommendedCalibration: jest.fn().mockResolvedValue(undefined),
     rejectAudDAsClock: jest.fn().mockResolvedValue(undefined), clearDiagnostics: jest.fn().mockResolvedValue(undefined),
+  };
+}
+
+function passedEvaluation(): DurationEvaluation {
+  return {
+    clipDurationMs: 5_000,
+    status: 'passed',
+    totalSampleCount: 9,
+    validSampleCount: 9,
+    uniqueTrackCount: 3,
+    uniquePositionCount: 3,
+    medianAnchorOffsetMs: 4_000,
+    p90AbsoluteResidualMs: 100,
+    maxAbsoluteResidualMs: 120,
+    withinToleranceCount: 9,
+    hardLimitViolationCount: 0,
   };
 }
 
@@ -44,4 +60,57 @@ it('runs only the selected diagnostic request and saves validated video evidence
   expect(screen.queryByText('full lyric line')).toBeNull();
   expect(screen.queryByText('owner-private-token')).toBeNull();
   expect(screen.queryByText('file:///cache/recognition.m4a')).toBeNull();
+});
+
+it('retains an owner manual note but labels it as excluded from calibration acceptance', async () => {
+  const diagnostics = controller();
+  const user = userEvent.setup();
+  const screen = await render(
+    <SyncDiagnosticsContent diagnostics={diagnostics} onClose={jest.fn()} onRunTrial={jest.fn()} pendingTrial={{ sample, invalidReasons: [] }} />,
+  );
+
+  await user.press(screen.getByRole('button', { name: '手動メモ（合否外）' }));
+  await user.paste(screen.getByLabelText('再生位置'), '00:30');
+  await user.paste(screen.getByLabelText('観測精度（ms）'), '120');
+  await user.press(screen.getByRole('button', { name: 'この測定を保存' }));
+
+  expect(screen.getByText('手動メモは同期の合否判定には使いません。')).toBeTruthy();
+  expect(diagnostics.saveTrial).toHaveBeenCalledWith(sample, {
+    method: 'manual-estimate', songPositionAtCaptureStartMs: 30_000, observedPrecisionMs: 120,
+  });
+});
+
+it('shows only safe calibration summaries and requires explicit approval or local clear confirmation', async () => {
+  const diagnostics = controller();
+  diagnostics.evaluations = [passedEvaluation()];
+  const user = userEvent.setup();
+  const screen = await render(
+    <SyncDiagnosticsContent diagnostics={diagnostics} onClose={jest.fn()} onRunTrial={jest.fn()} pendingTrial={{ sample, invalidReasons: ['missing_timecode'] }} />,
+  );
+
+  expect(screen.getByText('5秒 — 合格')).toBeTruthy();
+  expect(screen.getByText('有効 9/9・曲 3・位置 3')).toBeTruthy();
+  expect(screen.getByText('検証外: AudD時刻がありません')).toBeTruthy();
+  await user.press(screen.getByRole('button', { name: 'この条件で同期を有効化' }));
+  expect(diagnostics.approveRecommendedCalibration).toHaveBeenCalledTimes(1);
+
+  await user.press(screen.getByRole('button', { name: '診断データを消去' }));
+  expect(screen.getByText('このiPhone内の測定と校正だけを消去します。')).toBeTruthy();
+  await user.press(screen.getByRole('button', { name: 'このiPhoneの診断を消去' }));
+  expect(diagnostics.clearDiagnostics).toHaveBeenCalledTimes(1);
+});
+
+it('offers explicit AudD clock rejection only after every tested duration has failed', async () => {
+  const diagnostics = controller();
+  diagnostics.evaluations = ([3_000, 5_000, 7_000, 12_000] as const).map((clipDurationMs) => ({
+    ...passedEvaluation(), clipDurationMs, status: 'failed' as const,
+  }));
+  const user = userEvent.setup();
+  const screen = await render(
+    <SyncDiagnosticsContent diagnostics={diagnostics} onClose={jest.fn()} onRunTrial={jest.fn()} pendingTrial={null} />,
+  );
+
+  await user.press(screen.getByRole('button', { name: 'AudDを同期時計に使わない' }));
+
+  expect(diagnostics.rejectAudDAsClock).toHaveBeenCalledTimes(1);
 });
