@@ -9,6 +9,7 @@ import { ListeningControls } from '../components/ListeningControls';
 import { LyricTypography } from '../components/LyricTypography';
 import { RecognitionControls } from '../components/RecognitionControls';
 import { clearAudDToken, saveAudDToken } from '../recognition/tokenStore';
+import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
 import { useSongRecognition } from '../recognition/useSongRecognition';
 import { SceneRenderer } from '../scenes/SceneRenderer';
 import { createInitialVisualState, selectVisualState } from '../style/styleEngine';
@@ -43,6 +44,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
     pauseForRecognition: microphone.pauseForRecognition,
     resumeAfterRecognition: microphone.resumeAfterRecognition,
   });
+  const diagnostics = useSyncDiagnostics();
   const [tokenSheetVisible, setTokenSheetVisible] = useState(false);
   const visualRef = useRef<VisualState>(createInitialVisualState(0));
   const visual = useMemo(() => {
@@ -73,6 +75,13 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
     setTokenSheetVisible(false);
   }, [refreshTokenPresence]);
 
+  const readNormally = useCallback(() => {
+    void recognize({
+      mode: 'normal',
+      clipDurationMs: diagnostics.approvedCalibration?.clipDurationMs ?? 12_000,
+    });
+  }, [diagnostics.approvedCalibration?.clipDurationMs, recognize]);
+
   return (
     <View style={styles.root} testID="musicage-root">
       <View pointerEvents="none" style={styles.sceneLayer}>
@@ -87,6 +96,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
         <View style={styles.content}>
           <View pointerEvents="none" style={styles.copyRegion}>
             <LyricTypography
+              calibration={diagnostics.approvedCalibration}
               lyricResult={recognitionState.result}
               reducedMotion={reducedMotion}
               visual={visual}
@@ -95,7 +105,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
           <View style={styles.controlsStack}>
             <RecognitionControls
               onOpenSettings={() => setTokenSheetVisible(true)}
-              onRecognize={recognize}
+              onRecognize={readNormally}
               onRetry={retryRecognition}
               state={recognitionState}
             />
