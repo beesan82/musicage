@@ -56,6 +56,7 @@ const createRecognition = (): SongRecognition => ({
     retryable: false,
   },
   hasToken: false,
+  pendingDiagnosticTrial: null,
   recognize: jest.fn(),
   retry: jest.fn(),
   refreshTokenPresence: jest.fn().mockResolvedValue(undefined),

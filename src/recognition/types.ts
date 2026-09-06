@@ -1,4 +1,19 @@
-import type { ClipDurationMs } from './syncDiagnostics/types';
+import type {
+  ClipDurationMs,
+  DiagnosticInvalidReason,
+  SyncDiagnosticSample,
+} from './syncDiagnostics/types';
+
+export interface RecognitionRequest {
+  mode: 'normal' | 'diagnostic';
+  clipDurationMs: ClipDurationMs;
+  onCaptureStarted?: (startedMonotonicMs: number) => void;
+}
+
+export interface PendingDiagnosticTrial {
+  sample: SyncDiagnosticSample;
+  invalidReasons: readonly DiagnosticInvalidReason[];
+}
 
 export interface Track {
   title: string;

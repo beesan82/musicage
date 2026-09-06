@@ -9,6 +9,8 @@ import { captureRecognitionClip } from '../captureRecognitionClip';
 import { deleteTemporaryRecording } from '../../audio/deleteTemporaryRecording';
 import { lookupLrclib } from '../lrclibClient';
 import { resolveLyrics } from '../resolveLyrics';
+import { createDiagnosticSample } from '../syncDiagnostics/createDiagnosticSample';
+import { validateDiagnosticSample } from '../syncDiagnostics/evaluateCalibration';
 import { getAudDToken } from '../tokenStore';
 import type { LyricResult, Track } from '../types';
 import { useSongRecognition } from '../useSongRecognition';
@@ -26,6 +28,12 @@ jest.mock('../captureRecognitionClip', () => ({
 }));
 jest.mock('../lrclibClient', () => ({ lookupLrclib: jest.fn() }));
 jest.mock('../resolveLyrics', () => ({ resolveLyrics: jest.fn() }));
+jest.mock('../syncDiagnostics/createDiagnosticSample', () => ({
+  createDiagnosticSample: jest.fn(),
+}));
+jest.mock('../syncDiagnostics/evaluateCalibration', () => ({
+  validateDiagnosticSample: jest.fn(),
+}));
 jest.mock('../tokenStore', () => ({ getAudDToken: jest.fn() }));
 
 type RecorderDouble = {
@@ -102,6 +110,31 @@ describe('useSongRecognition', () => {
       plainLyrics: 'real line',
     });
     (resolveLyrics as jest.Mock).mockReturnValue(lyricResult);
+    (createDiagnosticSample as jest.Mock).mockResolvedValue({
+      schemaVersion: 1,
+      id: 'trial-1',
+      capture: {
+        requestedDurationMs: 5_000,
+        startedMonotonicMs: 10_000,
+        endedMonotonicMs: 15_020,
+      },
+      audd: {
+        timecodeRaw: '01:12',
+        timecodeMs: 72_000,
+        responseMonotonicMs: 15_800,
+        title: 'Test Track',
+        artist: 'Test Artist',
+      },
+      lrclib: {
+        recordId: 42,
+        syncedLineCount: 1,
+        syncedLyricsHash: 'safe-hash',
+      },
+      groundTruth: null,
+    });
+    (validateDiagnosticSample as jest.Mock).mockReturnValue([
+      'missing_ground_truth',
+    ]);
   });
 
   afterEach(() => {
@@ -116,6 +149,22 @@ describe('useSongRecognition', () => {
   function renderRecognition() {
     return renderHook(() => useSongRecognition({ pauseForRecognition, resumeAfterRecognition }));
   }
+
+  it('does not read the AudD token until an owner starts recognition', async () => {
+    const { result } = await renderRecognition();
+
+    await act(async () => {
+      await flushMicrotasks();
+    });
+
+    expect(getAudDToken).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.recognize();
+    });
+
+    expect(getAudDToken).toHaveBeenCalledTimes(1);
+  });
 
   it('goes to setup_required without a token and never pauses, records, or fetches', async () => {
     (getAudDToken as jest.Mock).mockResolvedValue(null);
@@ -231,6 +280,68 @@ describe('useSongRecognition', () => {
     expect(result.current.state).toMatchObject({ phase: 'idle', result: lyricResult });
   });
 
+  it('publishes only a safe pending trial after a diagnostic capture resumes the meter before provider work', async () => {
+    const onCaptureStarted = jest.fn();
+    const now = jest.spyOn(performance, 'now').mockReturnValue(15_800);
+    (captureRecognitionClip as jest.Mock).mockImplementation(async (_recorder, options) => {
+      options.onCaptureStarted?.(10_000);
+      return {
+        uri: 'file:///cache/recognition.m4a',
+        requestedDurationMs: 5_000,
+        startedMonotonicMs: 10_000,
+        endedMonotonicMs: 15_020,
+      };
+    });
+    (lookupLrclib as jest.Mock).mockResolvedValue({
+      recordId: 42,
+      instrumental: false,
+      syncedLyrics: '[01:12.00] private lyric line',
+      plainLyrics: 'private lyric line',
+    });
+    const { result } = await renderRecognition();
+
+    await act(async () => {
+      await result.current.recognize({
+        mode: 'diagnostic',
+        clipDurationMs: 5_000,
+        onCaptureStarted,
+      });
+    });
+
+    expect(onCaptureStarted).toHaveBeenCalledWith(10_000);
+    expect(resumeAfterRecognition.mock.invocationCallOrder[0]!)
+      .toBeLessThan((recognizeAudD as jest.Mock).mock.invocationCallOrder[0]!);
+    expect(createDiagnosticSample).toHaveBeenCalledWith({
+      capture: expect.objectContaining({
+        requestedDurationMs: 5_000,
+        startedMonotonicMs: 10_000,
+        endedMonotonicMs: 15_020,
+      }),
+      track,
+      auddResponseMonotonicMs: 15_800,
+      lrclib: expect.objectContaining({
+        syncedLyrics: '[01:12.00] private lyric line',
+        plainLyrics: 'private lyric line',
+      }),
+    });
+    expect(result.current.pendingDiagnosticTrial).toMatchObject({
+      sample: {
+        capture: {
+          requestedDurationMs: 5_000,
+          startedMonotonicMs: 10_000,
+          endedMonotonicMs: 15_020,
+        },
+        audd: { responseMonotonicMs: 15_800 },
+        groundTruth: null,
+      },
+      invalidReasons: ['missing_ground_truth'],
+    });
+    expect(JSON.stringify(result.current.pendingDiagnosticTrial)).not.toContain('file:///');
+    expect(JSON.stringify(result.current.pendingDiagnosticTrial)).not.toContain('owner-token');
+    expect(JSON.stringify(result.current.pendingDiagnosticTrial)).not.toContain('private lyric line');
+    now.mockRestore();
+  });
+
   it('resumes the meter and deletes the clip after a provider failure without exposing service details', async () => {
     (recognizeAudD as jest.Mock).mockRejectedValue(new Error('provider-body-that-must-not-leak'));
     const { result } = await renderRecognition();
@@ -334,6 +445,8 @@ describe('useSongRecognition', () => {
     });
 
     expect(recognizeAudD).toHaveBeenCalledTimes(1);
+    expect(createDiagnosticSample).not.toHaveBeenCalled();
+    expect(result.current.pendingDiagnosticTrial).toBeNull();
   });
 
   it('cleans a recorder URI that appears after background cancellation during preparation', async () => {
@@ -413,5 +526,33 @@ describe('useSongRecognition', () => {
     });
 
     expect(recognizeAudD).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves no pending trial after an interrupted diagnostic capture while resuming the meter and deleting audio', async () => {
+    let rejectCapture: ((error: Error) => void) | undefined;
+    (captureRecognitionClip as jest.Mock).mockImplementation(
+      () => new Promise((_resolve, reject) => {
+        rejectCapture = reject;
+      }),
+    );
+    const { result } = await renderRecognition();
+    let recognition: Promise<void> | undefined;
+
+    await act(async () => {
+      recognition = result.current.recognize({
+        mode: 'diagnostic',
+        clipDurationMs: 5_000,
+      });
+      await flushMicrotasks();
+      const error = new Error('capture interrupted');
+      error.name = 'AbortError';
+      rejectCapture?.(error);
+      await recognition;
+    });
+
+    expect(resumeAfterRecognition).toHaveBeenCalledWith(true);
+    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/recognition.m4a');
+    expect(recognizeAudD).not.toHaveBeenCalled();
+    expect(result.current.pendingDiagnosticTrial).toBeNull();
   });
 });

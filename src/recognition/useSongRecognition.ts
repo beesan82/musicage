@@ -11,12 +11,22 @@ import {
 } from './captureRecognitionClip';
 import { lookupLrclib } from './lrclibClient';
 import { resolveLyrics } from './resolveLyrics';
+import { createDiagnosticSample } from './syncDiagnostics/createDiagnosticSample';
+import { validateDiagnosticSample } from './syncDiagnostics/evaluateCalibration';
 import { getAudDToken } from './tokenStore';
-import type { LyricResult, RecognitionViewState } from './types';
+import type {
+  LyricResult,
+  PendingDiagnosticTrial,
+  RecognitionRequest,
+  RecognitionViewState,
+} from './types';
 
 const SETUP_REQUIRED_MESSAGE = 'AudDのトークンを設定してください。';
 const RECOGNITION_ERROR_MESSAGE = '曲を読み取れませんでした。もう一度試してください。';
-const DEFAULT_RECOGNITION_CLIP_DURATION_MS = 12_000;
+const DEFAULT_NORMAL_RECOGNITION_REQUEST: RecognitionRequest = {
+  mode: 'normal',
+  clipDurationMs: 12_000,
+};
 
 export interface MeterRecognitionHandoff {
   pauseForRecognition(): Promise<boolean>;
@@ -26,7 +36,8 @@ export interface MeterRecognitionHandoff {
 export interface SongRecognition {
   state: RecognitionViewState;
   hasToken: boolean;
-  recognize(): Promise<void>;
+  pendingDiagnosticTrial: PendingDiagnosticTrial | null;
+  recognize(request?: RecognitionRequest): Promise<void>;
   retry(): Promise<void>;
   refreshTokenPresence(): Promise<void>;
 }
@@ -92,10 +103,12 @@ export function useSongRecognition({
   const recognitionRecorder = useAudioRecorder(RecordingPresets.LOW_QUALITY);
   const [state, setState] = useState<RecognitionViewState>(() => idleState(null));
   const [hasToken, setHasToken] = useState(false);
+  const [pendingDiagnosticTrial, setPendingDiagnosticTrial] = useState<PendingDiagnosticTrial | null>(null);
   const mountedRef = useRef(true);
   const appStateRef = useRef(AppState.currentState ?? 'active');
   const activeRecognitionRef = useRef<ActiveRecognition | null>(null);
   const lastSuccessfulResultRef = useRef<LyricResult | null>(null);
+  const lastRecognitionRequestRef = useRef<RecognitionRequest | null>(null);
 
   const isActiveRecognition = useCallback((active: ActiveRecognition) => (
     mountedRef.current
@@ -164,7 +177,7 @@ export function useSongRecognition({
     }
   }, []);
 
-  const recognize = useCallback(async () => {
+  const recognize = useCallback(async (request: RecognitionRequest = DEFAULT_NORMAL_RECOGNITION_REQUEST) => {
     if (activeRecognitionRef.current !== null || appStateRef.current !== 'active') {
       return;
     }
@@ -176,6 +189,8 @@ export function useSongRecognition({
       ownsRecorder: false,
     };
     activeRecognitionRef.current = active;
+    lastRecognitionRequestRef.current = request;
+    setPendingDiagnosticTrial(null);
     let clip: CapturedRecognitionClip | null = null;
 
     try {
@@ -217,8 +232,9 @@ export function useSongRecognition({
         });
         active.ownsRecorder = true;
         clip = await captureRecognitionClip(recognitionRecorder, {
-          durationMs: DEFAULT_RECOGNITION_CLIP_DURATION_MS,
+          durationMs: request.clipDurationMs,
           now: () => performance.now(),
+          onCaptureStarted: request.onCaptureStarted,
           signal: active.controller.signal,
           wait: (durationMs) => waitForDuration(durationMs, active.controller.signal),
         });
@@ -245,25 +261,48 @@ export function useSongRecognition({
         file,
         signal: active.controller.signal,
       });
+      const auddResponseMonotonicMs = performance.now();
 
       if (!isActiveRecognition(active)) {
         return;
+      }
+
+      let record = null;
+
+      if (track) {
+        setState({
+          phase: 'resolving_lyrics',
+          result: lastSuccessfulResultRef.current,
+          message: null,
+          retryable: false,
+        });
+        record = await lookupLrclib(track, undefined, active.controller.signal);
+      }
+
+      if (!isActiveRecognition(active)) {
+        return;
+      }
+
+      if (request.mode === 'diagnostic') {
+        const sample = await createDiagnosticSample({
+          capture: clip,
+          track,
+          auddResponseMonotonicMs,
+          lrclib: record,
+        });
+
+        if (!isActiveRecognition(active)) {
+          return;
+        }
+
+        setPendingDiagnosticTrial({
+          sample,
+          invalidReasons: validateDiagnosticSample(sample),
+        });
       }
 
       if (!track) {
         setState(idleState({ kind: 'not_recognized' }));
-        return;
-      }
-
-      setState({
-        phase: 'resolving_lyrics',
-        result: lastSuccessfulResultRef.current,
-        message: null,
-        retryable: false,
-      });
-      const record = await lookupLrclib(track, undefined, active.controller.signal);
-
-      if (!isActiveRecognition(active)) {
         return;
       }
 
@@ -312,9 +351,13 @@ export function useSongRecognition({
     stopAndDeleteRecognitionRecorder,
   ]);
 
-  useEffect(() => {
-    void refreshTokenPresence();
-  }, [refreshTokenPresence]);
+  const retry = useCallback(async () => {
+    const request = lastRecognitionRequestRef.current;
+
+    if (request) {
+      await recognize(request);
+    }
+  }, [recognize]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -336,8 +379,9 @@ export function useSongRecognition({
   return {
     state,
     hasToken,
+    pendingDiagnosticTrial,
     recognize,
-    retry: recognize,
+    retry,
     refreshTokenPresence,
   };
 }
