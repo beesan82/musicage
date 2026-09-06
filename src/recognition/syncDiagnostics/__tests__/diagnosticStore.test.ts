@@ -98,6 +98,33 @@ describe('diagnosticStore', () => {
     expect(file.value()).toBe('{not json');
   });
 
+  it('invalidates an existing calibration when a new safe trial is appended', async () => {
+    const file = memoryFile(JSON.stringify({
+      schemaVersion: 1,
+      samples: [sample('previous-trial')],
+      calibrations: [{
+        schemaVersion: 1,
+        clipDurationMs: 5_000,
+        anchorOffsetMs: 4_000,
+        acceptedSampleCount: 9,
+      }],
+      decision: { kind: 'approved', clipDurationMs: 5_000 },
+    }));
+    const store = createDiagnosticStore(file);
+
+    await expect(store.appendSample(sample('new-trial'))).resolves.toMatchObject({
+      ok: true,
+      snapshot: {
+        samples: [
+          expect.objectContaining({ id: 'previous-trial' }),
+          expect.objectContaining({ id: 'new-trial' }),
+        ],
+        calibrations: [],
+        decision: { kind: 'undecided' },
+      },
+    });
+  });
+
   it('clears local samples, calibrations, and decision without network access', async () => {
     const file = memoryFile(JSON.stringify({
       schemaVersion: 1,

@@ -62,6 +62,8 @@ export function createDiagnosticStore(file: DiagnosticStoreFile): SyncDiagnostic
       const snapshot: SyncDiagnosticsSnapshot = {
         ...loaded.snapshot,
         samples: [...loaded.snapshot.samples, sample],
+        calibrations: [],
+        decision: { kind: 'undecided' },
       };
 
       return writeSnapshot(file, snapshot);
