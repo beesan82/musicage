@@ -155,4 +155,13 @@ describe('LyricTypography', () => {
 
     expect(unavailable.getByText('この曲の歌詞は見つかりませんでした')).toBeTruthy();
   });
+
+  it('does not expose manual lyric timing controls', async () => {
+    const screen = await render(
+      <LyricTypography calibration={null} lyricResult={timestampedResult} reducedMotion visual={ambient} />,
+    );
+
+    expect(screen.queryByRole('button', { name: '歌詞を1秒遅らせる' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '歌詞を1秒進める' })).toBeNull();
+  });
 });

@@ -1,7 +1,9 @@
 import type { ComponentType } from 'react';
+import { StyleSheet, View } from 'react-native';
 
 import type { VisualStyle } from '../style/types';
 import { AmbientScene } from './AmbientScene';
+import { AudioReactiveWave } from './AudioReactiveWave';
 import { DanceScene } from './DanceScene';
 import { JazzScene } from './JazzScene';
 import { PopScene } from './PopScene';
@@ -19,5 +21,16 @@ const sceneByStyle: Record<VisualStyle, ComponentType<SceneProps>> = {
 export function SceneRenderer(props: SceneProps) {
   const Scene = sceneByStyle[props.visual.style];
 
-  return <Scene {...props} />;
+  return (
+    <View style={styles.root}>
+      <Scene {...props} />
+      <AudioReactiveWave reducedMotion={props.reducedMotion} visual={props.visual} />
+    </View>
+  );
 }
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
+});

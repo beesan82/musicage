@@ -107,7 +107,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
           <Text style={styles.status}>{statusLabel(microphone.status)}</Text>
         </View>
         <View style={styles.content}>
-          <View pointerEvents="none" style={styles.copyRegion}>
+          <View style={styles.copyRegion}>
             <LyricTypography
               calibration={diagnostics.approvedCalibration}
               lyricResult={recognitionState.result}
