@@ -4,10 +4,18 @@ import type { AudioFeatures, MeterFeatureProcessor } from './types';
 const SMOOTHING = 0.35;
 const TRANSIENT_SCALE = 0.35;
 const SILENCE_THRESHOLD = 0.018;
+const METER_FLOOR_DB = -72;
+const METER_CEILING_DB = -12;
 
 const dbToEnergy = (meterDb: number | undefined): number => {
-  if (!Number.isFinite(meterDb) || (meterDb ?? -160) <= -60) return 0;
-  return clamp01(((meterDb ?? -60) + 60) / 60);
+  if (!Number.isFinite(meterDb) || (meterDb ?? -160) <= METER_FLOOR_DB) return 0;
+
+  const normalized = clamp01(
+    ((meterDb ?? METER_FLOOR_DB) - METER_FLOOR_DB) /
+      (METER_CEILING_DB - METER_FLOOR_DB),
+  );
+
+  return Math.sqrt(normalized);
 };
 
 export function createMeterFeatureProcessor(): MeterFeatureProcessor {

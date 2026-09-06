@@ -1,4 +1,4 @@
-import { Animated, StyleSheet, View } from 'react-native';
+import { Animated, Easing, StyleSheet, View } from 'react-native';
 import { useEffect, useRef } from 'react';
 import Svg, {
   Defs,
@@ -11,6 +11,7 @@ import type { SceneProps } from './SceneProps';
 
 export function AmbientScene({ visual, reducedMotion = false }: SceneProps) {
   const travel = useRef(new Animated.Value(0)).current;
+  const liveDrift = useRef(new Animated.Value(visual.motion)).current;
 
   useEffect(() => {
     if (reducedMotion) {
@@ -37,6 +38,23 @@ export function AmbientScene({ visual, reducedMotion = false }: SceneProps) {
     return () => loop.stop();
   }, [reducedMotion, travel]);
 
+  useEffect(() => {
+    if (reducedMotion) {
+      liveDrift.setValue(visual.motion);
+      return;
+    }
+
+    const animation = Animated.timing(liveDrift, {
+      toValue: visual.motion,
+      duration: 110,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+
+    animation.start();
+    return () => animation.stop();
+  }, [liveDrift, reducedMotion, visual.motion]);
+
   const farOffset = travel.interpolate({
     inputRange: [0, 1],
     outputRange: [0, 18 + visual.motion * 22],
@@ -49,16 +67,28 @@ export function AmbientScene({ visual, reducedMotion = false }: SceneProps) {
     inputRange: [0, 1],
     outputRange: [12, -42 - visual.motion * 36],
   });
+  const farLiveLift = liveDrift.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -10],
+  });
+  const mistLiveLift = liveDrift.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -18],
+  });
+  const nearLiveLift = liveDrift.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -42],
+  });
 
   const farTransform = reducedMotion
-    ? [{ translateX: visual.motion * 8 }]
-    : [{ translateX: farOffset }];
+    ? [{ translateX: visual.motion * 8 }, { translateY: -visual.motion * 10 }]
+    : [{ translateX: farOffset }, { translateY: farLiveLift }];
   const mistTransform = reducedMotion
-    ? [{ translateX: -visual.motion * 16 }]
-    : [{ translateX: mistOffset }];
+    ? [{ translateX: -visual.motion * 16 }, { translateY: -visual.motion * 18 }]
+    : [{ translateX: mistOffset }, { translateY: mistLiveLift }];
   const nearTransform = reducedMotion
-    ? [{ translateY: -visual.motion * 14 }]
-    : [{ translateY: nearRise }];
+    ? [{ translateY: -visual.motion * 42 }]
+    : [{ translateY: nearRise }, { translateY: nearLiveLift }];
 
   return (
     <View style={styles.root} testID="scene-ambient">

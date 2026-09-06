@@ -5,6 +5,7 @@ import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import type { ListeningStatus, MicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import { useSongRecognition } from '../recognition/useSongRecognition';
 import type { SongRecognition } from '../recognition/useSongRecognition';
+import type { LyricResult } from '../recognition/types';
 import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
 import type { SyncDiagnosticsController } from '../recognition/syncDiagnostics/useSyncDiagnostics';
 import { MusicageApp } from './MusicageApp';
@@ -54,10 +55,10 @@ const createAnalysis = (
   resumeAfterRecognition: jest.fn().mockResolvedValue(undefined),
 });
 
-const createRecognition = (): SongRecognition => ({
+const createRecognition = (result: LyricResult | null = null): SongRecognition => ({
   state: {
     phase: 'idle',
-    result: null,
+    result,
     message: null,
     retryable: false,
   },

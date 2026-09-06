@@ -17,6 +17,15 @@ it('maps missing and floor-level dB readings to silence', () => {
   });
 });
 
+it('keeps room-level music reactive instead of treating it as silence', () => {
+  const processor = createMeterFeatureProcessor();
+
+  const result = processor.process(-66, 0);
+
+  expect(result.energy).toBeGreaterThan(0.05);
+  expect(result.silence).toBe(false);
+});
+
 it('raises energy and a transient after a quiet-to-loud change', () => {
   const processor = createMeterFeatureProcessor();
   processor.process(-55, 0);

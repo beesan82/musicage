@@ -14,7 +14,6 @@ const IDLE_COPY = '曲を読み取ると、ここに実際の歌詞が表示さ�
 const INSTRUMENTAL_COPY = 'この曲は歌詞のない演奏です。';
 const UNAVAILABLE_COPY = 'この曲の歌詞は見つかりませんでした';
 const NO_MATCH_COPY = '曲を特定できませんでした。音がはっきり聞こえる場所でもう一度。';
-
 const PALETTE_BY_STYLE: Record<VisualStyle, { primary: string; secondary: string; label: string }> = {
   ambient: { primary: '#F4F2E8', secondary: '#C9D4C4', label: '#B7C7AE' },
   jazz: { primary: '#FFF0D0', secondary: '#D7B78D', label: '#E2C18D' },
@@ -200,7 +199,7 @@ export function LyricTypography({
   });
 
   return (
-    <View pointerEvents="none" style={styles.root} testID="lyric-typography">
+    <View style={styles.root} testID="lyric-typography">
       {presentation.label ? (
         <Animated.Text style={[styles.label, { color: palette.label, opacity }]}>
           {presentation.label}
