@@ -1,11 +1,18 @@
 import { StyleSheet, Text, View } from 'react-native';
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import type { ListeningStatus } from '../audio/useMicrophoneAnalysis';
+import { AudDTokenSheet } from '../components/AudDTokenSheet';
 import { ListeningControls } from '../components/ListeningControls';
 import { LyricTypography } from '../components/LyricTypography';
+import { RecognitionControls } from '../components/RecognitionControls';
+import { SyncDiagnosticsSheet } from '../components/SyncDiagnosticsSheet';
+import { clearAudDToken, saveAudDToken } from '../recognition/tokenStore';
+import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
+import type { RecognitionRequest } from '../recognition/types';
+import { useSongRecognition } from '../recognition/useSongRecognition';
 import { SceneRenderer } from '../scenes/SceneRenderer';
 import { createInitialVisualState, selectVisualState } from '../style/styleEngine';
 import type { VisualState } from '../style/types';
@@ -29,6 +36,20 @@ function statusLabel(status: ListeningStatus): string {
 
 export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
   const microphone = useMicrophoneAnalysis();
+  const {
+    hasToken,
+    recognize,
+    refreshTokenPresence,
+    retry: retryRecognition,
+    state: recognitionState,
+    pendingDiagnosticTrial,
+  } = useSongRecognition({
+    pauseForRecognition: microphone.pauseForRecognition,
+    resumeAfterRecognition: microphone.resumeAfterRecognition,
+  });
+  const diagnostics = useSyncDiagnostics();
+  const [tokenSheetVisible, setTokenSheetVisible] = useState(false);
+  const [diagnosticsSheetVisible, setDiagnosticsSheetVisible] = useState(false);
   const visualRef = useRef<VisualState>(createInitialVisualState(0));
   const visual = useMemo(() => {
     const nowMs = Date.now();
@@ -46,6 +67,34 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
     void microphone.start();
   }, [microphone.start]);
 
+  const saveToken = useCallback(async (token: string) => {
+    await saveAudDToken(token);
+    await refreshTokenPresence();
+    setTokenSheetVisible(false);
+  }, [refreshTokenPresence]);
+
+  const clearToken = useCallback(async () => {
+    await clearAudDToken();
+    await refreshTokenPresence();
+    setTokenSheetVisible(false);
+  }, [refreshTokenPresence]);
+
+  const readNormally = useCallback(() => {
+    void recognize({
+      mode: 'normal',
+      clipDurationMs: diagnostics.approvedCalibration?.clipDurationMs ?? 12_000,
+    });
+  }, [diagnostics.approvedCalibration?.clipDurationMs, recognize]);
+
+  const openDiagnostics = useCallback(() => {
+    setTokenSheetVisible(false);
+    setDiagnosticsSheetVisible(true);
+  }, []);
+
+  const runDiagnosticTrial = useCallback((request: RecognitionRequest) => {
+    void recognize(request);
+  }, [recognize]);
+
   return (
     <View style={styles.root} testID="musicage-root">
       <View pointerEvents="none" style={styles.sceneLayer}>
@@ -59,17 +108,45 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
         </View>
         <View style={styles.content}>
           <View pointerEvents="none" style={styles.copyRegion}>
-            <LyricTypography reducedMotion={reducedMotion} visual={visual} />
+            <LyricTypography
+              calibration={diagnostics.approvedCalibration}
+              lyricResult={recognitionState.result}
+              reducedMotion={reducedMotion}
+              visual={visual}
+            />
           </View>
-          <ListeningControls
-            errorMessage={microphone.errorMessage}
-            onRetry={microphone.retry}
-            onStart={microphone.start}
-            onStop={microphone.stop}
-            status={microphone.status}
-          />
+          <View style={styles.controlsStack}>
+            <RecognitionControls
+              onOpenSettings={() => setTokenSheetVisible(true)}
+              onRecognize={readNormally}
+              onRetry={retryRecognition}
+              state={recognitionState}
+            />
+            <ListeningControls
+              errorMessage={microphone.errorMessage}
+              onRetry={microphone.retry}
+              onStart={microphone.start}
+              onStop={microphone.stop}
+              status={microphone.status}
+            />
+          </View>
         </View>
       </SafeAreaView>
+      <AudDTokenSheet
+        hasToken={hasToken}
+        onClear={clearToken}
+        onClose={() => setTokenSheetVisible(false)}
+        onOpenDiagnostics={openDiagnostics}
+        onSave={saveToken}
+        visible={tokenSheetVisible}
+      />
+      <SyncDiagnosticsSheet
+        diagnostics={diagnostics}
+        onClose={() => setDiagnosticsSheetVisible(false)}
+        onRunTrial={runDiagnosticTrial}
+        pendingTrial={pendingDiagnosticTrial}
+        visible={diagnosticsSheetVisible}
+      />
     </View>
   );
 }
@@ -117,5 +194,9 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     paddingTop: 96,
+  },
+  controlsStack: {
+    alignItems: 'flex-start',
+    gap: 16,
   },
 });

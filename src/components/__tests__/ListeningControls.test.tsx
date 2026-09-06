@@ -34,6 +34,7 @@ it('offers a stop control while listening', async () => {
   fireEvent.press(screen.getByRole('button', { name: 'マイクを止める' }));
 
   expect(onStop).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole('button', { name: '曲を読み取る' })).toBeNull();
 });
 
 it('shows recovery copy and a start action after an error', async () => {

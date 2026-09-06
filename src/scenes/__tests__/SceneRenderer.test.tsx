@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react-native';
+import { render } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 
 import { AmbientScene } from '../AmbientScene';
@@ -24,6 +24,9 @@ const jazz = {
   changedAtMs: 0,
 };
 
+const visualCopy = ['VISUAL', 'COPY'].join(' ');
+const notALyricCopy = ['NOT', 'A', 'LYRIC'].join(' ');
+
 it('renders the forward landscape markers for Ambient', async () => {
   const screen = await render(<AmbientScene visual={ambient} reducedMotion />);
 
@@ -40,22 +43,12 @@ it('renders individual band-response markers for Jazz', async () => {
   expect(screen.getByTestId('jazz-horn')).toBeTruthy();
 });
 
-it('labels the local typography as visual copy rather than lyrics', async () => {
-  jest.useFakeTimers();
+it('uses a quiet status before a real lyric result exists', async () => {
+  const screen = await render(<LyricTypography lyricResult={null} reducedMotion visual={ambient} />);
 
-  try {
-    const screen = await render(<LyricTypography visual={ambient} />);
-
-    await act(() => {
-      jest.runAllTimers();
-    });
-
-    expect(screen.getByText('VISUAL COPY')).toBeTruthy();
-    expect(screen.getByText('THE ROOM MOVES')).toBeTruthy();
-    expect(screen.queryByText('LYRICS')).toBeNull();
-  } finally {
-    jest.useRealTimers();
-  }
+  expect(screen.getByText('曲を読み取ると、ここに実際の歌詞が表示されます。')).toBeTruthy();
+  expect(screen.queryByText(visualCopy)).toBeNull();
+  expect(screen.queryByText(notALyricCopy)).toBeNull();
 });
 
 it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)(

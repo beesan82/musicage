@@ -1,14 +1,23 @@
 import {
   AudioModule,
+  RecordingPresets,
   setAudioModeAsync,
-  useAudioStream,
+  useAudioRecorder,
+  useAudioRecorderState,
 } from 'expo-audio';
-import type { AudioStreamBuffer } from 'expo-audio';
+import type { RecordingStatus } from 'expo-audio';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
-import { createFeatureProcessor } from './featureProcessor';
-import type { AudioFeatures, FeatureProcessor } from './types';
+import { deleteTemporaryRecording } from './deleteTemporaryRecording';
+import { createMeterFeatureProcessor } from './meterFeatureProcessor';
+import type { AudioFeatures, MeterFeatureProcessor } from './types';
+
+const METER_RECORDING_OPTIONS = {
+  ...RecordingPresets.LOW_QUALITY,
+  isMeteringEnabled: true,
+};
+const METER_SEGMENT_DURATION_MS = 45_000;
 
 export type ListeningStatus =
   | 'idle'
@@ -24,6 +33,8 @@ export interface MicrophoneAnalysis {
   start(): Promise<void>;
   stop(): void;
   retry(): Promise<void>;
+  pauseForRecognition(): Promise<boolean>;
+  resumeAfterRecognition(shouldResume: boolean): Promise<void>;
 }
 
 const MICROPHONE_ERROR_MESSAGE =
@@ -42,20 +53,28 @@ function createSilentFeatures(timestampMs = 0): AudioFeatures {
 }
 
 export function useMicrophoneAnalysis(): MicrophoneAnalysis {
-  const processorRef = useRef<FeatureProcessor | null>(null);
+  const processorRef = useRef<MeterFeatureProcessor | null>(null);
 
   if (processorRef.current === null) {
-    processorRef.current = createFeatureProcessor();
+    processorRef.current = createMeterFeatureProcessor();
   }
 
   const processor = processorRef.current;
   const [status, setStatus] = useState<ListeningStatus>('idle');
   const [features, setFeatures] = useState<AudioFeatures>(() => createSilentFeatures());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const statusRef = useRef<ListeningStatus>('idle');
   const appStateRef = useRef(AppState.currentState ?? 'active');
+  const mountedRef = useRef(true);
+  const nativeFailureHandlerRef = useRef<(() => void) | null>(null);
+  const recorderIdRef = useRef<string | null>(null);
+  const expectedFinishedUrisRef = useRef(new Set<string>());
+  const recognitionPauseRef = useRef(false);
   const resumeWhenActiveRef = useRef(false);
+  const rotationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rotateMeterSegmentRef = useRef<((generation: number) => Promise<void>) | null>(null);
+  const recorderOperationRef = useRef<Promise<void>>(Promise.resolve());
   const startAttemptRef = useRef(0);
+  const statusRef = useRef<ListeningStatus>('idle');
 
   const setListeningStatus = useCallback((nextStatus: ListeningStatus) => {
     statusRef.current = nextStatus;
@@ -67,39 +86,200 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     setFeatures(createSilentFeatures());
   }, [processor]);
 
-  const onBuffer = useCallback(
-    (buffer: AudioStreamBuffer) => {
-      const samples = new Float32Array(buffer.data);
-      const nextFeatures = processor.process(
-        samples,
-        buffer.sampleRate,
-        Math.round(buffer.timestamp * 1_000),
-      );
+  const clearRotationTimer = useCallback(() => {
+    if (rotationTimerRef.current !== null) {
+      clearTimeout(rotationTimerRef.current);
+      rotationTimerRef.current = null;
+    }
+  }, []);
 
-      setFeatures(nextFeatures);
-    },
-    [processor],
+  const onNativeRecorderStatus = useCallback((nativeStatus: RecordingStatus) => {
+    const recorderId = recorderIdRef.current;
+    const expectedFinish = nativeStatus.isFinished
+      && nativeStatus.url !== null
+      && expectedFinishedUrisRef.current.delete(nativeStatus.url);
+    const failed = nativeStatus.hasError
+      || nativeStatus.error !== null
+      || (nativeStatus.isFinished && !expectedFinish);
+
+    if (
+      !mountedRef.current
+      || !failed
+      || statusRef.current !== 'listening'
+      || (recorderId !== null && nativeStatus.id !== recorderId)
+    ) {
+      return;
+    }
+
+    nativeFailureHandlerRef.current?.();
+  }, []);
+
+  const meterRecorder = useAudioRecorder(METER_RECORDING_OPTIONS, onNativeRecorderStatus);
+  recorderIdRef.current = meterRecorder.id;
+  const meterState = useAudioRecorderState(meterRecorder, 120);
+
+  const runRecorderOperation = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
+    const next = recorderOperationRef.current.then(operation, operation);
+    recorderOperationRef.current = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }, []);
+
+  const stopAndDeleteMeterSegmentInOperation = useCallback(async () => {
+    clearRotationTimer();
+    const uri = meterRecorder.uri;
+    let stopError: unknown;
+
+    if (meterRecorder.isRecording) {
+      if (uri) {
+        expectedFinishedUrisRef.current.add(uri);
+      }
+
+      try {
+        await meterRecorder.stop();
+      } catch (error) {
+        if (uri) {
+          expectedFinishedUrisRef.current.delete(uri);
+        }
+        stopError = error;
+      }
+    }
+
+    try {
+      deleteTemporaryRecording(uri);
+    } catch (deleteError) {
+      if (stopError === undefined) {
+        throw deleteError;
+      }
+    }
+
+    if (stopError !== undefined) {
+      throw stopError;
+    }
+  }, [clearRotationTimer, meterRecorder]);
+
+  const stopAndDeleteMeterSegment = useCallback(
+    () => runRecorderOperation(stopAndDeleteMeterSegmentInOperation),
+    [runRecorderOperation, stopAndDeleteMeterSegmentInOperation],
   );
 
-  const { stream } = useAudioStream({
-    sampleRate: 48_000,
-    channels: 1,
-    encoding: 'float32',
-    onBuffer,
-  });
+  const scheduleMeterSegmentRotation = useCallback(
+    (generation: number) => {
+      clearRotationTimer();
+      rotationTimerRef.current = setTimeout(() => {
+        void rotateMeterSegmentRef.current?.(generation);
+      }, METER_SEGMENT_DURATION_MS);
+    },
+    [clearRotationTimer],
+  );
+
+  const startMeterSegment = useCallback(
+    (generation: number, replaceCurrentSegment = false): Promise<boolean> => runRecorderOperation(
+      async () => {
+        const canStart = () => (
+          mountedRef.current
+          && startAttemptRef.current === generation
+          && appStateRef.current === 'active'
+        );
+
+        if (!canStart()) {
+          return false;
+        }
+
+        if (replaceCurrentSegment) {
+          await stopAndDeleteMeterSegmentInOperation();
+        }
+
+        if (!canStart()) {
+          return false;
+        }
+
+        await meterRecorder.prepareToRecordAsync();
+
+        if (!canStart()) {
+          deleteTemporaryRecording(meterRecorder.uri);
+          return false;
+        }
+
+        meterRecorder.record();
+
+        if (!canStart()) {
+          await stopAndDeleteMeterSegmentInOperation();
+          return false;
+        }
+
+        scheduleMeterSegmentRotation(generation);
+        return true;
+      },
+    ),
+    [
+      meterRecorder,
+      runRecorderOperation,
+      scheduleMeterSegmentRotation,
+      stopAndDeleteMeterSegmentInOperation,
+    ],
+  );
+
+  rotateMeterSegmentRef.current = async (generation) => {
+    if (
+      !mountedRef.current
+      || startAttemptRef.current !== generation
+      || statusRef.current !== 'listening'
+      || appStateRef.current !== 'active'
+    ) {
+      return;
+    }
+
+    try {
+      await startMeterSegment(generation, true);
+    } catch {
+      if (startAttemptRef.current !== generation || !mountedRef.current) {
+        return;
+      }
+
+      resetFeatures();
+      setErrorMessage(MICROPHONE_ERROR_MESSAGE);
+      setListeningStatus('error');
+    }
+  };
+
+  const failNativeRecorderSession = useCallback(() => {
+    if (!mountedRef.current || statusRef.current !== 'listening') {
+      return;
+    }
+
+    startAttemptRef.current += 1;
+    recognitionPauseRef.current = false;
+    resumeWhenActiveRef.current = false;
+    clearRotationTimer();
+    resetFeatures();
+    setErrorMessage(MICROPHONE_ERROR_MESSAGE);
+    setListeningStatus('error');
+    void stopAndDeleteMeterSegment().catch(() => undefined);
+  }, [clearRotationTimer, resetFeatures, setListeningStatus, stopAndDeleteMeterSegment]);
+
+  nativeFailureHandlerRef.current = failNativeRecorderSession;
+
+  useEffect(() => {
+    setFeatures(processor.process(meterState.metering, Date.now()));
+  }, [meterState.metering, processor]);
 
   const stop = useCallback(() => {
     startAttemptRef.current += 1;
+    recognitionPauseRef.current = false;
     resumeWhenActiveRef.current = false;
-    stream.stop();
+    clearRotationTimer();
     resetFeatures();
     setErrorMessage(null);
     setListeningStatus('idle');
-  }, [resetFeatures, setListeningStatus, stream]);
+    void stopAndDeleteMeterSegment().catch(() => undefined);
+  }, [clearRotationTimer, resetFeatures, setListeningStatus, stopAndDeleteMeterSegment]);
 
   const start = useCallback(async () => {
-    const startAttempt = startAttemptRef.current + 1;
-    startAttemptRef.current = startAttempt;
+    const generation = startAttemptRef.current + 1;
+    startAttemptRef.current = generation;
     setListeningStatus('requesting');
     setErrorMessage(null);
 
@@ -107,8 +287,9 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
       const permission = await AudioModule.requestRecordingPermissionsAsync();
 
       if (
-        startAttemptRef.current !== startAttempt ||
-        appStateRef.current !== 'active'
+        !mountedRef.current
+        || startAttemptRef.current !== generation
+        || appStateRef.current !== 'active'
       ) {
         return;
       }
@@ -123,28 +304,38 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
         allowsRecording: true,
         playsInSilentMode: true,
         interruptionMode: 'mixWithOthers',
+        allowsBackgroundRecording: false,
       });
 
       if (
-        startAttemptRef.current !== startAttempt ||
-        appStateRef.current !== 'active'
+        !mountedRef.current
+        || startAttemptRef.current !== generation
+        || appStateRef.current !== 'active'
       ) {
         return;
       }
 
-      await stream.start();
+      const started = await startMeterSegment(generation);
 
       if (
-        startAttemptRef.current !== startAttempt ||
-        appStateRef.current !== 'active'
+        started
+        && mountedRef.current
+        && startAttemptRef.current === generation
       ) {
-        stream.stop();
+        setListeningStatus('listening');
+      }
+    } catch {
+      if (startAttemptRef.current !== generation || !mountedRef.current) {
         return;
       }
 
-      setListeningStatus('listening');
-    } catch {
-      if (startAttemptRef.current !== startAttempt) {
+      try {
+        await stopAndDeleteMeterSegment();
+      } catch {
+        // State repair below is required even when native cleanup fails.
+      }
+
+      if (startAttemptRef.current !== generation || !mountedRef.current) {
         return;
       }
 
@@ -152,7 +343,60 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
       setErrorMessage(MICROPHONE_ERROR_MESSAGE);
       setListeningStatus('error');
     }
-  }, [resetFeatures, setListeningStatus, stream]);
+  }, [resetFeatures, setListeningStatus, startMeterSegment, stopAndDeleteMeterSegment]);
+
+  const pauseForRecognition = useCallback(async (): Promise<boolean> => {
+    if (statusRef.current !== 'listening' || !meterRecorder.isRecording) {
+      return false;
+    }
+
+    const generation = startAttemptRef.current + 1;
+    startAttemptRef.current = generation;
+    recognitionPauseRef.current = false;
+    resumeWhenActiveRef.current = false;
+    clearRotationTimer();
+
+    try {
+      await stopAndDeleteMeterSegment();
+    } catch {
+      if (startAttemptRef.current === generation && mountedRef.current) {
+        resetFeatures();
+        setErrorMessage(MICROPHONE_ERROR_MESSAGE);
+        setListeningStatus('error');
+      }
+      return false;
+    }
+
+    if (startAttemptRef.current !== generation || !mountedRef.current) {
+      return false;
+    }
+
+    recognitionPauseRef.current = true;
+    resetFeatures();
+    setListeningStatus('idle');
+    return true;
+  }, [
+    clearRotationTimer,
+    meterRecorder,
+    resetFeatures,
+    setListeningStatus,
+    stopAndDeleteMeterSegment,
+  ]);
+
+  const resumeAfterRecognition = useCallback(
+    async (shouldResume: boolean) => {
+      if (!shouldResume || !recognitionPauseRef.current) {
+        return;
+      }
+
+      recognitionPauseRef.current = false;
+
+      if (mountedRef.current && appStateRef.current === 'active') {
+        await start();
+      }
+    },
+    [start],
+  );
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
@@ -165,8 +409,11 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
         resumeWhenActiveRef.current = wasListening;
 
         if (wasListening) {
-          stream.stop();
+          recognitionPauseRef.current = false;
+          clearRotationTimer();
           resetFeatures();
+          setListeningStatus('idle');
+          void stopAndDeleteMeterSegment().catch(() => undefined);
         } else if (statusRef.current === 'requesting') {
           resetFeatures();
           setListeningStatus('idle');
@@ -180,12 +427,28 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     });
 
     return () => {
+      mountedRef.current = false;
       startAttemptRef.current += 1;
+      clearRotationTimer();
+      expectedFinishedUrisRef.current.clear();
       subscription.remove();
-      stream.stop();
+      void stopAndDeleteMeterSegment().catch(() => undefined);
       processor.reset();
     };
-  }, [processor, resetFeatures, setListeningStatus, start, stream]);
+  }, [
+    clearRotationTimer,
+    processor,
+    resetFeatures,
+    setListeningStatus,
+    start,
+    stopAndDeleteMeterSegment,
+  ]);
+
+  useEffect(() => {
+    if (meterState.mediaServicesDidReset) {
+      failNativeRecorderSession();
+    }
+  }, [failNativeRecorderSession, meterState.mediaServicesDidReset]);
 
   return {
     status,
@@ -194,5 +457,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     start,
     stop,
     retry: start,
+    pauseForRecognition,
+    resumeAfterRecognition,
   };
 }

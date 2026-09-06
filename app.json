@@ -9,12 +9,14 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "周囲で流れている音楽に反応する映像を表示するため、マイクを使用します。音声を保存・送信することはありません。",
+          "microphonePermission": "周囲で流れている音楽に反応する映像を表示するためにマイクを使用します。『曲を読み取る』を押したときだけ、最大12秒の音をAudDへ送信して曲を識別します。音声は履歴として保存しません。",
           "enableBackgroundRecording": false,
           "enableBackgroundPlayback": false
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-secure-store",
+      "expo-status-bar"
     ]
   }
 }
