@@ -27,6 +27,14 @@ export interface TimestampedLyricResult {
   timingEvidence: TimestampedLyricTimingEvidence;
 }
 
+export type LyricTimingStatus =
+  | { kind: 'unverified' }
+  | {
+      kind: 'calibrated';
+      localAnchorMonotonicMs: number;
+      auddTimecodeMs: number;
+    };
+
 export type LyricResult =
   | TimestampedLyricResult
   | {

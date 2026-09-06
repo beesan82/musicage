@@ -1,7 +1,13 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, StyleSheet, View } from 'react-native';
 
-import type { LyricResult, Track } from '../recognition/types';
+import { activeLyricIndex } from '../recognition/lrc';
+import {
+  currentCalibratedSongPositionMs,
+  resolveLyricTiming,
+} from '../recognition/lyricTiming';
+import type { AudDCalibration } from '../recognition/syncDiagnostics/types';
+import type { LyricResult, LyricTimingStatus, Track } from '../recognition/types';
 import type { VisualState, VisualStyle } from '../style/types';
 
 const IDLE_COPY = '曲を読み取ると、ここに実際の歌詞が表示されます。';
@@ -59,13 +65,33 @@ function staticTimestampedPhrases(lines: readonly { text: string }[]): string[] 
     .slice(0, 3);
 }
 
-function presentationFor(result: LyricResult | null): LyricPresentation {
+function presentationFor(
+  result: LyricResult | null,
+  timing: LyricTimingStatus,
+  clockNow: number,
+): LyricPresentation {
   if (!result) {
     return { label: null, track: null, previous: null, primary: IDLE_COPY, next: null };
   }
 
   switch (result.kind) {
     case 'timestamped': {
+      if (timing.kind === 'calibrated') {
+        const songPositionMs = currentCalibratedSongPositionMs(timing, clockNow);
+        const activeIndex = Math.max(0, activeLyricIndex(result.lines, songPositionMs));
+        const current = result.lines[activeIndex];
+
+        if (current) {
+          return {
+            label: '同期歌詞',
+            track: result.track,
+            previous: result.lines[activeIndex - 1]?.text ?? null,
+            primary: current.text,
+            next: result.lines[activeIndex + 1]?.text ?? null,
+          };
+        }
+      }
+
       const phrases = staticTimestampedPhrases(result.lines);
       return {
         label: '歌詞',
@@ -110,15 +136,23 @@ function presentationFor(result: LyricResult | null): LyricPresentation {
 export interface LyricTypographyProps {
   visual: VisualState;
   lyricResult: LyricResult | null;
+  calibration?: AudDCalibration | null;
   reducedMotion?: boolean;
 }
 
 export function LyricTypography({
   visual,
   lyricResult,
+  calibration = null,
   reducedMotion = false,
 }: LyricTypographyProps) {
   const expression = useRef(new Animated.Value(visual.intensity)).current;
+  const [clockNow, setClockNow] = useState(() => performance.now());
+  const timing = useMemo<LyricTimingStatus>(() => (
+    lyricResult?.kind === 'timestamped'
+      ? resolveLyricTiming(lyricResult, calibration)
+      : { kind: 'unverified' }
+  ), [calibration, lyricResult]);
 
   useEffect(() => {
     if (reducedMotion) {
@@ -136,9 +170,20 @@ export function LyricTypography({
     return () => animation.stop();
   }, [expression, reducedMotion, visual.intensity]);
 
+  useEffect(() => {
+    if (timing.kind !== 'calibrated') {
+      return;
+    }
+
+    setClockNow(performance.now());
+    const interval = setInterval(() => setClockNow(performance.now()), 250);
+
+    return () => clearInterval(interval);
+  }, [timing]);
+
   const presentation = useMemo(
-    () => presentationFor(lyricResult),
-    [lyricResult],
+    () => presentationFor(lyricResult, timing, clockNow),
+    [clockNow, lyricResult, timing],
   );
   const palette = PALETTE_BY_STYLE[visual.style];
   const opacity = expression.interpolate({
