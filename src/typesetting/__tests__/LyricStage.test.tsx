@@ -7,7 +7,7 @@ import { directSongByRules } from '../../direction/ruleBasedDirector';
 import type { SongDirection } from '../../direction/types';
 import type { LyricLine } from '../../recognition/types';
 import * as fonts from '../fonts';
-import { LyricStage } from '../LyricStage';
+import { anchoredTime, LyricStage } from '../LyricStage';
 import type { LyricStageProps } from '../LyricStage';
 
 const METRICS = {
@@ -253,4 +253,25 @@ test('renders a still stage with reducedMotion', async () => {
     reducedMotion: true,
   });
   expect(getAllByTestId(/^glyph-/)).toHaveLength(4);
+});
+
+describe('anchoredTime', () => {
+  test('starts at the anchor on the frame that pins it and advances with frame time', () => {
+    expect(anchoredTime(5000, 900, 900, 0)).toBe(5000);
+    expect(anchoredTime(5000, 900, 916, 5000)).toBe(5016);
+  });
+
+  test('does not add a paused gap on top of a fresh anchor', () => {
+    // Frames paused for 60 s; JS re-anchors to the real clock and the first frame after
+    // the pause pins it, so time lands on the real clock instead of now + gap.
+    const beforePause = anchoredTime(1000, 0, 100, 1000);
+    expect(beforePause).toBe(1100);
+    expect(anchoredTime(61_100, 60_100, 60_100, beforePause)).toBe(61_100);
+    expect(anchoredTime(61_100, 60_100, 60_116, 61_100)).toBe(61_116);
+  });
+
+  test('never moves backwards when a later anchor lags the clock', () => {
+    expect(anchoredTime(2000, 500, 500, 2010)).toBe(2010);
+    expect(anchoredTime(2000, 500, 530, 2010)).toBe(2030);
+  });
 });

@@ -42,6 +42,21 @@ export interface LyricStageProps {
 
 type StageFonts = (key: FontKey, weight: FontWeight, sizePx: number) => SkFont;
 
+/**
+ * Stage clock on a frame: the last JS anchor plus the frame time since the first frame
+ * that saw it. Never moves backwards, and never runs past the real clock however long
+ * frames were paused, because it is measured from an anchor rather than summed from deltas.
+ */
+export function anchoredTime(
+  anchorNowMs: number,
+  anchorFrameMs: number,
+  frameMs: number,
+  previousTimeMs: number,
+): number {
+  'worklet';
+  return Math.max(previousTimeMs, anchorNowMs + (frameMs - anchorFrameMs));
+}
+
 const MARGIN = 24;
 const CONTEXT_OPACITY = 0.35;
 const CAPTION_OPACITY = 0.6;
@@ -150,18 +165,27 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
     );
   }, []);
 
-  // One clock for every glyph: seeded from the monotonic clock and advanced by frame deltas,
-  // so `time - scheduled.startedAtMs` is the line's elapsed time.
+  // One clock for every glyph, on the same clock as `scheduled.startedAtMs`, so
+  // `time - scheduled.startedAtMs` is the line's elapsed time. JS anchors it to
+  // `nowMonotonicMs`; the UI thread pins the anchor to the first frame after it and
+  // advances from there (see anchoredTime). A negative anchor frame means "not yet pinned".
   const time = useSharedValue(nowMonotonicMs);
+  const anchorNow = useSharedValue(nowMonotonicMs);
+  const anchorFrame = useSharedValue(-1);
   const frameCallback = useFrameCallback((info) => {
     'worklet';
-    time.value += info.timeSincePreviousFrame ?? 0;
+    if (anchorFrame.value < 0) anchorFrame.value = info.timestamp;
+    time.value = anchoredTime(anchorNow.value, anchorFrame.value, info.timestamp, time.value);
   }, !reducedMotion);
   useEffect(() => frameCallback.setActive(!reducedMotion), [frameCallback, reducedMotion]);
   useEffect(() => {
-    // Frames stop while the app is in the background; catch up so new lines are not held back.
-    if (nowMonotonicMs > time.value) time.value = nowMonotonicMs;
-  }, [nowMonotonicMs, time]);
+    // Unpin before moving the anchor: a frame in between then pins to the old anchor
+    // (off by at most a frame) instead of pairing the new anchor with an old pin.
+    anchorFrame.value = -1;
+    anchorNow.value = nowMonotonicMs;
+    // Without frames nothing advances the clock; motion is static then anyway.
+    if (reducedMotion) time.value = Math.max(time.value, nowMonotonicMs);
+  }, [anchorFrame, anchorNow, nowMonotonicMs, reducedMotion, time]);
 
   const lines = source.kind === 'synced' ? source.lines : null;
   const scheduled = source.kind === 'synced' ? source.scheduled : null;
