@@ -11,7 +11,9 @@ import { AppState } from 'react-native';
 
 import { deleteTemporaryRecording } from './deleteTemporaryRecording';
 import { createMeterFeatureProcessor } from './meterFeatureProcessor';
-import type { AudioFeatures, MeterFeatureProcessor } from './types';
+import { createMeterEarAdapter } from './earFeaturesFromMeter';
+import type { MeterEarAdapter } from './earFeaturesFromMeter';
+import type { AudioFeatures, EarFeatures, MeterFeatureProcessor } from './types';
 
 const METER_RECORDING_OPTIONS = {
   ...RecordingPresets.LOW_QUALITY,
@@ -29,6 +31,7 @@ export type ListeningStatus =
 export interface MicrophoneAnalysis {
   status: ListeningStatus;
   features: AudioFeatures;
+  ear: EarFeatures;
   errorMessage: string | null;
   start(): Promise<void>;
   stop(): void;
@@ -52,6 +55,10 @@ function createSilentFeatures(timestampMs = 0): AudioFeatures {
   };
 }
 
+function createSilentEar(timestampMs = 0): EarFeatures {
+  return { timestampMs, rms: 0, low: 0, mid: 0, high: 0 };
+}
+
 export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   const processorRef = useRef<MeterFeatureProcessor | null>(null);
 
@@ -60,6 +67,14 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   }
 
   const processor = processorRef.current;
+  const earAdapterRef = useRef<MeterEarAdapter | null>(null);
+
+  if (earAdapterRef.current === null) {
+    earAdapterRef.current = createMeterEarAdapter();
+  }
+
+  const earAdapter = earAdapterRef.current;
+  const [ear, setEar] = useState<EarFeatures>(() => createSilentEar());
   const [status, setStatus] = useState<ListeningStatus>('idle');
   const [features, setFeatures] = useState<AudioFeatures>(() => createSilentFeatures());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -83,8 +98,10 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
 
   const resetFeatures = useCallback(() => {
     processor.reset();
+    earAdapter.reset();
     setFeatures(createSilentFeatures());
-  }, [processor]);
+    setEar(createSilentEar());
+  }, [earAdapter, processor]);
 
   const clearRotationTimer = useCallback(() => {
     if (rotationTimerRef.current !== null) {
@@ -116,7 +133,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
 
   const meterRecorder = useAudioRecorder(METER_RECORDING_OPTIONS, onNativeRecorderStatus);
   recorderIdRef.current = meterRecorder.id;
-  const meterState = useAudioRecorderState(meterRecorder, 120);
+  const meterState = useAudioRecorderState(meterRecorder, 60);
 
   const runRecorderOperation = useCallback(<T,>(operation: () => Promise<T>): Promise<T> => {
     const next = recorderOperationRef.current.then(operation, operation);
@@ -263,8 +280,10 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   nativeFailureHandlerRef.current = failNativeRecorderSession;
 
   useEffect(() => {
-    setFeatures(processor.process(meterState.metering, Date.now()));
-  }, [meterState.metering, processor]);
+    const timestampMs = Date.now();
+    setFeatures(processor.process(meterState.metering, timestampMs));
+    setEar(earAdapter.process(meterState.metering, timestampMs));
+  }, [earAdapter, meterState.metering, processor]);
 
   const stop = useCallback(() => {
     startAttemptRef.current += 1;
@@ -453,6 +472,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   return {
     status,
     features,
+    ear,
     errorMessage,
     start,
     stop,

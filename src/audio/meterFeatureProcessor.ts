@@ -7,7 +7,7 @@ const SILENCE_THRESHOLD = 0.018;
 const METER_FLOOR_DB = -72;
 const METER_CEILING_DB = -12;
 
-const dbToEnergy = (meterDb: number | undefined): number => {
+export const dbToEnergy =(meterDb: number | undefined): number => {
   if (!Number.isFinite(meterDb) || (meterDb ?? -160) <= METER_FLOOR_DB) return 0;
 
   const normalized = clamp01(

@@ -54,6 +54,7 @@ const createAnalysis = (
 ): MicrophoneAnalysis => ({
   status,
   features,
+  ear: { timestampMs: 0, rms: 0, low: 0, mid: 0, high: 0 },
   errorMessage: null,
   start,
   stop: jest.fn(),
