@@ -1,4 +1,4 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -12,6 +12,8 @@ import { SyncDiagnosticsSheet } from '../components/SyncDiagnosticsSheet';
 import { SceneLockControl } from '../dev/SceneLockControl';
 import { applySceneLock } from '../dev/sceneLock';
 import { useSceneLock } from '../dev/useSceneLock';
+import { useBurnInDrift } from '../display/useBurnInDrift';
+import { useKeepScreenOn } from '../display/useKeepScreenOn';
 import { clearAudDToken, saveAudDToken } from '../recognition/tokenStore';
 import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
 import type { RecognitionPhase, RecognitionRequest } from '../recognition/types';
@@ -79,6 +81,10 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
   // next to a record with nothing but the picture and the words.
   const [controlsVisible, setControlsVisible] = useState(true);
   const sceneLock = useSceneLock();
+  // Always-on object manners: no sleep while listening, and a slow wander of
+  // the text layer so an OLED does not burn the wordmark and lyrics in.
+  useKeepScreenOn(microphone.status === 'listening');
+  const drift = useBurnInDrift(reducedMotion);
   // The style engine keeps its own history so releasing a dev scene lock
   // returns straight to whatever the room's sound would have chosen.
   const engineVisualRef = useRef<VisualState>(createInitialVisualState(0));
@@ -145,42 +151,48 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
         testID="immersive-toggle"
       />
       <SafeAreaView pointerEvents="box-none" style={styles.safeArea}>
-        <View pointerEvents="none" style={styles.wordmarkRow}>
-          <Text style={styles.wordmark}>MUSICAGE</Text>
-          <Text style={styles.status}>
-            {statusLabel(microphone.status, recognitionState.phase)}
-          </Text>
-        </View>
         <SceneLockControl sceneLock={sceneLock} />
-        <View pointerEvents="box-none" style={styles.content}>
-          <View pointerEvents="none" style={styles.copyRegion}>
-            <LyricTypography
-              calibration={diagnostics.approvedCalibration}
-              lyricResult={recognitionState.result}
-              reducedMotion={reducedMotion}
-              visual={visual}
-            />
+        <Animated.View
+          pointerEvents="box-none"
+          style={[styles.textLayer, drift]}
+          testID="text-layer"
+        >
+          <View pointerEvents="none" style={styles.wordmarkRow}>
+            <Text style={styles.wordmark}>MUSICAGE</Text>
+            <Text style={styles.status}>
+              {statusLabel(microphone.status, recognitionState.phase)}
+            </Text>
           </View>
-          <View
-            pointerEvents={controlsVisible ? 'auto' : 'none'}
-            style={[styles.controlsStack, controlsVisible ? null : styles.controlsHidden]}
-            testID="controls-stack"
-          >
-            <RecognitionControls
-              onOpenSettings={() => setTokenSheetVisible(true)}
-              onRecognize={readNormally}
-              onRetry={retryRecognition}
-              state={recognitionState}
-            />
-            <ListeningControls
-              errorMessage={microphone.errorMessage}
-              onRetry={microphone.retry}
-              onStart={microphone.start}
-              onStop={microphone.stop}
-              status={microphone.status}
-            />
+          <View pointerEvents="box-none" style={styles.content}>
+            <View pointerEvents="none" style={styles.copyRegion}>
+              <LyricTypography
+                calibration={diagnostics.approvedCalibration}
+                lyricResult={recognitionState.result}
+                reducedMotion={reducedMotion}
+                visual={visual}
+              />
+            </View>
+            <View
+              pointerEvents={controlsVisible ? 'auto' : 'none'}
+              style={[styles.controlsStack, controlsVisible ? null : styles.controlsHidden]}
+              testID="controls-stack"
+            >
+              <RecognitionControls
+                onOpenSettings={() => setTokenSheetVisible(true)}
+                onRecognize={readNormally}
+                onRetry={retryRecognition}
+                state={recognitionState}
+              />
+              <ListeningControls
+                errorMessage={microphone.errorMessage}
+                onRetry={microphone.retry}
+                onStart={microphone.start}
+                onStop={microphone.stop}
+                status={microphone.status}
+              />
+            </View>
           </View>
-        </View>
+        </Animated.View>
       </SafeAreaView>
       <AudDTokenSheet
         hasToken={hasToken}
@@ -215,6 +227,9 @@ const styles = StyleSheet.create({
     opacity: 0.2,
   },
   safeArea: {
+    flex: 1,
+  },
+  textLayer: {
     flex: 1,
   },
   wordmarkRow: {
