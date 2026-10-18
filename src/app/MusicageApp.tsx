@@ -9,6 +9,9 @@ import { ListeningControls } from '../components/ListeningControls';
 import { LyricTypography } from '../components/LyricTypography';
 import { RecognitionControls } from '../components/RecognitionControls';
 import { SyncDiagnosticsSheet } from '../components/SyncDiagnosticsSheet';
+import { SceneLockControl } from '../dev/SceneLockControl';
+import { applySceneLock } from '../dev/sceneLock';
+import { useSceneLock } from '../dev/useSceneLock';
 import { clearAudDToken, saveAudDToken } from '../recognition/tokenStore';
 import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
 import type { RecognitionRequest } from '../recognition/types';
@@ -50,18 +53,26 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
   const diagnostics = useSyncDiagnostics();
   const [tokenSheetVisible, setTokenSheetVisible] = useState(false);
   const [diagnosticsSheetVisible, setDiagnosticsSheetVisible] = useState(false);
-  const visualRef = useRef<VisualState>(createInitialVisualState(0));
-  const visual = useMemo(() => {
+  const sceneLock = useSceneLock();
+  // The style engine keeps its own history so releasing a dev scene lock
+  // returns straight to whatever the room's sound would have chosen.
+  const engineVisualRef = useRef<VisualState>(createInitialVisualState(0));
+  const engineVisual = useMemo(() => {
     const nowMs = Date.now();
 
     if (microphone.status === 'denied' || microphone.status === 'error') {
       return createInitialVisualState(nowMs);
     }
 
-    return selectVisualState(microphone.features, visualRef.current, nowMs);
+    return selectVisualState(microphone.features, engineVisualRef.current, nowMs);
   }, [microphone.features, microphone.status]);
 
-  visualRef.current = visual;
+  engineVisualRef.current = engineVisual;
+
+  const visual = useMemo(
+    () => applySceneLock(engineVisual, sceneLock.locked),
+    [engineVisual, sceneLock.locked],
+  );
 
   useEffect(() => {
     void microphone.start();
@@ -106,6 +117,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
           <Text style={styles.wordmark}>MUSICAGE</Text>
           <Text style={styles.status}>{statusLabel(microphone.status)}</Text>
         </View>
+        <SceneLockControl sceneLock={sceneLock} />
         <View style={styles.content}>
           <View style={styles.copyRegion}>
             <LyricTypography

@@ -179,4 +179,52 @@ describe('MusicageApp', () => {
     expect(screen.queryByText('PRIVATE SETUP')).toBeNull();
   });
 
+  describe('dev scene lock', () => {
+    const danceFeatures: AudioFeatures = {
+      timestampMs: 0,
+      energy: 0.7,
+      low: 0.66,
+      mid: 0.2,
+      high: 0.14,
+      transient: 0.8,
+      silence: false,
+    };
+
+    it('cycles through all five scenes and releases back to the style engine', async () => {
+      (useMicrophoneAnalysis as jest.Mock).mockReturnValue(
+        createAnalysis('listening', jest.fn(), danceFeatures),
+      );
+      const screen = await render(<MusicageApp reducedMotion />);
+      const user = userEvent.setup();
+
+      expect(screen.getByTestId('scene-dance')).toBeTruthy();
+      expect(screen.getByText('AUTO')).toBeTruthy();
+
+      for (const style of ['ambient', 'jazz', 'pop', 'dance', 'rock'] as const) {
+        await user.press(screen.getByTestId('scene-lock'));
+        expect(await screen.findByTestId(`scene-${style}`)).toBeTruthy();
+        expect(screen.getByText(style.toUpperCase())).toBeTruthy();
+      }
+
+      await user.press(screen.getByTestId('scene-lock'));
+      expect(await screen.findByTestId('scene-dance')).toBeTruthy();
+      expect(screen.getByText('AUTO')).toBeTruthy();
+    });
+
+    it('hides the lock control outside development builds', async () => {
+      // __DEV__ is a global declared by react-native; the hook reads it at render time.
+      const devGlobal = globalThis as { __DEV__?: boolean };
+      const previous = devGlobal.__DEV__;
+      devGlobal.__DEV__ = false;
+      try {
+        (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
+        const screen = await render(<MusicageApp reducedMotion />);
+
+        expect(screen.queryByTestId('scene-lock')).toBeNull();
+        expect(screen.queryByText('AUTO')).toBeNull();
+      } finally {
+        devGlobal.__DEV__ = previous;
+      }
+    });
+  });
 });
