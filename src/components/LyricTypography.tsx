@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, StyleSheet, View } from 'react-native';
+import { Animated, Easing, StyleSheet, View } from 'react-native';
 
 import { activeLyricIndex } from '../recognition/lrc';
 import {
@@ -146,6 +146,9 @@ export function LyricTypography({
   reducedMotion = false,
 }: LyricTypographyProps) {
   const expression = useRef(new Animated.Value(visual.intensity)).current;
+  const lyricEntrance = useRef(new Animated.Value(0)).current;
+  const lyricDrift = useRef(new Animated.Value(0)).current;
+  const trackEntrance = useRef(new Animated.Value(1)).current;
   const [clockNow, setClockNow] = useState(() => performance.now());
   const timing = useMemo<LyricTimingStatus>(() => (
     lyricResult?.kind === 'timestamped'
@@ -185,6 +188,63 @@ export function LyricTypography({
     [clockNow, lyricResult, timing],
   );
   const palette = PALETTE_BY_STYLE[visual.style];
+  const impact = visual.intensity > 0.68 || visual.motion > 0.76;
+  const heroFontSize = Math.max(
+    26,
+    Math.min(58, (48 * visual.textScale) - Math.max(0, presentation.primary.length - 12) * 1.15),
+  );
+  const lyricWords = useMemo(
+    () => presentation.primary.split(/(\s+)/).filter(Boolean),
+    [presentation.primary],
+  );
+
+  useEffect(() => {
+    if (reducedMotion) {
+      lyricEntrance.setValue(1);
+      lyricDrift.setValue(0);
+      return;
+    }
+
+    lyricEntrance.setValue(0);
+    lyricDrift.setValue(0);
+    const entrance = Animated.spring(lyricEntrance, {
+      toValue: 1,
+      damping: 14,
+      stiffness: 150,
+      mass: 0.7,
+      useNativeDriver: true,
+    });
+    const drift = Animated.timing(lyricDrift, {
+      toValue: 1,
+      duration: 900,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    entrance.start();
+    drift.start();
+    return () => {
+      entrance.stop();
+      drift.stop();
+    };
+  }, [lyricDrift, lyricEntrance, presentation.primary, reducedMotion]);
+
+  useEffect(() => {
+    if (!presentation.track || reducedMotion) {
+      trackEntrance.setValue(1);
+      return;
+    }
+
+    trackEntrance.setValue(0);
+    const animation = Animated.spring(trackEntrance, {
+      toValue: 1,
+      damping: 16,
+      stiffness: 170,
+      mass: 0.7,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [presentation.track?.artist, presentation.track?.title, reducedMotion, trackEntrance]);
   const opacity = expression.interpolate({
     inputRange: [0, 1],
     outputRange: [0.58, 1],
@@ -197,6 +257,12 @@ export function LyricTypography({
     inputRange: [0, 1],
     outputRange: [visual.textScale * 0.94, visual.textScale],
   });
+  const entranceScale = lyricEntrance.interpolate({ inputRange: [0, 1], outputRange: [0.78, 1] });
+  const entranceY = lyricEntrance.interpolate({ inputRange: [0, 1], outputRange: [24, 0] });
+  const driftX = lyricDrift.interpolate({ inputRange: [0, 1], outputRange: [-18, 0] });
+  const ghostOpacity = lyricEntrance.interpolate({ inputRange: [0, 1], outputRange: [0.28, 0] });
+  const trackScale = trackEntrance.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] });
+  const trackOpacity = trackEntrance.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
 
   return (
     <View style={styles.root} testID="lyric-typography">
@@ -206,7 +272,7 @@ export function LyricTypography({
         </Animated.Text>
       ) : null}
       {presentation.track ? (
-        <Animated.Text style={[styles.track, { color: palette.secondary, opacity }]}>
+        <Animated.Text style={[styles.track, { color: palette.secondary, opacity: Animated.multiply(opacity, trackOpacity), transform: [{ scale: trackScale }] }]}>
           {trackCaption(presentation.track)}
         </Animated.Text>
       ) : null}
@@ -215,7 +281,7 @@ export function LyricTypography({
           {presentation.previous}
         </Animated.Text>
       ) : null}
-      <Animated.Text
+      {!presentation.track ? <Animated.Text
         style={[
           styles.primary,
           {
@@ -229,12 +295,50 @@ export function LyricTypography({
         testID="lyric-primary"
       >
         {presentation.primary}
-      </Animated.Text>
+      </Animated.Text> : null}
       {presentation.next ? (
         <Animated.Text style={[styles.context, { color: palette.secondary, opacity }]}>
           {presentation.next}
         </Animated.Text>
       ) : null}
+      {presentation.track ? <Animated.Text
+        pointerEvents="none"
+        style={[
+          styles.ghost,
+          { color: palette.primary, opacity: ghostOpacity, transform: [{ translateX: driftX }] },
+        ]}
+      >
+        {presentation.primary.replace(/[^\s]/g, '—')}
+      </Animated.Text> : null}
+      {presentation.track ? <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.hero,
+          {
+            transform: [{ translateY: entranceY }, { scale: entranceScale }, { translateX: driftX }],
+          },
+        ]}
+      >
+        <Animated.Text
+          style={[
+            styles.heroText,
+            {
+              color: palette.primary,
+              fontSize: heroFontSize,
+              lineHeight: heroFontSize * 1.12,
+              letterSpacing,
+              opacity,
+              textShadowColor: palette.label,
+              textShadowOffset: impact ? { width: 0, height: 0 } : undefined,
+              textShadowRadius: impact ? 18 : 0,
+            },
+          ]}
+          testID="lyric-hero"
+        >
+          {presentation.primary}
+        </Animated.Text>
+        <View style={[styles.rule, { backgroundColor: palette.label, width: impact ? 132 : 72 }]} />
+      </Animated.View> : null}
     </View>
   );
 }
@@ -243,6 +347,7 @@ const styles = StyleSheet.create({
   root: {
     alignItems: 'flex-start',
     gap: 10,
+    position: 'relative',
   },
   label: {
     fontSize: 10,
@@ -265,5 +370,32 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     lineHeight: 52,
     maxWidth: '100%',
+  },
+  hero: {
+    alignItems: 'flex-start',
+    marginTop: 22,
+    maxWidth: '100%',
+  },
+  heroText: {
+    fontWeight: '900',
+    lineHeight: 62,
+    maxWidth: '100%',
+    textTransform: 'uppercase',
+  },
+  rule: {
+    height: 2,
+    marginTop: 12,
+    opacity: 0.82,
+    width: 72,
+  },
+  ghost: {
+    fontSize: 72,
+    fontWeight: '900',
+    left: -8,
+    lineHeight: 78,
+    maxWidth: '112%',
+    position: 'absolute',
+    top: 28,
+    transform: [{ skewX: '-12deg' }],
   },
 });

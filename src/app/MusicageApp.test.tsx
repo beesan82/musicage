@@ -186,6 +186,34 @@ describe('MusicageApp', () => {
     expect(screen.queryByText('PRIVATE SETUP')).toBeNull();
   });
 
+  it('names the recognition phase in the corner status while the meter is paused', async () => {
+    const recognition = createRecognition();
+    recognition.state = { ...recognition.state, phase: 'identifying' };
+    (useSongRecognition as jest.Mock).mockReturnValue(recognition);
+    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
+    const screen = await render(<MusicageApp reducedMotion />);
+
+    expect(screen.getByText('IDENTIFYING')).toBeTruthy();
+    expect(screen.queryByText('LISTENING')).toBeNull();
+  });
+
+  it('hides and restores the controls when the empty scene is tapped', async () => {
+    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
+    const screen = await render(<MusicageApp reducedMotion />);
+    const user = userEvent.setup();
+
+    expect(screen.getByTestId('controls-stack').props.pointerEvents).toBe('auto');
+
+    await user.press(screen.getByRole('button', { name: '操作を隠す' }));
+    await screen.findByRole('button', { name: '操作を表示' });
+    expect(screen.getByTestId('controls-stack').props.pointerEvents).toBe('none');
+    expect(screen.getByText('MUSICAGE')).toBeTruthy();
+
+    await user.press(screen.getByRole('button', { name: '操作を表示' }));
+    await screen.findByRole('button', { name: '操作を隠す' });
+    expect(screen.getByTestId('controls-stack').props.pointerEvents).toBe('auto');
+  });
+
   describe('dev scene lock', () => {
     const danceFeatures: AudioFeatures = {
       timestampMs: 0,
