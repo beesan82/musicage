@@ -1,4 +1,4 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -14,7 +14,7 @@ import { applySceneLock } from '../dev/sceneLock';
 import { useSceneLock } from '../dev/useSceneLock';
 import { clearAudDToken, saveAudDToken } from '../recognition/tokenStore';
 import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
-import type { RecognitionRequest } from '../recognition/types';
+import type { RecognitionPhase, RecognitionRequest } from '../recognition/types';
 import { useSongRecognition } from '../recognition/useSongRecognition';
 import { SceneRenderer } from '../scenes/SceneRenderer';
 import { createInitialVisualState, selectVisualState } from '../style/styleEngine';
@@ -24,7 +24,29 @@ interface MusicageAppProps {
   reducedMotion?: boolean;
 }
 
-function statusLabel(status: ListeningStatus): string {
+/**
+ * While a recognition pass is running the local meter is paused, so the
+ * corner status says what the app is doing instead of going quiet.
+ */
+function recognitionLabel(phase: RecognitionPhase): string | null {
+  switch (phase) {
+    case 'capturing':
+      return 'CAPTURING';
+    case 'identifying':
+      return 'IDENTIFYING';
+    case 'resolving_lyrics':
+      return 'LYRICS';
+    default:
+      return null;
+  }
+}
+
+function statusLabel(status: ListeningStatus, phase: RecognitionPhase): string {
+  const recognition = recognitionLabel(phase);
+  if (recognition) {
+    return recognition;
+  }
+
   switch (status) {
     case 'listening':
       return 'LISTENING';
@@ -53,6 +75,9 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
   const diagnostics = useSyncDiagnostics();
   const [tokenSheetVisible, setTokenSheetVisible] = useState(false);
   const [diagnosticsSheetVisible, setDiagnosticsSheetVisible] = useState(false);
+  // Tapping the empty scene hides the bottom controls so the object can sit
+  // next to a record with nothing but the picture and the words.
+  const [controlsVisible, setControlsVisible] = useState(true);
   const sceneLock = useSceneLock();
   // The style engine keeps its own history so releasing a dev scene lock
   // returns straight to whatever the room's sound would have chosen.
@@ -112,14 +137,23 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
         <SceneRenderer reducedMotion={reducedMotion} visual={visual} />
       </View>
       <View pointerEvents="none" style={styles.scrim} />
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.wordmarkRow}>
+      <Pressable
+        accessibilityLabel={controlsVisible ? '操作を隠す' : '操作を表示'}
+        accessibilityRole="button"
+        onPress={() => setControlsVisible((visible) => !visible)}
+        style={styles.immersiveToggle}
+        testID="immersive-toggle"
+      />
+      <SafeAreaView pointerEvents="box-none" style={styles.safeArea}>
+        <View pointerEvents="none" style={styles.wordmarkRow}>
           <Text style={styles.wordmark}>MUSICAGE</Text>
-          <Text style={styles.status}>{statusLabel(microphone.status)}</Text>
+          <Text style={styles.status}>
+            {statusLabel(microphone.status, recognitionState.phase)}
+          </Text>
         </View>
         <SceneLockControl sceneLock={sceneLock} />
-        <View style={styles.content}>
-          <View style={styles.copyRegion}>
+        <View pointerEvents="box-none" style={styles.content}>
+          <View pointerEvents="none" style={styles.copyRegion}>
             <LyricTypography
               calibration={diagnostics.approvedCalibration}
               lyricResult={recognitionState.result}
@@ -127,7 +161,11 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
               visual={visual}
             />
           </View>
-          <View style={styles.controlsStack}>
+          <View
+            pointerEvents={controlsVisible ? 'auto' : 'none'}
+            style={[styles.controlsStack, controlsVisible ? null : styles.controlsHidden]}
+            testID="controls-stack"
+          >
             <RecognitionControls
               onOpenSettings={() => setTokenSheetVisible(true)}
               onRecognize={readNormally}
@@ -210,5 +248,11 @@ const styles = StyleSheet.create({
   controlsStack: {
     alignItems: 'flex-start',
     gap: 16,
+  },
+  controlsHidden: {
+    opacity: 0,
+  },
+  immersiveToggle: {
+    ...StyleSheet.absoluteFill,
   },
 });
