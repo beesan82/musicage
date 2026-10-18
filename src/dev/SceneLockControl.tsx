@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text } from 'react-native';
 
 import { sceneLockLabel } from './sceneLock';
+import { useFrameRate } from './useFrameRate';
 import type { SceneLockController } from './useSceneLock';
 
 interface SceneLockControlProps {
@@ -9,10 +10,15 @@ interface SceneLockControlProps {
 
 /**
  * Small translucent pill in the top-right corner. Each tap advances
- * ambient → jazz → pop → dance → rock → AUTO. Renders nothing outside
- * development builds.
+ * ambient → jazz → pop → dance → rock → AUTO, and the pill also shows the
+ * UI-thread frame rate so heavy scenes can be spotted on a device. Renders
+ * nothing outside development builds.
  */
 export function SceneLockControl({ sceneLock }: SceneLockControlProps) {
+  // The probe lives here, not in the app, so its once-a-second update only
+  // re-renders this pill.
+  const fps = useFrameRate(sceneLock.enabled);
+
   if (!sceneLock.enabled) {
     return null;
   }
@@ -33,7 +39,7 @@ export function SceneLockControl({ sceneLock }: SceneLockControlProps) {
       testID="scene-lock"
     >
       <Text style={[styles.label, isLocked ? styles.labelLocked : null]}>
-        {sceneLockLabel(sceneLock.locked)}
+        {sceneLockLabel(sceneLock.locked, fps)}
       </Text>
     </Pressable>
   );

@@ -36,3 +36,9 @@ it('labels the lock state for the overlay', () => {
   expect(sceneLockLabel(null)).toBe('AUTO');
   expect(sceneLockLabel('rock')).toBe('ROCK');
 });
+
+it('appends the measured frame rate once one exists', () => {
+  expect(sceneLockLabel('jazz', 58)).toBe('JAZZ · 58');
+  expect(sceneLockLabel(null, 60)).toBe('AUTO · 60');
+  expect(sceneLockLabel('pop', null)).toBe('POP');
+});

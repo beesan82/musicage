@@ -35,6 +35,12 @@ export function applySceneLock(visual: VisualState, lock: SceneLock): VisualStat
   return { ...visual, style: lock };
 }
 
-export function sceneLockLabel(lock: SceneLock): string {
-  return lock === null ? 'AUTO' : lock.toUpperCase();
+/**
+ * Pill text: the lock state, followed by the UI-thread frame rate once one
+ * has been measured (e.g. "JAZZ · 58").
+ */
+export function sceneLockLabel(lock: SceneLock, fps: number | null = null): string {
+  const state = lock === null ? 'AUTO' : lock.toUpperCase();
+
+  return fps === null ? state : `${state} · ${fps}`;
 }
