@@ -1,7 +1,8 @@
-import { render } from '@testing-library/react-native';
+import { fireEvent, render } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 
 import { AmbientScene } from '../AmbientScene';
+import { AmbientSceneSkia } from '../AmbientSceneSkia';
 import { JazzScene } from '../JazzScene';
 import { SceneRenderer } from '../SceneRenderer';
 import { LyricTypography } from '../../components/LyricTypography';
@@ -133,6 +134,27 @@ it('pushes the Ambient landscape forward beyond its idle drift when live input r
     translateYAt(loud, 'ambient-horizon-near') -
       translateYAt(quiet, 'ambient-horizon-near'),
   ).toBeLessThan(-30);
+});
+
+it('routes ambient to the Skia shader scene and mounts its canvas once laid out', async () => {
+  const screen = await render(<SceneRenderer reducedMotion visual={ambient} />);
+
+  const root = screen.getByTestId('scene-ambient');
+  expect(screen.queryByTestId('ambient-skia-canvas')).toBeNull();
+
+  await fireEvent(root, 'layout', {
+    nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 844 } },
+  });
+
+  expect(screen.getByTestId('ambient-skia-canvas')).toBeTruthy();
+});
+
+it('renders the Skia Ambient scene as a still frame under reduced motion', async () => {
+  const screen = await render(
+    <AmbientSceneSkia reducedMotion visual={{ ...ambient, intensity: 0.7, motion: 0.6 }} />,
+  );
+
+  expect(screen.getByTestId('scene-ambient')).toBeTruthy();
 });
 
 it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)(

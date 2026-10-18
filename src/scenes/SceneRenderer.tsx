@@ -2,7 +2,7 @@ import type { ComponentType } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import type { VisualStyle } from '../style/types';
-import { AmbientScene } from './AmbientScene';
+import { AmbientSceneSkia } from './AmbientSceneSkia';
 import { AudioReactiveWave } from './AudioReactiveWave';
 import { DanceScene } from './DanceScene';
 import { JazzScene } from './JazzScene';
@@ -11,7 +11,8 @@ import { RockScene } from './RockScene';
 import type { SceneProps } from './SceneProps';
 
 const sceneByStyle: Record<VisualStyle, ComponentType<SceneProps>> = {
-  ambient: AmbientScene,
+  // Skia shader rebuild; the Animated/SVG version stays in AmbientScene.tsx for comparison.
+  ambient: AmbientSceneSkia,
   jazz: JazzScene,
   pop: PopScene,
   dance: DanceScene,
