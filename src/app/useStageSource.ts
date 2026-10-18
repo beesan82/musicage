@@ -80,6 +80,9 @@ export function useStageSource({ ear, status, playback, result }: StageSourceInp
   const [beat, setBeat] = useState<BeatState>(QUIET_BEAT);
   const beatRef = useRef(beat);
   beatRef.current = beat;
+  // The stage clock's anchor. Set only at mount and when the scheduled line
+  // changes: every re-anchor is pinned at a later UI frame by a varying lag, so
+  // re-anchoring on each ear frame would make entrances stall or skip.
   const [nowMonotonicMs, setNowMonotonicMs] = useState(() => performance.now());
 
   useEffect(() => {
@@ -90,7 +93,6 @@ export function useStageSource({ ear, status, playback, result }: StageSourceInp
       return;
     }
     setBeat(engine.push(ear));
-    setNowMonotonicMs(performance.now());
   }, [ear, status]);
 
   const [scheduled, setScheduled] = useState<ScheduledLine | null>(null);

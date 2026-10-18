@@ -1,4 +1,4 @@
-import { act, fireEvent, render, userEvent, within } from '@testing-library/react-native';
+import { act, fireEvent, render, userEvent, waitFor, within } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -358,5 +358,67 @@ describe('MusicageApp', () => {
       await screen.rerender(app());
     });
     expect(lastStageProps().beat.pulse).toBe(0);
+  });
+
+  it('does not re-anchor the stage clock on ear-only re-renders', async () => {
+    const analysisAt = (timestampMs: number) =>
+      createAnalysis('listening', jest.fn(), silentFeatures, {
+        timestampMs,
+        rms: 0.1,
+        low: 0.1,
+        mid: 0.1,
+        high: 0.1,
+      });
+    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(analysisAt(0));
+    const screen = await renderApp();
+    const anchor = lastStageProps().nowMonotonicMs;
+    const renders = (LyricStage as unknown as jest.Mock).mock.calls.length;
+
+    for (let t = 60; t <= 300; t += 60) {
+      (useMicrophoneAnalysis as jest.Mock).mockReturnValue(analysisAt(t));
+      await screen.rerender(app());
+    }
+
+    expect((LyricStage as unknown as jest.Mock).mock.calls.length).toBeGreaterThan(renders);
+    expect(lastStageProps().nowMonotonicMs).toBe(anchor);
+  });
+
+  describe('with a mocked monotonic clock', () => {
+    // Jest's fake timers break Reanimated's mocked frame-callback registry, so
+    // the 50 ms interval runs on real timers and only performance.now() is moved.
+    let clockMs = 10_000;
+    beforeEach(() => {
+      clockMs = 10_000;
+      jest.spyOn(performance, 'now').mockImplementation(() => clockMs);
+    });
+    afterEach(() => jest.restoreAllMocks());
+
+    it('advances the fixture from its first line to its second on the scheduler tick', async () => {
+      (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
+      const screen = await renderApp();
+      await fireEvent.press(screen.getByTestId('fixture-control'));
+
+      const scheduledLine = () => {
+        const { source } = lastStageProps();
+        if (source.kind !== 'synced') throw new Error(`expected a synced source, got ${source.kind}`);
+        return { index: source.scheduled.index, startedAtMs: source.scheduled.startedAtMs };
+      };
+      expect(scheduledLine().index).toBe(-1);
+
+      // The fixture's first line starts at 0:02 and its second at 0:06.
+      clockMs += 2_050;
+      await waitFor(() => expect(scheduledLine().index).toBe(0));
+      const first = scheduledLine();
+      expect(first.startedAtMs).toBe(clockMs);
+      expect(lastStageProps().nowMonotonicMs).toBe(first.startedAtMs);
+
+      clockMs += 4_000;
+      await waitFor(() => expect(scheduledLine().index).toBe(1));
+      const second = scheduledLine();
+      expect(second.index).toBe(1);
+      expect(second.startedAtMs).toBeGreaterThan(first.startedAtMs);
+      // The anchor moves only with the line, onto the same clock reading.
+      expect(lastStageProps().nowMonotonicMs).toBe(second.startedAtMs);
+    });
   });
 });
