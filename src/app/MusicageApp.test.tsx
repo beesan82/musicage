@@ -27,6 +27,13 @@ jest.mock('../recognition/tokenStore', () => ({
   saveAudDToken: jest.fn(),
 }));
 
+// The dev frame-rate probe really runs under jest (requestAnimationFrame
+// fires every ~10 ms) and after one second it appends " · <fps>" to the
+// scene lock label, which made the label assertions below time-dependent.
+jest.mock('../dev/useFrameRate', () => ({
+  useFrameRate: () => null,
+}));
+
 const silentFeatures: AudioFeatures = {
   timestampMs: 0,
   energy: 0,
