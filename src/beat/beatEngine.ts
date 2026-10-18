@@ -22,10 +22,13 @@ const PHASE_PULL = 0.3;
 const PULSE_DECAY = Math.exp(-GRID_MS / 120);
 const ENERGY_ALPHA = 1 - Math.exp(-GRID_MS / 400);
 const SILENCE_HOLD_MS = 500;
+// A gap longer than this (a backgrounded mic, a stop/start without reset) is
+// not interpolated across: the engine starts over from the new sample.
+const MAX_GAP_MS = 1000;
 const SILENCE_CONFIDENCE_DECAY = Math.exp(-GRID_MS / 1000);
 // Lags scoring within this fraction of the best peak count as the same tempo
 // family; the shortest one wins so a 120 BPM click does not lock at 60.
-const OCTAVE_TOLERANCE = 0.85;
+const OCTAVE_TOLERANCE = 0.7;
 const BEATS_PER_BAR = 4;
 
 interface Tempo {
@@ -228,13 +231,19 @@ export const createBeatEngine = (options: BeatEngineOptions = {}): BeatEngine =>
   };
 
   const push = (features: EarFeatures): BeatState => {
+    if (previousSample !== null) {
+      const elapsed = features.timestampMs - previousSample.timestampMs;
+      if (elapsed === 0) return state();
+      // Time moving backwards (a clock restart) is treated like a long gap.
+      if (elapsed < 0 || elapsed > MAX_GAP_MS) reset();
+    }
     const previous = previousSample;
     if (previous === null) {
       previousRms = features.rms;
       energy = features.rms;
       step(features.timestampMs, features.rms, features.low);
       nextGridMs = features.timestampMs + GRID_MS;
-    } else if (features.timestampMs > previous.timestampMs) {
+    } else {
       // Resample onto the 20 ms grid by linear interpolation between samples.
       const span = features.timestampMs - previous.timestampMs;
       while (nextGridMs <= features.timestampMs) {
@@ -246,8 +255,6 @@ export const createBeatEngine = (options: BeatEngineOptions = {}): BeatEngine =>
         );
         nextGridMs += GRID_MS;
       }
-    } else {
-      return state();
     }
     previousSample = features;
     return state();

@@ -110,6 +110,54 @@ describe('createBeatEngine', () => {
     expect(Math.max(...states.map((entry) => entry.state.pulse))).toBe(1);
   });
 
+  test('a one-hour gap restarts the engine instead of interpolating across it', () => {
+    const engine = createBeatEngine();
+    for (const f of generateClicks(120, 10_000)) engine.push(f);
+    const resumeMs = 3_600_000;
+    const startedAt = Date.now();
+    const afterGap = engine.push({ timestampMs: resumeMs, rms: 0.9, low: 0.9, mid: 0.9, high: 0.9 });
+    expect(Date.now() - startedAt).toBeLessThan(50);
+    expect(afterGap.bpm).toBeNull();
+    expect(afterGap.confidence).toBe(0);
+    expect(afterGap.pulse).toBe(0);
+    expect(afterGap.bar).toBe(0);
+
+    let state = afterGap;
+    for (const f of generateClicks(120, 7_900)) {
+      state = engine.push({ ...f, timestampMs: resumeMs + 20 + f.timestampMs });
+      expect(state.bpm).toBeNull();
+    }
+    for (const f of generateClicks(120, 3_000)) {
+      state = engine.push({ ...f, timestampMs: resumeMs + 7_920 + f.timestampMs });
+    }
+    expect(Math.abs(state.bpm! - 120)).toBeLessThanOrEqual(3);
+  });
+
+  test('a clock that moves backwards restarts the engine rather than freezing it', () => {
+    const engine = createBeatEngine();
+    for (const f of generateClicks(120, 10_000)) engine.push(f);
+    let state!: BeatState;
+    for (const f of generateClicks(120, 10_000)) state = engine.push(f);
+    expect(Math.abs(state.bpm! - 120)).toBeLessThanOrEqual(3);
+    expect(state.nextBeatAtMs!).toBeLessThan(10_100);
+  });
+
+  test('locks onto 120 BPM with jittered 20–70 ms sample spacing', () => {
+    const dense = generateClicks(120, 12_000, 10);
+    let seed = 7;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const engine = createBeatEngine();
+    let state!: BeatState;
+    for (let index = 0; index < dense.length; index += 2 + Math.floor(random() * 6)) {
+      state = engine.push(dense[index]!);
+    }
+    expect(Math.abs(state.bpm! - 120)).toBeLessThanOrEqual(3);
+    expect(state.confidence).toBeGreaterThan(0.5);
+  });
+
   test('reset forgets the lock', () => {
     const engine = createBeatEngine();
     for (const f of generateClicks(120, 10_000)) engine.push(f);
