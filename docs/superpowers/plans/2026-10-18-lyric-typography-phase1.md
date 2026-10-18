@@ -198,12 +198,14 @@ git commit -m "feat: add direction types, validator and rule-based director"
 
 ```ts
 test('maps -12 dB to rms 1 and -72 dB or below to 0', ...);
-test('low follows rms, mid and high are derived from the rise of rms', () => {
+test('low follows rms, and high is larger on a rising sample than on a steady one', () => {
   const a = createMeterEarAdapter();
   a.process(-60, 0);
-  const f = a.process(-20, 60);
-  expect(f.low).toBeCloseTo(f.rms, 5);
-  expect(f.high).toBeGreaterThan(f.mid);  // 立ち上がりでは high が強い
+  const rising = a.process(-20, 60);
+  const steady = a.process(-20, 120);
+  expect(rising.low).toBeCloseTo(rising.rms, 5);
+  expect(rising.high).toBeGreaterThan(steady.high);
+  expect(rising.mid).toBeGreaterThan(steady.mid);
 });
 test('useMicrophoneAnalysis exposes ear with the latest timestamp', ...); // 既存テストのメーター mock を流用
 ```
