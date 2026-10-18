@@ -159,7 +159,7 @@ Expected: FAIL
 - [ ] **Step 3: `types.ts`、`validateDirection.ts`、`ruleBasedDirector.ts` を実装**
 
 ルールベースの規則（設計書 §4 フォールバック）:
-- 漢字率（`\p{Script=Han}` の割合）≥ 0.5 → `mincho`、感嘆符（`！!`）か 3 回以上現れる反復行 → `gothic-heavy`、それ以外 → `gothic`。曲全体で使用書体が 3 種になったら 3 番目を `gothic` に寄せる。
+- 漢字率（`\p{Script=Han}` の割合）≥ 0.4 → `mincho`、感嘆符（`！!`）か 3 回以上現れる反復行 → `gothic-heavy`、それ以外 → `gothic`。曲全体で使用書体が 3 種になったら 3 番目を `gothic` に寄せる。
 - 文字数 ≤ 4 → `xl`（4 行目以降は `l`）、≤ 12 → `l`、≤ 20 → `m`、≤ 30 → `s`、それ以上 → `xs`。
 - 縦横: 漢字かな主体 → `vertical`、英数字率 ≥ 0.5 または 20 文字超 → `horizontal`。
 - entrance / hold はシード付きハッシュで選ぶが、`scatter`・`shake` の直後は別のものに置き換える。
