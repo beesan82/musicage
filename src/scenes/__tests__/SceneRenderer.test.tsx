@@ -1,8 +1,10 @@
-import { render } from '@testing-library/react-native';
+import { fireEvent, render } from '@testing-library/react-native';
 import { StyleSheet } from 'react-native';
 
 import { AmbientScene } from '../AmbientScene';
+import { AmbientSceneSkia } from '../AmbientSceneSkia';
 import { JazzScene } from '../JazzScene';
+import { PopScene } from '../PopScene';
 import { SceneRenderer } from '../SceneRenderer';
 import { LyricTypography } from '../../components/LyricTypography';
 
@@ -27,17 +29,61 @@ const jazz = {
 const visualCopy = ['VISUAL', 'COPY'].join(' ');
 const notALyricCopy = ['NOT', 'A', 'LYRIC'].join(' ');
 
-function scaleYAt(screen: Awaited<ReturnType<typeof render>>, testID: string): number {
-  const style = StyleSheet.flatten(screen.getByTestId(testID).props.style);
-  const scale = style.transform?.find(
-    (transform: Record<string, unknown>) => transform.scaleY !== undefined,
-  )?.scaleY;
+interface SceneUniforms {
+  iResolution: [number, number];
+  iTime: number;
+  iIntensity: number;
+  iMotion: number;
+  iAccent: number;
+}
 
-  if (typeof scale !== 'number') {
-    throw new Error(`Expected ${testID} to expose a numeric scaleY.`);
+interface JsonNode {
+  type?: string;
+  props?: Record<string, unknown>;
+  children?: (JsonNode | string)[] | null;
+}
+
+function findJsonNode(node: JsonNode | string | null, type: string): JsonNode | null {
+  if (node === null || typeof node === 'string') {
+    return null;
+  }
+  if (node.type === type) {
+    return node;
+  }
+  for (const child of node.children ?? []) {
+    const found = findJsonNode(child, type);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Lays the scene out and reads the uniforms its runtime shader receives.
+ * Under the jest Skia mock `<Shader>` renders a plain `skShader` host element
+ * whose `uniforms` prop is the derived value SkiaShaderScene builds; the
+ * worklets mock hands that over as a plain object rather than `{ value }`.
+ */
+async function shaderUniformsAt(
+  screen: Awaited<ReturnType<typeof render>>,
+  testID: string,
+): Promise<SceneUniforms> {
+  await fireEvent(screen.getByTestId(testID), 'layout', {
+    nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 844 } },
+  });
+  const shader = findJsonNode(screen.toJSON() as JsonNode | null, 'skShader');
+  const raw = shader?.props?.uniforms as
+    | SceneUniforms
+    | { value: SceneUniforms }
+    | undefined;
+  const uniforms = raw && 'value' in raw ? raw.value : raw;
+
+  if (!uniforms || typeof uniforms.iIntensity !== 'number') {
+    throw new Error(`Expected ${testID} to mount a runtime shader with uniforms.`);
   }
 
-  return scale;
+  return uniforms;
 }
 
 function translateYAt(screen: Awaited<ReturnType<typeof render>>, testID: string): number {
@@ -53,14 +99,14 @@ function translateYAt(screen: Awaited<ReturnType<typeof render>>, testID: string
   return translateY;
 }
 
-it('renders the forward landscape markers for Ambient', async () => {
+it('renders the legacy forward landscape markers for Ambient', async () => {
   const screen = await render(<AmbientScene visual={ambient} reducedMotion />);
 
   expect(screen.getByTestId('scene-ambient')).toBeTruthy();
   expect(screen.getByTestId('ambient-horizon-near')).toBeTruthy();
 });
 
-it('renders individual band-response markers for Jazz', async () => {
+it('renders the legacy band-response markers for Jazz', async () => {
   const screen = await render(<JazzScene visual={jazz} reducedMotion />);
 
   expect(screen.getByTestId('scene-jazz')).toBeTruthy();
@@ -77,7 +123,8 @@ it('uses a quiet status before a real lyric result exists', async () => {
   expect(screen.queryByText(notALyricCopy)).toBeNull();
 });
 
-it('makes the Ambient scene visibly pulse harder for louder live input', async () => {
+it('feeds louder live input straight into the Ambient shader uniforms', async () => {
+  // One render at a time: with two trees mounted RNTL only tracks the latest.
   const quiet = await render(
     <SceneRenderer
       reducedMotion
@@ -89,6 +136,9 @@ it('makes the Ambient scene visibly pulse harder for louder live input', async (
       }}
     />,
   );
+  const quietUniforms = await shaderUniformsAt(quiet, 'scene-ambient');
+  await quiet.unmount();
+
   const loud = await render(
     <SceneRenderer
       reducedMotion
@@ -100,11 +150,19 @@ it('makes the Ambient scene visibly pulse harder for louder live input', async (
       }}
     />,
   );
+  const loudUniforms = await shaderUniformsAt(loud, 'scene-ambient');
 
-  expect(quiet.getByTestId('audio-reactive-wave')).toBeTruthy();
-  expect(scaleYAt(loud, 'audio-reactive-bar-3')).toBeGreaterThan(
-    scaleYAt(quiet, 'audio-reactive-bar-3'),
-  );
+  expect(loud.getByTestId('scene-ambient-canvas')).toBeTruthy();
+  expect(loudUniforms.iIntensity).toBeGreaterThan(quietUniforms.iIntensity);
+  expect(loudUniforms.iMotion).toBeGreaterThan(quietUniforms.iMotion);
+  expect(loudUniforms.iAccent).toBeGreaterThan(quietUniforms.iAccent);
+});
+
+it('renders a scene without any overlay bars on top of the shader', async () => {
+  const screen = await render(<SceneRenderer reducedMotion visual={ambient} />);
+
+  expect(screen.queryByTestId('audio-reactive-wave')).toBeNull();
+  expect(screen.queryByTestId('audio-reactive-bar-3')).toBeNull();
 });
 
 it('pushes the Ambient landscape forward beyond its idle drift when live input rises', async () => {
@@ -136,6 +194,32 @@ it('pushes the Ambient landscape forward beyond its idle drift when live input r
 });
 
 it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)(
+  'routes %s to a Skia shader scene and mounts its canvas once laid out',
+  async (style) => {
+    const screen = await render(
+      <SceneRenderer reducedMotion visual={{ ...ambient, style }} />,
+    );
+
+    const root = screen.getByTestId(`scene-${style}`);
+    expect(screen.queryByTestId(`scene-${style}-canvas`)).toBeNull();
+
+    await fireEvent(root, 'layout', {
+      nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 844 } },
+    });
+
+    expect(screen.getByTestId(`scene-${style}-canvas`)).toBeTruthy();
+  },
+);
+
+it('renders the Skia Ambient scene as a still frame under reduced motion', async () => {
+  const screen = await render(
+    <AmbientSceneSkia reducedMotion visual={{ ...ambient, intensity: 0.7, motion: 0.6 }} />,
+  );
+
+  expect(screen.getByTestId('scene-ambient')).toBeTruthy();
+});
+
+it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)(
   'routes %s to one scene root',
   async (style) => {
     const screen = await render(
@@ -156,9 +240,9 @@ it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)(
   },
 );
 
-it('keeps the Pop poster card tilt while it responds to motion', async () => {
+it('keeps the legacy Pop poster card tilt while it responds to motion', async () => {
   const screen = await render(
-    <SceneRenderer
+    <PopScene
       visual={{
         style: 'pop',
         intensity: 0.5,
