@@ -36,9 +36,13 @@ half4 main(float2 fragCoord) {
   float3 col = mix(skyTop, skyMid, smoothstep(0.05, 0.55, y));
   col = mix(col, horizonHaze, smoothstep(0.42, 0.70, y) * (0.32 + depth * 0.22));
 
-  // Thin high veil of cloud drifting slowly.
-  float veil = fbm(float2(x * 1.6 + flow * 0.4, y * 3.0 + 2.0));
-  col += float3(0.10, 0.12, 0.13) * veil * smoothstep(0.5, 0.15, y);
+  // Thin high veil of cloud drifting slowly. It fades out by y = 0.5, so the
+  // noise is only evaluated above that, and three octaves are enough for a
+  // layer this faint.
+  if (y < 0.5) {
+    float veil = fbm3(float2(x * 1.6 + flow * 0.4, y * 3.0 + 2.0));
+    col += float3(0.10, 0.12, 0.13) * veil * smoothstep(0.5, 0.15, y);
+  }
 
   // Distant light sitting just below the horizon.
   float2 lightPos = float2(aspect * (0.55 + sin(t * 0.07) * 0.04), 0.66 - depth * 0.05);
@@ -58,8 +62,11 @@ half4 main(float2 fragCoord) {
   col += float3(0.82, 0.86, 0.95) * star * twinkle * 0.8 * (1.0 - depth * 0.55);
 
   // Four ridge layers, far to near, each with its own parallax and fog.
+  // Every ridge crest sits below y = 0.51 for any audio value (base minus
+  // the largest possible ridgeHeight * amp * 2.2), so the upper half of the
+  // screen skips the loop and its 24 noise lookups entirely.
   float3 fogColor = float3(0.66, 0.74, 0.72);
-  for (int i = 0; i < 4; i++) {
+  if (y > 0.5) for (int i = 0; i < 4; i++) {
     float fi = float(i);
     float parallax = 0.25 + fi * 0.35;
     float base = 0.60 + fi * 0.085 - depth * (0.02 + fi * 0.035);
@@ -80,10 +87,14 @@ half4 main(float2 fragCoord) {
     col = mix(col, ridgeCol + crest + rim * float3(0.95, 0.75, 0.52), edge);
   }
 
-  // Ground mist drifting between the ridges; thicker with motion.
-  float mist = fbm(float2(x * 2.2 - flow * 1.8, y * 6.0 + t * 0.03));
+  // Ground mist drifting between the ridges; thicker with motion. Only the
+  // band between y = 0.55 and 0.95 shows it, and three octaves read the same
+  // at this opacity.
   float mistBand = smoothstep(0.55, 0.72, y) * smoothstep(0.95, 0.72, y);
-  col = mix(col, fogColor, mistBand * mist * (0.14 + motion * 0.30));
+  if (mistBand > 0.0) {
+    float mist = fbm3(float2(x * 2.2 - flow * 1.8, y * 6.0 + t * 0.03));
+    col = mix(col, fogColor, mistBand * mist * (0.14 + motion * 0.30));
+  }
 
   // Accent: a faint warm tint on the near ground.
   col += float3(0.55, 0.62, 0.45) * iAccent * 0.08 * smoothstep(0.8, 0.95, y);
