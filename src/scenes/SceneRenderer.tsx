@@ -4,19 +4,20 @@ import { StyleSheet, View } from 'react-native';
 import type { VisualStyle } from '../style/types';
 import { AmbientSceneSkia } from './AmbientSceneSkia';
 import { AudioReactiveWave } from './AudioReactiveWave';
-import { DanceScene } from './DanceScene';
-import { JazzScene } from './JazzScene';
-import { PopScene } from './PopScene';
-import { RockScene } from './RockScene';
+import { DanceSceneSkia } from './DanceSceneSkia';
+import { JazzSceneSkia } from './JazzSceneSkia';
+import { PopSceneSkia } from './PopSceneSkia';
+import { RockSceneSkia } from './RockSceneSkia';
 import type { SceneProps } from './SceneProps';
 
+// Skia shader scenes. The Animated/SVG originals (AmbientScene.tsx, JazzScene.tsx,
+// PopScene.tsx, DanceScene.tsx, RockScene.tsx) stay in the tree for comparison.
 const sceneByStyle: Record<VisualStyle, ComponentType<SceneProps>> = {
-  // Skia shader rebuild; the Animated/SVG version stays in AmbientScene.tsx for comparison.
   ambient: AmbientSceneSkia,
-  jazz: JazzScene,
-  pop: PopScene,
-  dance: DanceScene,
-  rock: RockScene,
+  jazz: JazzSceneSkia,
+  pop: PopSceneSkia,
+  dance: DanceSceneSkia,
+  rock: RockSceneSkia,
 };
 
 export function SceneRenderer(props: SceneProps) {

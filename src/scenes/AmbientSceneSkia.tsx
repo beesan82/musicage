@@ -1,25 +1,9 @@
-import { Canvas, Fill, Shader, Skia } from '@shopify/react-native-skia';
-import { useCallback, useEffect, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
-import type { LayoutChangeEvent } from 'react-native';
-import {
-  Easing,
-  useDerivedValue,
-  useFrameCallback,
-  useSharedValue,
-  withTiming,
-} from 'react-native-reanimated';
-
 import type { SceneProps } from './SceneProps';
+import { compileSceneEffect } from './skia/sceneShader';
+import { SkiaShaderScene } from './skia/SkiaShaderScene';
 
 /**
- * Ambient, rebuilt as a single full-screen SkSL shader.
- *
- * Everything that moves lives on the UI thread: time is advanced by a
- * Reanimated frame callback, the audio-driven uniforms are smoothed shared
- * values, and the Skia canvas reads them through a derived value. The JS
- * thread never re-renders for animation; it only re-renders when the view
- * size changes.
+ * Ambient: layered horizon, drifting mist and a distant light.
  *
  * Audio mapping (all 0..1):
  *   intensity -> depth: nearer ridges lift, the horizon light widens and
@@ -28,40 +12,6 @@ import type { SceneProps } from './SceneProps';
  *   accent    -> a faint warm tint along the near ground.
  */
 const AMBIENT_SKSL = `
-uniform float2 iResolution;
-uniform float  iTime;
-uniform float  iIntensity;
-uniform float  iMotion;
-uniform float  iAccent;
-
-float hash21(float2 p) {
-  p = fract(p * float2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
-}
-
-float vnoise(float2 p) {
-  float2 i = floor(p);
-  float2 f = fract(p);
-  float2 u = f * f * (3.0 - 2.0 * f);
-  float a = hash21(i);
-  float b = hash21(i + float2(1.0, 0.0));
-  float c = hash21(i + float2(0.0, 1.0));
-  float d = hash21(i + float2(1.0, 1.0));
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-float fbm(float2 p) {
-  float v = 0.0;
-  float a = 0.5;
-  for (int i = 0; i < 5; i++) {
-    v += a * vnoise(p);
-    p = p * 2.03 + float2(17.1, 9.2);
-    a *= 0.5;
-  }
-  return v;
-}
-
 float ridgeHeight(float x, float seed, float freq) {
   float broad = fbm(float2(x * freq, seed));
   float detail = vnoise(float2(x * freq * 4.0 + seed, seed * 3.0)) * 0.22;
@@ -147,91 +97,15 @@ half4 main(float2 fragCoord) {
 }
 `;
 
-function compileAmbientEffect() {
-  const effect = Skia.RuntimeEffect.Make(AMBIENT_SKSL);
-  if (!effect) {
-    throw new Error('AmbientSceneSkia: the ambient SkSL shader failed to compile.');
-  }
-  return effect;
-}
+const ambientEffect = compileSceneEffect('AmbientSceneSkia', AMBIENT_SKSL);
 
-const ambientEffect = compileAmbientEffect();
-
-const SMOOTHING = { duration: 120, easing: Easing.out(Easing.cubic) };
-
-export function AmbientSceneSkia({ visual, reducedMotion = false }: SceneProps) {
-  const [size, setSize] = useState({ width: 0, height: 0 });
-
-  const time = useSharedValue(0);
-  const intensity = useSharedValue(visual.intensity);
-  const motion = useSharedValue(visual.motion);
-  const accent = useSharedValue(visual.accent);
-
-  const frame = useFrameCallback((info) => {
-    'worklet';
-    const deltaMs = info.timeSincePreviousFrame ?? 0;
-    // Wrap so float precision inside the shader stays stable over long sessions.
-    time.value = (time.value + deltaMs / 1000) % 3600;
-  }, !reducedMotion);
-
-  useEffect(() => {
-    frame.setActive(!reducedMotion);
-    if (reducedMotion) {
-      time.value = 0;
-    }
-  }, [frame, reducedMotion, time]);
-
-  useEffect(() => {
-    if (reducedMotion) {
-      intensity.value = visual.intensity;
-      motion.value = visual.motion;
-      accent.value = visual.accent;
-      return;
-    }
-
-    intensity.value = withTiming(visual.intensity, SMOOTHING);
-    motion.value = withTiming(visual.motion, SMOOTHING);
-    accent.value = withTiming(visual.accent, SMOOTHING);
-  }, [accent, intensity, motion, reducedMotion, visual.accent, visual.intensity, visual.motion]);
-
-  const uniforms = useDerivedValue(
-    () => ({
-      iResolution: [size.width, size.height],
-      iTime: time.value,
-      iIntensity: intensity.value,
-      iMotion: motion.value,
-      iAccent: accent.value,
-    }),
-    [size.width, size.height],
-  );
-
-  const onLayout = useCallback((event: LayoutChangeEvent) => {
-    const { width, height } = event.nativeEvent.layout;
-    setSize((previous) =>
-      previous.width === width && previous.height === height ? previous : { width, height },
-    );
-  }, []);
-
+export function AmbientSceneSkia(props: SceneProps) {
   return (
-    <View onLayout={onLayout} style={styles.root} testID="scene-ambient">
-      {size.width > 0 && size.height > 0 ? (
-        <Canvas style={styles.canvas} testID="ambient-skia-canvas">
-          <Fill>
-            <Shader source={ambientEffect} uniforms={uniforms} />
-          </Fill>
-        </Canvas>
-      ) : null}
-    </View>
+    <SkiaShaderScene
+      backgroundColor="#0A1521"
+      effect={ambientEffect}
+      testID="scene-ambient"
+      {...props}
+    />
   );
 }
-
-const styles = StyleSheet.create({
-  root: {
-    backgroundColor: '#0A1521',
-    flex: 1,
-    overflow: 'hidden',
-  },
-  canvas: {
-    ...StyleSheet.absoluteFill,
-  },
-});

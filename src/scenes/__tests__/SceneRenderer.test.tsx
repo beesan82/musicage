@@ -4,6 +4,7 @@ import { StyleSheet } from 'react-native';
 import { AmbientScene } from '../AmbientScene';
 import { AmbientSceneSkia } from '../AmbientSceneSkia';
 import { JazzScene } from '../JazzScene';
+import { PopScene } from '../PopScene';
 import { SceneRenderer } from '../SceneRenderer';
 import { LyricTypography } from '../../components/LyricTypography';
 
@@ -54,14 +55,14 @@ function translateYAt(screen: Awaited<ReturnType<typeof render>>, testID: string
   return translateY;
 }
 
-it('renders the forward landscape markers for Ambient', async () => {
+it('renders the legacy forward landscape markers for Ambient', async () => {
   const screen = await render(<AmbientScene visual={ambient} reducedMotion />);
 
   expect(screen.getByTestId('scene-ambient')).toBeTruthy();
   expect(screen.getByTestId('ambient-horizon-near')).toBeTruthy();
 });
 
-it('renders individual band-response markers for Jazz', async () => {
+it('renders the legacy band-response markers for Jazz', async () => {
   const screen = await render(<JazzScene visual={jazz} reducedMotion />);
 
   expect(screen.getByTestId('scene-jazz')).toBeTruthy();
@@ -136,18 +137,23 @@ it('pushes the Ambient landscape forward beyond its idle drift when live input r
   ).toBeLessThan(-30);
 });
 
-it('routes ambient to the Skia shader scene and mounts its canvas once laid out', async () => {
-  const screen = await render(<SceneRenderer reducedMotion visual={ambient} />);
+it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)(
+  'routes %s to a Skia shader scene and mounts its canvas once laid out',
+  async (style) => {
+    const screen = await render(
+      <SceneRenderer reducedMotion visual={{ ...ambient, style }} />,
+    );
 
-  const root = screen.getByTestId('scene-ambient');
-  expect(screen.queryByTestId('ambient-skia-canvas')).toBeNull();
+    const root = screen.getByTestId(`scene-${style}`);
+    expect(screen.queryByTestId(`scene-${style}-canvas`)).toBeNull();
 
-  await fireEvent(root, 'layout', {
-    nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 844 } },
-  });
+    await fireEvent(root, 'layout', {
+      nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 844 } },
+    });
 
-  expect(screen.getByTestId('ambient-skia-canvas')).toBeTruthy();
-});
+    expect(screen.getByTestId(`scene-${style}-canvas`)).toBeTruthy();
+  },
+);
 
 it('renders the Skia Ambient scene as a still frame under reduced motion', async () => {
   const screen = await render(
@@ -178,9 +184,9 @@ it.each(['ambient', 'jazz', 'pop', 'dance', 'rock'] as const)(
   },
 );
 
-it('keeps the Pop poster card tilt while it responds to motion', async () => {
+it('keeps the legacy Pop poster card tilt while it responds to motion', async () => {
   const screen = await render(
-    <SceneRenderer
+    <PopScene
       visual={{
         style: 'pop',
         intensity: 0.5,
