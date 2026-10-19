@@ -24,6 +24,10 @@ public final class ExpoMusicageEarModule: Module {
   private var analyzer: EarAnalyzer?
   private var interruptionObserver: NSObjectProtocol?
 
+  /// Bumped by every stopListening, so a permission answer that arrives after
+  /// a stop knows it was cancelled and does not start the engine.
+  private var listenGeneration: UInt64 = 0
+
   private var matching = false
   private var session: SHSession?
   private var sessionDelegate: EarSessionDelegate?
@@ -39,9 +43,12 @@ public final class ExpoMusicageEarModule: Module {
     }
 
     AsyncFunction("startListening") { (promise: Promise) in
+      let generation = self.listenGeneration
       self.requestMicrophonePermission { granted in
         self.controlQueue.async {
-          if granted {
+          if generation != self.listenGeneration {
+            // stopListening ran while the permission prompt was up.
+          } else if granted {
             self.startEngine()
           } else {
             self.sendEvent("onEarError", ["code": "microphone_denied"])
@@ -162,6 +169,7 @@ public final class ExpoMusicageEarModule: Module {
   }
 
   private func stopListening() {
+    listenGeneration &+= 1
     cancelMatch()
     if let observer = interruptionObserver {
       NotificationCenter.default.removeObserver(observer)
@@ -264,6 +272,10 @@ public final class ExpoMusicageEarModule: Module {
       controlQueue.async { self.finishInvalidMatch(sessionId: sessionId) }
       return
     }
+    guard let trackId = item.shazamID, !trackId.isEmpty else {
+      controlQueue.async { self.finishInvalidMatch(sessionId: sessionId) }
+      return
+    }
     let predicted = item.predictedCurrentMatchOffset
     let offsetSeconds = predicted.isFinite ? predicted : item.matchOffset
     guard offsetSeconds.isFinite, offsetSeconds >= 0 else {
@@ -271,7 +283,6 @@ public final class ExpoMusicageEarModule: Module {
       return
     }
 
-    let trackId = item.shazamID ?? ""
     let title = item.title ?? ""
     let artist = item.artist ?? ""
     let artworkUrl = item.artworkURL?.absoluteString
