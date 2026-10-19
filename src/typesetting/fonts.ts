@@ -4,14 +4,15 @@ import type { SkFont, SkTypeface } from '@shopify/react-native-skia';
 export type FontKey = 'mincho' | 'mincho-old' | 'gothic' | 'gothic-heavy' | 'gothic-round' | 'brush';
 export type FontWeight = 'light' | 'regular' | 'bold';
 
-// Gothic uses the Noto Sans JP variable font for both weights: picking a weight
-// from a variable font needs variation axes, which this phase does not do.
-const NOTO_SANS_JP = require('../../assets/fonts/NotoSansJP-Variable.ttf');
-
+// Gothic is Zen Kaku Gothic New, bundled as two static files (Regular and Bold),
+// because Skia renders a variable font at its default instance only.
 export const FONT_SOURCES: Record<FontKey, { regular: number; bold?: number }> = {
   mincho: { regular: require('../../assets/fonts/ShipporiMincho-Regular.ttf') },
   'mincho-old': { regular: require('../../assets/fonts/ZenOldMincho-Regular.ttf') },
-  gothic: { regular: NOTO_SANS_JP, bold: NOTO_SANS_JP },
+  gothic: {
+    regular: require('../../assets/fonts/ZenKakuGothicNew-Regular.ttf'),
+    bold: require('../../assets/fonts/ZenKakuGothicNew-Bold.ttf'),
+  },
   'gothic-heavy': { regular: require('../../assets/fonts/DelaGothicOne-Regular.ttf') },
   'gothic-round': { regular: require('../../assets/fonts/ZenMaruGothic-Regular.ttf') },
   brush: { regular: require('../../assets/fonts/YujiSyuku-Regular.ttf') },
@@ -24,7 +25,8 @@ export function resolveFontSource(key: FontKey, weight: FontWeight): number {
 
 export type StageTypefaces = Partial<Record<FontKey, { regular: SkTypeface; bold: SkTypeface }>>;
 
-// Hooks must be called unconditionally, so every file is requested on each render.
+// Hooks must be called unconditionally, so every file is requested on each render:
+// seven files, six regular plus the gothic bold.
 export function useStageTypefaces(): StageTypefaces | null {
   const mincho = useTypeface(resolveFontSource('mincho', 'regular'));
   const minchoOld = useTypeface(resolveFontSource('mincho-old', 'regular'));

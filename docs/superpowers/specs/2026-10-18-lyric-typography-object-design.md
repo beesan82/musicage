@@ -150,7 +150,7 @@ type BeatState = {
 | --- | --- | --- |
 | `mincho` | Shippori Mincho | 文芸、静けさ、夜 |
 | `mincho-old` | Zen Old Mincho | 古風、重厚、祈り |
-| `gothic` | Noto Sans JP | 中立、都市、説明 |
+| `gothic` | Zen Kaku Gothic New | 中立、都市、説明 |
 | `gothic-heavy` | Dela Gothic One | 叫び、衝撃、見出し |
 | `gothic-round` | Zen Maru Gothic | 柔らかさ、幼さ、甘さ |
 | `brush` | Yuji Syuku | 筆、土着、祭り |
