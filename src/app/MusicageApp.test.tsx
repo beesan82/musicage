@@ -2,6 +2,7 @@ import { act, fireEvent, render, userEvent, waitFor, within } from '@testing-lib
 import type { ReactElement } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
+import { createEarEmitter } from '../audio/earStream';
 import type { AudioFeatures, EarFeatures } from '../audio/types';
 import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import type { ListeningStatus, MicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
@@ -104,12 +105,11 @@ const createAnalysis = (
   status,
   features,
   ear,
+  earStream: createEarEmitter(),
   errorMessage: null,
   start,
   stop: jest.fn(),
   retry: jest.fn(),
-  pauseForRecognition: jest.fn().mockResolvedValue(false),
-  resumeAfterRecognition: jest.fn().mockResolvedValue(undefined),
 });
 
 const createRecognition = (result: LyricResult | null = null): SongRecognition => ({

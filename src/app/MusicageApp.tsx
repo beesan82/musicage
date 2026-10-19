@@ -59,6 +59,11 @@ function statusLabel(status: ListeningStatus, phase: RecognitionPhase): string {
   }
 }
 
+// Temporary: the AudD recognizer still expects a meter handoff; a later task
+// replaces it with the native recognizer and deletes these.
+const pauseForRecognitionStub = async () => false;
+const resumeAfterRecognitionStub = async () => {};
+
 export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
   const microphone = useMicrophoneAnalysis();
   const {
@@ -69,8 +74,8 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
     state: recognitionState,
     pendingDiagnosticTrial,
   } = useSongRecognition({
-    pauseForRecognition: microphone.pauseForRecognition,
-    resumeAfterRecognition: microphone.resumeAfterRecognition,
+    pauseForRecognition: pauseForRecognitionStub,
+    resumeAfterRecognition: resumeAfterRecognitionStub,
   });
   const diagnostics = useSyncDiagnostics();
   const [tokenSheetVisible, setTokenSheetVisible] = useState(false);

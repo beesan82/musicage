@@ -8,13 +8,14 @@ export interface AudioFeatures {
   silence: boolean;
 }
 
-export interface EarFeatures {
-  timestampMs: number;
-  rms: number;
-  low: number;
-  mid: number;
-  high: number;
-}
+export type { EarFeatures } from '../../modules/expo-musicage-ear/src/types';
+
+export type ListeningStatus =
+  | 'idle'
+  | 'requesting'
+  | 'listening'
+  | 'denied'
+  | 'error';
 
 export interface MeterFeatureProcessor {
   process(meterDb: number | undefined, timestampMs: number): AudioFeatures;

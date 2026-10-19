@@ -10,6 +10,7 @@ import { AppState } from 'react-native';
 import type { AppStateStatus } from 'react-native';
 
 import { deleteTemporaryRecording } from '../deleteTemporaryRecording';
+import type { EarFeatures } from '../types';
 import { useMicrophoneAnalysis } from '../useMicrophoneAnalysis';
 
 jest.mock('expo-audio', () => ({
@@ -158,6 +159,19 @@ describe('useMicrophoneAnalysis', () => {
     expect(result.current.ear.rms).toBeGreaterThan(0);
     expect(result.current.ear.timestampMs).toBeGreaterThan(0);
     expect(result.current.ear.timestampMs).toBe(result.current.features.timestampMs);
+  });
+
+  it('emits each ear frame on earStream as well as in state', async () => {
+    const { result, rerender } = await renderHook(() => useMicrophoneAnalysis());
+    const frames: EarFeatures[] = [];
+    result.current.earStream.subscribe((frame) => frames.push(frame));
+
+    meterState = { ...meterState, metering: -4 };
+    await rerender({});
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toEqual(result.current.ear);
+    expect(frames[0]!.rms).toBeGreaterThan(0);
   });
 
   it('stamps ear frames on the performance.now() clock the line scheduler uses', async () => {
@@ -438,30 +452,6 @@ describe('useMicrophoneAnalysis', () => {
     expect(recorder.isRecording).toBe(true);
   });
 
-  it('deletes and leaves a non-resumable recovery state when recognition pause stop rejects', async () => {
-    stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
-    const { result } = await renderHook(() => useMicrophoneAnalysis());
-
-    await act(async () => {
-      await result.current.start();
-    });
-
-    let shouldResume: boolean | undefined;
-    await act(async () => {
-      shouldResume = await result.current.pauseForRecognition();
-    });
-
-    expect(shouldResume).toBe(false);
-    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
-    expect(result.current.status).toBe('error');
-    expect(result.current.errorMessage).toBe(MICROPHONE_ERROR_MESSAGE);
-
-    await act(async () => {
-      await result.current.resumeAfterRecognition(true);
-    });
-    expect(prepareToRecordAsync).toHaveBeenCalledTimes(1);
-  });
-
   it('restores the fixed startup error after cleanup stop rejects', async () => {
     recorder.isRecording = true;
     stopRecording.mockRejectedValueOnce(new Error('native stop failure'));
@@ -550,43 +540,5 @@ describe('useMicrophoneAnalysis', () => {
     expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
     expect(stopRecording).toHaveBeenCalled();
     expect(eventLog).toEqual(['prepare', 'record', 'stop', 'delete:file:///cache/meter-a.m4a']);
-  });
-
-  it('pauses for recognition and resumes only when the handoff owns an active meter', async () => {
-    const { result } = await renderHook(() => useMicrophoneAnalysis());
-
-    await act(async () => {
-      await result.current.start();
-    });
-
-    let shouldResume: boolean | undefined;
-    await act(async () => {
-      shouldResume = await result.current.pauseForRecognition();
-    });
-
-    expect(shouldResume).toBe(true);
-    expect(stopRecording).toHaveBeenCalledTimes(1);
-    expect(deleteTemporaryRecording).toHaveBeenCalledWith('file:///cache/meter-a.m4a');
-
-    await act(async () => {
-      await result.current.resumeAfterRecognition(true);
-    });
-
-    expect(prepareToRecordAsync).toHaveBeenCalledTimes(2);
-    expect(record).toHaveBeenCalledTimes(2);
-  });
-
-  it('does not restart a user-stopped meter when recognition has no active handoff', async () => {
-    const { result } = await renderHook(() => useMicrophoneAnalysis());
-
-    let shouldResume: boolean | undefined;
-    await act(async () => {
-      shouldResume = await result.current.pauseForRecognition();
-      await result.current.resumeAfterRecognition(true);
-    });
-
-    expect(shouldResume).toBe(false);
-    expect(prepareToRecordAsync).not.toHaveBeenCalled();
-    expect(record).not.toHaveBeenCalled();
   });
 });
