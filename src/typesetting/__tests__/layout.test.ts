@@ -51,6 +51,31 @@ test('vertical: a rotated glyph origin is centred on the column and starts at it
   expect(a.y).toBeCloseTo(TOP + M);
 });
 
+test('vertical: 、。，． stay upright and move to the upper right of their cell', () => {
+  const l = layoutLine('雨、鼓動', base, vp, measure);
+  const comma = l.glyphs[1]!;
+  expect(comma.char).toBe('、');
+  expect(comma.rotateDeg).toBe(0);
+  // An upright glyph in the second cell would sit at (195 − M/2, TOP + M + 0.88·M).
+  expect(comma.x).toBeCloseTo(195 - M / 2 + M / 2);
+  expect(comma.y).toBeCloseTo(TOP + M + M * 0.88 - M / 2);
+  // Neighbours keep the normal upright placement.
+  expect(l.glyphs[2]!.x).toBeCloseTo(195 - M / 2);
+  expect(l.glyphs[2]!.y).toBeCloseTo(TOP + 2 * M + M * 0.88);
+
+  const others = layoutLine('雨。雨，雨．', base, vp, measure);
+  for (const i of [1, 3, 5]) {
+    expect(others.glyphs[i]!.x).toBeCloseTo(195);
+    expect(others.glyphs[i]!.y).toBeCloseTo(TOP + i * M + M * 0.88 - M / 2);
+  }
+});
+
+test('horizontal: punctuation is not shifted', () => {
+  const l = layoutLine('雨、鼓動', horizontal, vp, measure);
+  expect(l.glyphs[1]!.x).toBeCloseTo(24 + M);
+  expect(l.glyphs[1]!.y).toBeCloseTo(l.glyphs[0]!.y);
+});
+
 test('horizontal: glyphs share y and advance by width, left-aligned at 24px', () => {
   const l = layoutLine('夜の底', horizontal, vp, measure);
   expect(l.columns).toBe(1);

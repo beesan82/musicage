@@ -45,10 +45,11 @@ export const GlyphLayer = memo(function GlyphLayer({
 }: GlyphLayerProps) {
   return (
     <>
-      {glyphs.map((glyph) => (
+      {glyphs.map((glyph, order) => (
         <AnimatedGlyph
           key={glyph.index}
           glyph={glyph}
+          order={order}
           glyphCount={glyphs.length}
           font={fontFor(glyph.sizePx)}
           color={accent && glyph.emphasized ? palette.accent : palette.ink}
@@ -65,6 +66,12 @@ interface AnimatedGlyphProps extends Pick<
   'time' | 'lineStartedAtMs' | 'entrance' | 'hold' | 'beat' | 'reducedMotion' | 'seed'
 > {
   glyph: PlacedGlyph;
+  /**
+   * Position among the placed (non-space) glyphs. `glyph.index` is the code-point
+   * index and counts spaces, while `glyphCount` does not, so the stagger and the
+   * per-glyph hash use this instead.
+   */
+  order: number;
   glyphCount: number;
   font: SkFont;
   color: string;
@@ -73,6 +80,7 @@ interface AnimatedGlyphProps extends Pick<
 
 function AnimatedGlyph({
   glyph,
+  order,
   glyphCount,
   font,
   color,
@@ -86,7 +94,7 @@ function AnimatedGlyph({
   seed,
 }: AnimatedGlyphProps) {
   const { pulse, phase, bar, confidence } = beat;
-  const { index, emphasized, rotateDeg } = glyph;
+  const { emphasized, rotateDeg } = glyph;
 
   const motion = useDerivedValue<GlyphTransform>(
     () =>
@@ -94,7 +102,7 @@ function AnimatedGlyph({
         entrance,
         hold,
         elapsedMs: time.value - lineStartedAtMs,
-        glyphIndex: index,
+        glyphIndex: order,
         glyphCount,
         emphasized,
         pulse: pulse.value,
@@ -104,7 +112,7 @@ function AnimatedGlyph({
         reducedMotion,
         seed,
       }),
-    [entrance, hold, lineStartedAtMs, index, glyphCount, emphasized, reducedMotion, seed],
+    [entrance, hold, lineStartedAtMs, order, glyphCount, emphasized, reducedMotion, seed],
   );
   const transform = useDerivedValue<Transforms3d>(
     () => [

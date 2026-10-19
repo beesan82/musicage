@@ -13,6 +13,9 @@ import type { LineDirection, Size } from '../direction/types';
 //   rotated 90° clockwise about its own origin, so its advance runs downward and its
 //   ascent points right: the origin sits at the cell top (centred on the advance) and
 //   is shifted so the ascent-plus-descent box straddles the column centre.
+// - Vertical punctuation (、。，．) stays upright (`rotateDeg: 0`) but its origin is
+//   shifted by (+0.5·sizePx, −0.5·sizePx) from the upright placement, so the mark
+//   sits in the cell's upper right as vertical Japanese typesetting expects.
 // - Horizontal: rows start 24px from the left and advance by each glyph's `advance`;
 //   rows are `sizePx · 1.3` apart and the block is centred vertically in the usable area.
 // - A line that needs more than two columns (rows) is retried one size smaller, down
@@ -50,6 +53,7 @@ export interface LineLayout {
 export const SIZE_RATIO: Record<Size, number> = { xs: 0.045, s: 0.06, m: 0.08, l: 0.11, xl: 0.16 };
 
 export const ROTATED_IN_VERTICAL = /[A-Za-z0-9ー（）「」『』【】()\[\]<>〈〉…‐–—]/;
+export const SHIFTED_IN_VERTICAL = /[、。，．]/;
 
 const MARGIN = 24;
 const COLUMN_GAP = 1.4;
@@ -132,8 +136,9 @@ function layoutAtSize(
       const centerX = viewport.width / 2 - line * sizePx * COLUMN_GAP;
       const cellTop = top + offset;
       const rotated = ROTATED_IN_VERTICAL.test(cell.char);
-      const x = rotated ? centerX - (-cell.ascent - cell.descent) / 2 : centerX - cell.advance / 2;
-      const y = rotated ? cellTop + (cell.sizePx - cell.advance) / 2 : cellTop - cell.ascent;
+      const shift = !rotated && SHIFTED_IN_VERTICAL.test(cell.char) ? cell.sizePx / 2 : 0;
+      const x = rotated ? centerX - (-cell.ascent - cell.descent) / 2 : centerX - cell.advance / 2 + shift;
+      const y = rotated ? cellTop + (cell.sizePx - cell.advance) / 2 : cellTop - cell.ascent - shift;
       glyphs.push(place(cell, x, y, rotated ? 90 : 0));
       boxes.push({ x: centerX - cell.sizePx / 2, y: cellTop, width: cell.sizePx, height: cell.sizePx });
     }
