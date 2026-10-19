@@ -8,7 +8,8 @@
     "ios": {
       "bundleIdentifier": "com.musicage.app",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "周囲で流れている音楽を聴き取り、曲を認識して歌詞を表示するためにマイクを使用します。音声は端末の外に送らず、保存もしません（曲の照合には ShazamKit のフィンガープリントだけを使います）。"
+        "NSMicrophoneUsageDescription": "周囲で流れている音楽を聴き取り、曲を認識して歌詞を表示するためにマイクを使用します。音声は端末の外に送らず、保存もしません（曲の照合には ShazamKit のフィンガープリントだけを使います）。",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "plugins": [
@@ -23,6 +24,12 @@
       "expo-asset",
       "expo-secure-store",
       "expo-status-bar"
-    ]
+    ],
+    "owner": "beesan",
+    "extra": {
+      "eas": {
+        "projectId": "4565a0df-4a9a-45fd-ac1e-5093f45a0249"
+      }
+    }
   }
 }
