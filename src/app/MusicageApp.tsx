@@ -10,6 +10,7 @@ import { RecognitionControls } from '../components/RecognitionControls';
 import { SyncDiagnosticsSheet } from '../components/SyncDiagnosticsSheet';
 import { FixtureControl } from '../dev/fixture/FixtureControl';
 import { useFixturePlayback } from '../dev/fixture/useFixturePlayback';
+import { DEFAULT_PALETTE } from '../direction/types';
 import { useBurnInDrift } from '../display/useBurnInDrift';
 import { useKeepScreenOn } from '../display/useKeepScreenOn';
 import { clearAudDToken, saveAudDToken } from '../recognition/tokenStore';
@@ -199,7 +200,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#101112',
+    backgroundColor: DEFAULT_PALETTE.background,
   },
   fill: {
     ...StyleSheet.absoluteFill,

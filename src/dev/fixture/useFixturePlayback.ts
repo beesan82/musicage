@@ -86,7 +86,15 @@ export function useFixturePlayback(enabled: boolean = __DEV__): FixturePlayback 
 
   const reloadDirection = useCallback(() => {
     const validated = validateSongDirection(FIXTURE_DIRECTION, FIXTURE_TEXTS);
-    if (validated !== null) setDirection(validated);
+    if (validated === null) {
+      // Dev-only hook: say why nothing changed instead of failing silently.
+      console.warn(
+        '[fixture] FIXTURE_DIRECTION failed validation; keeping the previous direction. ' +
+          'Check its lines against FIXTURE_LRC (one entry per lyric line, valid vocabulary).',
+      );
+      return;
+    }
+    setDirection(validated);
   }, []);
 
   if (!enabled) {

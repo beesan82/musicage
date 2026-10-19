@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react-native';
 
+import * as validateDirection from '../../../direction/validateDirection';
 import { FIXTURE_DIRECTION } from '../fixtureSong';
 import { fixturePositionMs, useFixturePlayback } from '../useFixturePlayback';
 
@@ -68,6 +69,23 @@ test('reloadDirection re-validates and keeps the fixture direction', async () =>
   const { result } = await renderHook(() => useFixturePlayback(true));
   await act(async () => result.current.reloadDirection());
   expect(result.current.direction).toEqual(FIXTURE_DIRECTION);
+});
+
+test('reloadDirection warns and keeps the previous direction when validation fails', async () => {
+  const reloaded = { ...FIXTURE_DIRECTION };
+  const validate = jest.spyOn(validateDirection, 'validateSongDirection').mockReturnValue(reloaded);
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const { result } = await renderHook(() => useFixturePlayback(true));
+
+  await act(async () => result.current.reloadDirection());
+  expect(result.current.direction).toBe(reloaded);
+  expect(warn).not.toHaveBeenCalled();
+
+  validate.mockReturnValue(null);
+  await act(async () => result.current.reloadDirection());
+  expect(result.current.direction).toBe(reloaded);
+  expect(warn).toHaveBeenCalledTimes(1);
+  expect(warn.mock.calls[0]?.[0]).toMatch(/FIXTURE_DIRECTION failed validation/);
 });
 
 test('is inert when disabled', async () => {

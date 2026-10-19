@@ -20,7 +20,8 @@ function formatPosition(positionMs: number): string {
 
 /**
  * Development pill (top-right, below the scene lock) that drives the fictional
- * fixture song: tap = play/pause, long press = on/off, side buttons seek ±5 s.
+ * fixture song: tap = play/pause, long press = on/off, side buttons seek ±5 s,
+ * and RELOAD re-validates the fixture direction.
  * Renders nothing outside development builds.
  */
 export function FixtureControl({ playback }: FixtureControlProps) {
@@ -79,6 +80,16 @@ export function FixtureControl({ playback }: FixtureControlProps) {
         testID="fixture-seek-forward"
       >
         <Text style={styles.label}>+5s</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel="フィクスチャの演出を再読み込み"
+        accessibilityRole="button"
+        hitSlop={8}
+        onPress={() => playback.reloadDirection()}
+        style={styles.pill}
+        testID="fixture-reload"
+      >
+        <Text style={styles.label}>RELOAD</Text>
       </Pressable>
     </View>
   );

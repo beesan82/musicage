@@ -90,3 +90,12 @@ test('long press toggles and the side buttons seek by 5 seconds', async () => {
   await fireEvent.press(screen.getByTestId('fixture-seek-forward'));
   expect(pb.seek).toHaveBeenLastCalledWith(5_000);
 });
+
+test('the RELOAD button re-validates the fixture direction', async () => {
+  const pb = playback();
+  const screen = await render(<FixtureControl playback={pb} />);
+  expect(screen.getByText('RELOAD')).toBeTruthy();
+  await fireEvent.press(screen.getByTestId('fixture-reload'));
+  expect(pb.reloadDirection).toHaveBeenCalledTimes(1);
+  expect(pb.seek).not.toHaveBeenCalled();
+});

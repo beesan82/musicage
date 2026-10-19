@@ -11,7 +11,7 @@ import { directSongByRules } from '../direction/ruleBasedDirector';
 import type { SongDirection } from '../direction/types';
 import { parseLrc } from '../recognition/lrc';
 import type { LyricResult } from '../recognition/types';
-import { scheduleLine } from '../sync/lineScheduler';
+import { isPastOutro, scheduleLine } from '../sync/lineScheduler';
 import type { ScheduledLine } from '../sync/lineScheduler';
 import type { StageSource } from '../typesetting/LyricStage';
 import type { IdleTrack } from '../typesetting/idleComposition';
@@ -107,14 +107,15 @@ export function useStageSource({ ear, status, playback, result }: StageSourceInp
     }
     const tick = () => {
       const now = performance.now();
-      const next = scheduleLine(
-        FIXTURE_LINES,
-        fixturePositionMs({ anchor, paused }, now),
-        beatRef.current,
-        now,
-        previousRef.current,
-      );
-      if (sameLine(previousRef.current, next)) return;
+      const positionMs = fixturePositionMs({ anchor, paused }, now);
+      const previous = previousRef.current;
+      // OUTRO_MS after the last line the stage returns to idle (index −1).
+      const next = isPastOutro(FIXTURE_LINES, positionMs)
+        ? previous?.index === -1
+          ? previous
+          : { index: -1, startedAtMs: now, isEmpty: true }
+        : scheduleLine(FIXTURE_LINES, positionMs, beatRef.current, now, previous);
+      if (sameLine(previous, next)) return;
       previousRef.current = next;
       setScheduled(next);
       setNowMonotonicMs(now);

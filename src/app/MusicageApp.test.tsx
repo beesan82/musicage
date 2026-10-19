@@ -5,12 +5,14 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import type { AudioFeatures, EarFeatures } from '../audio/types';
 import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import type { ListeningStatus, MicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
-import { FIXTURE_TRACK } from '../dev/fixture/fixtureSong';
+import { FIXTURE_LRC, FIXTURE_TRACK } from '../dev/fixture/fixtureSong';
 import { useSongRecognition } from '../recognition/useSongRecognition';
 import type { SongRecognition } from '../recognition/useSongRecognition';
+import { parseLrc } from '../recognition/lrc';
 import type { LyricResult, Track } from '../recognition/types';
 import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
 import type { SyncDiagnosticsController } from '../recognition/syncDiagnostics/useSyncDiagnostics';
+import { OUTRO_MS } from '../sync/lineScheduler';
 import { LyricStage } from '../typesetting/LyricStage';
 import type { LyricStageProps } from '../typesetting/LyricStage';
 import { MusicageApp } from './MusicageApp';
@@ -419,6 +421,40 @@ describe('MusicageApp', () => {
       expect(second.startedAtMs).toBeGreaterThan(first.startedAtMs);
       // The anchor moves only with the line, onto the same clock reading.
       expect(lastStageProps().nowMonotonicMs).toBe(second.startedAtMs);
+    });
+
+    it('returns the stage to idle 15 s after the last fixture line', async () => {
+      (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
+      const screen = await renderApp();
+      await fireEvent.press(screen.getByTestId('fixture-control'));
+
+      const scheduled = () => {
+        const { source } = lastStageProps();
+        if (source.kind !== 'synced') throw new Error(`expected a synced source, got ${source.kind}`);
+        return source.scheduled;
+      };
+      const lines = parseLrc(FIXTURE_LRC);
+      const lastStartMs = lines[lines.length - 1]!.startMs;
+      const startMs = clockMs;
+
+      // On the last line, within the outro window...
+      clockMs = startMs + lastStartMs + 1_000;
+      await waitFor(() => expect(scheduled().index).toBe(lines.length - 1));
+
+      // ...then past the last line + OUTRO_MS: idle again (index −1, empty).
+      clockMs = startMs + lastStartMs + OUTRO_MS + 100;
+      await waitFor(() => expect(scheduled().index).toBe(-1));
+      const idle = scheduled();
+      expect(idle.isEmpty).toBe(true);
+      expect(idle.startedAtMs).toBe(clockMs);
+      expect(lastStageProps().nowMonotonicMs).toBe(clockMs);
+
+      // Later ticks keep the same idle schedule instead of re-anchoring.
+      clockMs += 500;
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      });
+      expect(scheduled()).toBe(idle);
     });
   });
 });
