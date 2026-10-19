@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import type { EarFeatures } from '../audio/types';
-import type { ListeningStatus } from '../audio/useMicrophoneAnalysis';
+import type { EarStream } from '../audio/earStream';
+import type { ListeningStatus } from '../audio/types';
 import { createBeatEngine } from '../beat/beatEngine';
+import { SILENCE_RMS } from '../beat/types';
 import type { BeatEngine, BeatState } from '../beat/types';
 import { FIXTURE_LRC, FIXTURE_TRACK } from '../dev/fixture/fixtureSong';
 import { fixturePositionMs } from '../dev/fixture/useFixturePlayback';
@@ -10,13 +11,16 @@ import type { FixturePlayback } from '../dev/fixture/useFixturePlayback';
 import { directSongByRules } from '../direction/ruleBasedDirector';
 import type { SongDirection } from '../direction/types';
 import { parseLrc } from '../recognition/lrc';
-import type { LyricResult } from '../recognition/types';
+import type { LyricLine, LyricResult } from '../recognition/types';
 import { isPastOutro, scheduleLine } from '../sync/lineScheduler';
 import type { ScheduledLine } from '../sync/lineScheduler';
+import { songPositionMs } from '../sync/lyricClock';
 import type { StageSource } from '../typesetting/LyricStage';
 import type { IdleTrack } from '../typesetting/idleComposition';
 
 const SCHEDULER_INTERVAL_MS = 50;
+/** A steady bed publishes the beat at most this often; a new pulse head at once. */
+export const BEAT_PUBLISH_MS = 60;
 const FIXTURE_LINES = parseLrc(FIXTURE_LRC);
 
 export const QUIET_BEAT: BeatState = {
@@ -30,8 +34,8 @@ export const QUIET_BEAT: BeatState = {
   silence: true,
 };
 
-interface StageSourceInput {
-  ear: EarFeatures;
+export interface StageSourceInput {
+  earStream: EarStream;
   status: ListeningStatus;
   playback: FixturePlayback;
   result: LyricResult | null;
@@ -41,27 +45,13 @@ export interface StageInputs {
   source: StageSource;
   beat: BeatState;
   nowMonotonicMs: number;
+  /** The recognized song's clock is OUTRO_MS past its last line. */
+  pastOutro: boolean;
 }
 
-interface RecognizedStage {
-  track: IdleTrack;
-  direction: SongDirection | null;
-}
-
-function recognizedStage(result: LyricResult | null): RecognizedStage {
-  if (result === null || result.kind === 'not_recognized') {
-    return { track: null, direction: null };
-  }
-  const { title, artist } = result.track;
-  return {
-    track: { title, artist },
-    // Only timestamped lyrics have lines to direct; the idle stage uses the
-    // direction's idle glyphs and palette.
-    direction:
-      result.kind === 'timestamped'
-        ? directSongByRules(result.lines.map((l) => l.text), `${artist}/${title}`)
-        : null,
-  };
+interface Schedule {
+  line: ScheduledLine;
+  pastOutro: boolean;
 }
 
 const sameLine = (a: ScheduledLine | null, b: ScheduledLine) =>
@@ -69,12 +59,19 @@ const sameLine = (a: ScheduledLine | null, b: ScheduledLine) =>
 
 /**
  * Everything the lyric stage needs from the app: the beat (one engine fed by
- * the microphone's ear features), the source (fixture song while it plays,
- * else the recognized track in idle), and the `performance.now()` clock the
- * scheduled line is on. React state changes at most every ear frame (60 ms)
- * and when the scheduled line changes; per-frame motion stays in shared values.
+ * the ear stream), the source (the fixture song while it plays, else the
+ * recognized song synced to its ShazamKit anchor, else idle), and the
+ * `performance.now()` clock the scheduled line is on. Ear frames never
+ * re-render on their own: the beat is published at once on a new pulse head
+ * and otherwise at most every BEAT_PUBLISH_MS; per-frame motion stays in
+ * shared values.
  */
-export function useStageSource({ ear, status, playback, result }: StageSourceInput): StageInputs {
+export function useStageSource({
+  earStream,
+  status,
+  playback,
+  result,
+}: StageSourceInput): StageInputs {
   const engineRef = useRef<BeatEngine | null>(null);
   engineRef.current ??= createBeatEngine();
   const [beat, setBeat] = useState<BeatState>(QUIET_BEAT);
@@ -90,57 +87,128 @@ export function useStageSource({ ear, status, playback, result }: StageSourceInp
     if (status !== 'listening') {
       engine.reset();
       setBeat(QUIET_BEAT);
-      return;
-    }
-    setBeat(engine.push(ear));
-  }, [ear, status]);
-
-  const [scheduled, setScheduled] = useState<ScheduledLine | null>(null);
-  const previousRef = useRef<ScheduledLine | null>(null);
-  const { active, anchor, paused } = playback;
-
-  useEffect(() => {
-    if (!active) {
-      previousRef.current = null;
-      setScheduled(null);
       return undefined;
     }
+    let previous: BeatState = QUIET_BEAT;
+    let publishedAtMs: number | null = null;
+    // The engine only calls a quiet room silent after its hold time, so until
+    // the first audible frame the beat stays silent: starting to listen in a
+    // quiet room is not "sound returned" to the auto-recognition trigger.
+    let heardSound = false;
+    return earStream.subscribe((frame) => {
+      const pushed = engine.push(frame);
+      heardSound ||= frame.rms >= SILENCE_RMS;
+      const next = heardSound ? pushed : { ...pushed, silence: true };
+      const newPulseHead = next.pulse > previous.pulse;
+      previous = next;
+      if (
+        newPulseHead ||
+        publishedAtMs === null ||
+        frame.timestampMs - publishedAtMs >= BEAT_PUBLISH_MS
+      ) {
+        publishedAtMs = frame.timestampMs;
+        setBeat(next);
+      }
+    });
+  }, [earStream, status]);
+
+  const timed = result?.kind === 'timestamped' ? result : null;
+  const timedLines = timed?.lines ?? null;
+  const timedAnchor = timed?.anchor ?? null;
+  const named = result !== null && result.kind !== 'not_recognized' ? result.track : null;
+  const title = named?.title ?? null;
+  const artist = named?.artist ?? null;
+
+  const [schedule, setSchedule] = useState<Schedule | null>(null);
+  const previousRef = useRef<ScheduledLine | null>(null);
+  const linesRef = useRef<readonly LyricLine[] | null>(null);
+  const pastOutroRef = useRef(false);
+  const { active, anchor: fixtureAnchor, paused } = playback;
+
+  useEffect(() => {
+    const lines: readonly LyricLine[] | null = active ? FIXTURE_LINES : timedLines;
+    // A different song starts over; a new anchor for the same lines keeps the
+    // previous line so the scheduler rewinds or advances from it at once.
+    if (linesRef.current !== lines) {
+      linesRef.current = lines;
+      previousRef.current = null;
+    }
+    if (lines === null || (!active && timedAnchor === null)) {
+      pastOutroRef.current = false;
+      setSchedule(null);
+      return undefined;
+    }
+    const positionAt = (now: number) =>
+      active || timedAnchor === null
+        ? fixturePositionMs({ anchor: fixtureAnchor, paused }, now)
+        : songPositionMs(timedAnchor, now);
+    // Only the recognized song's end asks for a re-recognition.
+    const reportsOutro = !active;
+
     const tick = () => {
       const now = performance.now();
-      const positionMs = fixturePositionMs({ anchor, paused }, now);
+      const positionMs = positionAt(now);
       const previous = previousRef.current;
       // OUTRO_MS after the last line the stage returns to idle (index −1).
-      const next = isPastOutro(FIXTURE_LINES, positionMs)
-        ? previous?.index === -1
+      const outro = isPastOutro(lines, positionMs);
+      const next = outro
+        ? previous?.index === -1 && previous.isEmpty
           ? previous
           : { index: -1, startedAtMs: now, isEmpty: true }
-        : scheduleLine(FIXTURE_LINES, positionMs, beatRef.current, now, previous);
-      if (sameLine(previous, next)) return;
+        : scheduleLine(lines, positionMs, beatRef.current, now, previous);
+      const pastOutro = outro && reportsOutro;
+      const lineChanged = !sameLine(previous, next);
+      if (!lineChanged && pastOutroRef.current === pastOutro) return;
       previousRef.current = next;
-      setScheduled(next);
-      setNowMonotonicMs(now);
+      pastOutroRef.current = pastOutro;
+      setSchedule({ line: next, pastOutro });
+      if (lineChanged) setNowMonotonicMs(now);
     };
-    // Tick at once so a start or a seek lands without waiting for the interval.
+    // Tick at once so a start, a seek or a re-recognition lands without
+    // waiting for the interval.
     tick();
     const id = setInterval(tick, SCHEDULER_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [active, anchor, paused]);
+  }, [active, fixtureAnchor, paused, timedLines, timedAnchor]);
 
-  const recognized = useMemo(() => recognizedStage(result), [result]);
+  // A re-anchored result keeps its lines and track, so neither is rebuilt.
+  const recognizedTrack = useMemo<IdleTrack>(
+    () => (title === null || artist === null ? null : { title, artist }),
+    [title, artist],
+  );
+  const recognizedDirection = useMemo<SongDirection | null>(
+    () =>
+      timedLines === null
+        ? null
+        : directSongByRules(
+            timedLines.map((l) => l.text),
+            `${artist}/${title}`,
+          ),
+    [timedLines, artist, title],
+  );
   const fixtureDirection = playback.direction;
 
   const source = useMemo<StageSource>(() => {
-    if (active && scheduled !== null) {
+    if (schedule !== null && active) {
       return {
         kind: 'synced',
         lines: FIXTURE_LINES,
         direction: fixtureDirection,
-        scheduled,
+        scheduled: schedule.line,
         track: FIXTURE_TRACK,
       };
     }
-    return { kind: 'idle', direction: recognized.direction, track: recognized.track };
-  }, [active, fixtureDirection, recognized, scheduled]);
+    if (schedule !== null && timedLines !== null && recognizedDirection !== null) {
+      return {
+        kind: 'synced',
+        lines: timedLines,
+        direction: recognizedDirection,
+        scheduled: schedule.line,
+        track: recognizedTrack,
+      };
+    }
+    return { kind: 'idle', direction: recognizedDirection, track: recognizedTrack };
+  }, [active, fixtureDirection, recognizedDirection, recognizedTrack, schedule, timedLines]);
 
-  return { source, beat, nowMonotonicMs };
+  return { source, beat, nowMonotonicMs, pastOutro: schedule?.pastOutro ?? false };
 }

@@ -1,17 +1,21 @@
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
-import type { ListeningStatus } from '../audio/useMicrophoneAnalysis';
+import type { ListeningStatus } from '../audio/types';
+import { useEar } from '../audio/useEar';
 import { ListeningControls } from '../components/ListeningControls';
 import { RecognitionControls } from '../components/RecognitionControls';
+import { SettingsSheet } from '../components/SettingsSheet';
 import { FixtureControl } from '../dev/fixture/FixtureControl';
 import { useFixturePlayback } from '../dev/fixture/useFixturePlayback';
 import { DEFAULT_PALETTE } from '../direction/types';
 import { useBurnInDrift } from '../display/useBurnInDrift';
 import { useKeepScreenOn } from '../display/useKeepScreenOn';
-import type { RecognitionViewState } from '../recognition/types';
+import { createAutoRecognitionTrigger } from '../recognition/autoRecognition';
+import type { RecognitionPhase } from '../recognition/types';
+import { useEarRecognition } from '../recognition/useEarRecognition';
+import { useSettings } from '../settings/useSettings';
 import { LyricStage } from '../typesetting/LyricStage';
 import { useStageSource } from './useStageSource';
 
@@ -19,7 +23,9 @@ interface MusicageAppProps {
   reducedMotion?: boolean;
 }
 
-function statusLabel(status: ListeningStatus): string {
+function statusLabel(status: ListeningStatus, phase: RecognitionPhase): string {
+  if (phase === 'listening') return 'MATCHING';
+  if (phase === 'resolving_lyrics') return 'LYRICS';
   switch (status) {
     case 'listening':
       return 'LISTENING';
@@ -32,37 +38,61 @@ function statusLabel(status: ListeningStatus): string {
   }
 }
 
-const noop = () => {};
-
-// Recognition is unwired until the native recognizer lands; the controls show
-// it as unavailable.
-const RECOGNITION_UNAVAILABLE: RecognitionViewState = {
-  phase: 'unavailable',
-  result: null,
-  message: null,
-  retryable: false,
-};
-
 export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
-  const microphone = useMicrophoneAnalysis();
+  const ear = useEar();
+  const recognition = useEarRecognition(ear.recognizer, ear.status);
+  const { settings, ready, update } = useSettings();
   // Tapping the empty stage hides the bottom controls so the object can sit
   // next to a record with nothing but the picture and the words.
   const [controlsVisible, setControlsVisible] = useState(true);
+  const [settingsVisible, setSettingsVisible] = useState(false);
   const playback = useFixturePlayback();
+  const { phase, result } = recognition.state;
   const stage = useStageSource({
-    ear: microphone.ear,
-    status: microphone.status,
+    earStream: ear.earStream,
+    status: ear.status,
     playback,
-    result: null,
+    result,
   });
   // Always-on object manners: no sleep while listening, and a slow wander of
   // the text layer so an OLED does not burn the stage and wordmark in.
-  useKeepScreenOn(microphone.status === 'listening');
+  useKeepScreenOn(ear.status === 'listening');
   const drift = useBurnInDrift(reducedMotion);
 
   useEffect(() => {
-    void microphone.start();
-  }, [microphone.start]);
+    void ear.start();
+  }, [ear.start]);
+
+  // Automatic re-recognition: sound returning after silence, or the song's
+  // clock running past its outro, asks ShazamKit again. The beat is published
+  // at most every 60 ms (and on pulse heads), so this runs at that rate, not
+  // per audio frame. Only a listening native ear can be matched.
+  const triggerRef = useRef(createAutoRecognitionTrigger());
+  const autoInputRef = useRef({ recognition, settings, ready, ear, result, phase });
+  autoInputRef.current = { recognition, settings, ready, ear, result, phase };
+  useEffect(() => {
+    const { recognition: current, settings: s, ready: loaded, ear: e, result: r, phase: p } =
+      autoInputRef.current;
+    const fire = triggerRef.current.push({
+      nowMs: performance.now(),
+      silence: stage.beat.silence,
+      pastOutro: stage.pastOutro,
+      hasResult: r !== null && r.kind !== 'not_recognized',
+      recognizing: p === 'listening' || p === 'resolving_lyrics',
+      // The default (on) must not fire before a stored "off" has loaded.
+      enabled: loaded && s.autoRecognize && e.kind === 'native' && e.status === 'listening',
+    });
+    if (fire) current.recognize();
+  }, [stage.beat, stage.pastOutro]);
+
+  // An update before the stored settings load would be overwritten by them.
+  const toggleAutoRecognize = useCallback(
+    (next: boolean) => {
+      if (!ready) return;
+      void update({ autoRecognize: next });
+    },
+    [ready, update],
+  );
 
   return (
     <View style={styles.root} testID="musicage-root">
@@ -91,7 +121,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
           <View pointerEvents="none" style={styles.wordmarkRow}>
             <Text style={styles.wordmark}>MUSICAGE</Text>
             <Text style={styles.status}>
-              {statusLabel(microphone.status)}
+              {statusLabel(ear.status, phase)}
             </Text>
           </View>
           <View pointerEvents="box-none" style={styles.content}>
@@ -101,17 +131,17 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
               testID="controls-stack"
             >
               <RecognitionControls
-                onCancel={noop}
-                onOpenSettings={noop}
-                onRecognize={noop}
-                state={RECOGNITION_UNAVAILABLE}
+                onCancel={recognition.cancel}
+                onOpenSettings={() => setSettingsVisible(true)}
+                onRecognize={recognition.recognize}
+                state={recognition.state}
               />
               <ListeningControls
-                errorMessage={microphone.errorMessage}
-                onRetry={microphone.retry}
-                onStart={microphone.start}
-                onStop={microphone.stop}
-                status={microphone.status}
+                errorMessage={ear.errorMessage}
+                onRetry={ear.retry}
+                onStart={ear.start}
+                onStop={ear.stop}
+                status={ear.status}
               />
             </View>
           </View>
@@ -120,6 +150,12 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
       <SafeAreaView pointerEvents="box-none" style={styles.fill}>
         <FixtureControl playback={playback} />
       </SafeAreaView>
+      <SettingsSheet
+        onClose={() => setSettingsVisible(false)}
+        onToggleAutoRecognize={toggleAutoRecognize}
+        settings={settings}
+        visible={settingsVisible}
+      />
     </View>
   );
 }
