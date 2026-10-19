@@ -60,7 +60,16 @@ export function useEarRecognition(
     const attempt: Attempt = { id: ++nextIdRef.current, controller: new AbortController() };
     activeRef.current = attempt;
     setState((s) => ({ ...s, phase: 'listening', message: null, retryable: false }));
-    recognizer.listenForMatch(MATCH_TIMEOUT_MS).catch(() => undefined);
+    recognizer.listenForMatch(MATCH_TIMEOUT_MS).catch(() => {
+      if (activeRef.current !== attempt) return;
+      activeRef.current = null;
+      setState((s) => ({
+        phase: 'idle',
+        result: s.result,
+        message: RECOGNITION_COPY.match_failed,
+        retryable: true,
+      }));
+    });
   }, [recognizer]);
 
   useEffect(() => {

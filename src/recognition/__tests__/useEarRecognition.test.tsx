@@ -194,4 +194,40 @@ describe('useEarRecognition', () => {
     await unmount();
     expect(fake.cancelMatch).toHaveBeenCalled();
   });
+
+  test('a rejected listenForMatch returns to idle with match_failed and allows retry', async () => {
+    fake.listenForMatch.mockRejectedValueOnce(new Error('native'));
+    const { result } = await setup();
+    await act(async () => result.current.recognize());
+    expect(result.current.state).toEqual({
+      phase: 'idle',
+      result: null,
+      message: RECOGNITION_COPY.match_failed,
+      retryable: true,
+    });
+    await act(async () => result.current.recognize());
+    expect(fake.listenForMatch).toHaveBeenCalledTimes(2);
+    expect(result.current.state.phase).toBe('listening');
+  });
+
+  test('cancel during resolving_lyrics aborts the lookup and ignores its late result', async () => {
+    let resolveLookup: (v: unknown) => void = () => undefined;
+    lookup.mockReturnValue(new Promise((r) => (resolveLookup = r)));
+    const { result } = await setup();
+    await act(async () => result.current.recognize());
+    await emitRecognition(rec());
+    expect(result.current.state.phase).toBe('resolving_lyrics');
+    const signal = lookup.mock.calls[0][2] as AbortSignal;
+    await act(async () => result.current.cancel());
+    expect(signal.aborted).toBe(true);
+    expect(result.current.state.phase).toBe('idle');
+    await act(async () =>
+      resolveLookup({ recordId: 1, instrumental: false, syncedLyrics: '[00:12.00] x', plainLyrics: null }),
+    );
+    expect(result.current.state.phase).toBe('idle');
+    expect(result.current.state.result).toBeNull();
+    await act(async () => result.current.recognize());
+    expect(fake.listenForMatch).toHaveBeenCalledTimes(2);
+    expect(result.current.state.phase).toBe('listening');
+  });
 });
