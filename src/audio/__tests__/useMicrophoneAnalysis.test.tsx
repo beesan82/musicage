@@ -160,6 +160,25 @@ describe('useMicrophoneAnalysis', () => {
     expect(result.current.ear.timestampMs).toBe(result.current.features.timestampMs);
   });
 
+  it('stamps ear frames on the performance.now() clock the line scheduler uses', async () => {
+    const { result, rerender } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    for (const metering of [-30, -10, -40]) {
+      await act(async () => {
+        meterState = { ...meterState, metering };
+        rerender(undefined);
+        await flushMicrotasks();
+      });
+      // Date.now() is ~1.7e12 ms; performance.now() is process-relative.
+      expect(Math.abs(result.current.ear.timestampMs - performance.now())).toBeLessThan(5_000);
+      expect(result.current.ear.timestampMs).toBe(result.current.features.timestampMs);
+    }
+  });
+
   it('keeps an ambient-compatible silent state when access is denied', async () => {
     (AudioModule.requestRecordingPermissionsAsync as jest.Mock).mockResolvedValue({
       granted: false,

@@ -10,9 +10,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
 import { deleteTemporaryRecording } from './deleteTemporaryRecording';
-import { createMeterFeatureProcessor } from './meterFeatureProcessor';
 import { createMeterEarAdapter } from './earFeaturesFromMeter';
 import type { MeterEarAdapter } from './earFeaturesFromMeter';
+import { createMeterFeatureProcessor } from './meterFeatureProcessor';
 import type { AudioFeatures, EarFeatures, MeterFeatureProcessor } from './types';
 
 const METER_RECORDING_OPTIONS = {
@@ -280,7 +280,9 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   nativeFailureHandlerRef.current = failNativeRecorderSession;
 
   useEffect(() => {
-    const timestampMs = Date.now();
+    // Monotonic clock: the beat engine derives `nextBeatAtMs` from these
+    // stamps and the line scheduler compares it with `performance.now()`.
+    const timestampMs = performance.now();
     setFeatures(processor.process(meterState.metering, timestampMs));
     setEar(earAdapter.process(meterState.metering, timestampMs));
   }, [earAdapter, meterState.metering, processor]);

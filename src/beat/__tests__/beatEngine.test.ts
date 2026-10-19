@@ -1,4 +1,5 @@
 import type { EarFeatures } from '../../audio/types';
+import { scheduleLine } from '../../sync/lineScheduler';
 import { createBeatEngine } from '../beatEngine';
 import { SILENCE_RMS, type BeatState } from '../types';
 import { generateClicks } from './syntheticClicks';
@@ -36,6 +37,33 @@ describe('createBeatEngine', () => {
     for (const f of generateClicks(120, 10_000, 60)) state = engine.push(f);
     expect(Math.abs(state.bpm! - 120)).toBeLessThanOrEqual(3);
     expect(state.confidence).toBeGreaterThan(0.5);
+  });
+
+  test('nextBeatAtMs stays on the clock of performance.now()-stamped ear frames', () => {
+    // Ear frames are stamped with performance.now(); the scheduler compares
+    // nextBeatAtMs against the same clock, so a locked beat must land within
+    // one period ahead of the latest frame and can hold a forward line switch.
+    const baseMs = performance.now() + 50_000;
+    const engine = createBeatEngine();
+    let state!: BeatState;
+    let lastMs = 0;
+    for (const f of generateClicks(120, 10_000)) {
+      lastMs = baseMs + f.timestampMs;
+      state = engine.push({ ...f, timestampMs: lastMs });
+    }
+    expect(state.confidence).toBeGreaterThan(0.5);
+    expect(state.nextBeatAtMs).not.toBeNull();
+    const untilBeat = state.nextBeatAtMs! - lastMs;
+    expect(untilBeat).toBeGreaterThanOrEqual(0);
+    expect(untilBeat).toBeLessThanOrEqual(500 + 1);
+
+    const lines = [
+      { startMs: 0, text: 'a' },
+      { startMs: 1_000, text: 'b' },
+    ];
+    const previous = { index: 0, startedAtMs: lastMs - 1_000, isEmpty: false };
+    const justBefore = state.nextBeatAtMs! - 40;
+    expect(scheduleLine(lines, 1_100, state, justBefore, previous)).toBe(previous);
   });
 
   test('pulse rises to >= 0.9 within 30ms of a click and decays below 0.3 within 300ms', () => {
