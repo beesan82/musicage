@@ -1,26 +1,24 @@
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import type { ListeningStatus } from '../audio/useMicrophoneAnalysis';
 import { AudDTokenSheet } from '../components/AudDTokenSheet';
 import { ListeningControls } from '../components/ListeningControls';
-import { LyricTypography } from '../components/LyricTypography';
 import { RecognitionControls } from '../components/RecognitionControls';
 import { SyncDiagnosticsSheet } from '../components/SyncDiagnosticsSheet';
-import { SceneLockControl } from '../dev/SceneLockControl';
-import { applySceneLock } from '../dev/sceneLock';
-import { useSceneLock } from '../dev/useSceneLock';
+import { FixtureControl } from '../dev/fixture/FixtureControl';
+import { useFixturePlayback } from '../dev/fixture/useFixturePlayback';
+import { DEFAULT_PALETTE } from '../direction/types';
 import { useBurnInDrift } from '../display/useBurnInDrift';
 import { useKeepScreenOn } from '../display/useKeepScreenOn';
 import { clearAudDToken, saveAudDToken } from '../recognition/tokenStore';
 import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
 import type { RecognitionPhase, RecognitionRequest } from '../recognition/types';
 import { useSongRecognition } from '../recognition/useSongRecognition';
-import { SceneRenderer } from '../scenes/SceneRenderer';
-import { createInitialVisualState, selectVisualState } from '../style/styleEngine';
-import type { VisualState } from '../style/types';
+import { LyricStage } from '../typesetting/LyricStage';
+import { useStageSource } from './useStageSource';
 
 interface MusicageAppProps {
   reducedMotion?: boolean;
@@ -77,33 +75,20 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
   const diagnostics = useSyncDiagnostics();
   const [tokenSheetVisible, setTokenSheetVisible] = useState(false);
   const [diagnosticsSheetVisible, setDiagnosticsSheetVisible] = useState(false);
-  // Tapping the empty scene hides the bottom controls so the object can sit
+  // Tapping the empty stage hides the bottom controls so the object can sit
   // next to a record with nothing but the picture and the words.
   const [controlsVisible, setControlsVisible] = useState(true);
-  const sceneLock = useSceneLock();
+  const playback = useFixturePlayback();
+  const stage = useStageSource({
+    ear: microphone.ear,
+    status: microphone.status,
+    playback,
+    result: recognitionState.result,
+  });
   // Always-on object manners: no sleep while listening, and a slow wander of
-  // the text layer so an OLED does not burn the wordmark and lyrics in.
+  // the text layer so an OLED does not burn the stage and wordmark in.
   useKeepScreenOn(microphone.status === 'listening');
   const drift = useBurnInDrift(reducedMotion);
-  // The style engine keeps its own history so releasing a dev scene lock
-  // returns straight to whatever the room's sound would have chosen.
-  const engineVisualRef = useRef<VisualState>(createInitialVisualState(0));
-  const engineVisual = useMemo(() => {
-    const nowMs = Date.now();
-
-    if (microphone.status === 'denied' || microphone.status === 'error') {
-      return createInitialVisualState(nowMs);
-    }
-
-    return selectVisualState(microphone.features, engineVisualRef.current, nowMs);
-  }, [microphone.features, microphone.status]);
-
-  engineVisualRef.current = engineVisual;
-
-  const visual = useMemo(
-    () => applySceneLock(engineVisual, sceneLock.locked),
-    [engineVisual, sceneLock.locked],
-  );
 
   useEffect(() => {
     void microphone.start();
@@ -139,24 +124,28 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
 
   return (
     <View style={styles.root} testID="musicage-root">
-      <View pointerEvents="none" style={styles.sceneLayer}>
-        <SceneRenderer reducedMotion={reducedMotion} visual={visual} />
-      </View>
-      <View pointerEvents="none" style={styles.scrim} />
       <Pressable
         accessibilityLabel={controlsVisible ? '操作を隠す' : '操作を表示'}
         accessibilityRole="button"
         onPress={() => setControlsVisible((visible) => !visible)}
-        style={styles.immersiveToggle}
+        style={styles.fill}
         testID="immersive-toggle"
       />
-      <SafeAreaView pointerEvents="box-none" style={styles.safeArea}>
-        <SceneLockControl sceneLock={sceneLock} />
-        <Animated.View
-          pointerEvents="box-none"
-          style={[styles.textLayer, drift]}
-          testID="text-layer"
-        >
+      <Animated.View
+        pointerEvents="box-none"
+        style={[styles.fill, drift]}
+        testID="text-layer"
+      >
+        {/* Full-screen and untouchable: taps on the empty stage reach the toggle below. */}
+        <View pointerEvents="none" style={styles.fill}>
+          <LyricStage
+            beat={stage.beat}
+            nowMonotonicMs={stage.nowMonotonicMs}
+            reducedMotion={reducedMotion}
+            source={stage.source}
+          />
+        </View>
+        <SafeAreaView pointerEvents="box-none" style={styles.safeArea}>
           <View pointerEvents="none" style={styles.wordmarkRow}>
             <Text style={styles.wordmark}>MUSICAGE</Text>
             <Text style={styles.status}>
@@ -164,14 +153,6 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
             </Text>
           </View>
           <View pointerEvents="box-none" style={styles.content}>
-            <View pointerEvents="none" style={styles.copyRegion}>
-              <LyricTypography
-                calibration={diagnostics.approvedCalibration}
-                lyricResult={recognitionState.result}
-                reducedMotion={reducedMotion}
-                visual={visual}
-              />
-            </View>
             <View
               pointerEvents={controlsVisible ? 'auto' : 'none'}
               style={[styles.controlsStack, controlsVisible ? null : styles.controlsHidden]}
@@ -192,7 +173,10 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
               />
             </View>
           </View>
-        </Animated.View>
+        </SafeAreaView>
+      </Animated.View>
+      <SafeAreaView pointerEvents="box-none" style={styles.fill}>
+        <FixtureControl playback={playback} />
       </SafeAreaView>
       <AudDTokenSheet
         hasToken={hasToken}
@@ -216,20 +200,12 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: '#101112',
+    backgroundColor: DEFAULT_PALETTE.background,
   },
-  sceneLayer: {
+  fill: {
     ...StyleSheet.absoluteFill,
-  },
-  scrim: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: '#0B0C0C',
-    opacity: 0.2,
   },
   safeArea: {
-    flex: 1,
-  },
-  textLayer: {
     flex: 1,
   },
   wordmarkRow: {
@@ -251,14 +227,9 @@ const styles = StyleSheet.create({
   },
   content: {
     flex: 1,
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
     paddingBottom: 18,
     paddingHorizontal: 24,
-  },
-  copyRegion: {
-    flex: 1,
-    justifyContent: 'center',
-    paddingTop: 96,
   },
   controlsStack: {
     alignItems: 'flex-start',
@@ -266,8 +237,5 @@ const styles = StyleSheet.create({
   },
   controlsHidden: {
     opacity: 0,
-  },
-  immersiveToggle: {
-    ...StyleSheet.absoluteFill,
   },
 });

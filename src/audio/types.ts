@@ -8,6 +8,14 @@ export interface AudioFeatures {
   silence: boolean;
 }
 
+export interface EarFeatures {
+  timestampMs: number;
+  rms: number;
+  low: number;
+  mid: number;
+  high: number;
+}
+
 export interface MeterFeatureProcessor {
   process(meterDb: number | undefined, timestampMs: number): AudioFeatures;
   reset(): void;

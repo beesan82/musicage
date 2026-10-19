@@ -140,12 +140,43 @@ describe('useMicrophoneAnalysis', () => {
       interruptionMode: 'mixWithOthers',
       playsInSilentMode: true,
     });
-    expect(useAudioRecorderState).toHaveBeenCalledWith(recorder, 120);
+    expect(useAudioRecorderState).toHaveBeenCalledWith(recorder, 60);
     expect(eventLog).toEqual(['prepare', 'record']);
     expect(recorder.isRecording).toBe(true);
     expect(result.current.status).toBe('listening');
     expect(result.current.features.energy).toBeGreaterThan(0);
     expect(result.current.features.silence).toBe(false);
+  });
+
+  it('exposes ear with the latest timestamp', async () => {
+    const { result } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.ear.rms).toBeGreaterThan(0);
+    expect(result.current.ear.timestampMs).toBeGreaterThan(0);
+    expect(result.current.ear.timestampMs).toBe(result.current.features.timestampMs);
+  });
+
+  it('stamps ear frames on the performance.now() clock the line scheduler uses', async () => {
+    const { result, rerender } = await renderHook(() => useMicrophoneAnalysis());
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    for (const metering of [-30, -10, -40]) {
+      await act(async () => {
+        meterState = { ...meterState, metering };
+        rerender(undefined);
+        await flushMicrotasks();
+      });
+      // Date.now() is ~1.7e12 ms; performance.now() is process-relative.
+      expect(Math.abs(result.current.ear.timestampMs - performance.now())).toBeLessThan(5_000);
+      expect(result.current.ear.timestampMs).toBe(result.current.features.timestampMs);
+    }
   });
 
   it('keeps an ambient-compatible silent state when access is denied', async () => {

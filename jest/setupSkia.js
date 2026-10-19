@@ -12,8 +12,14 @@ jest.mock('@shopify/react-native-skia', () => {
 
   return {
     ...mock,
+    useTypeface: () => ({ __mockTypeface: true }),
     Skia: {
       ...mock.Skia,
+      Font: (typeface, size) => ({
+        measureText: (t) => ({ width: size * [...t].length, height: size }),
+        getMetrics: () => ({ ascent: -size * 0.88, descent: size * 0.12 }),
+        getSize: () => size,
+      }),
       RuntimeEffect: {
         Make: () => ({ __mockRuntimeEffect: true }),
       },

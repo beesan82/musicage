@@ -22,6 +22,9 @@ LAN接続できない環境では、`npm run start:tunnel` を試してくださ
 - 通常の表示は端末内のマイク音量メーターだけで動き、音楽を再生しません。
 - 録音メーター用の一時ファイルは回転・停止時に削除し、音声を履歴として保存しません。
 - 曲の識別を行う場合だけ、ユーザーが明示的に「曲を読み取る」を押して最大12秒の音をAudDへ直接送信します。通常の表示中に認識リクエストは送信しません。
+- 画面全体は Skia で描く「文字の舞台」です。黒地のテクスチャ背景の上に、曲がないときは idle のグリフ構成が置かれ、マイクの音から推定した拍（`pulse`）で脈打ちます。
+- 「曲を読み取る」で曲が分かると、曲名とアーティストが idle 構成の左下に出ます。このフェーズでは認識した曲の歌詞は舞台に流しません（実歌詞の同期はフェーズ 2）。
+- 開発ビルドでは右上に `FIX` ピルが出ます。長押しで架空のフィクスチャ曲をオン／オフし、タップで再生／一時停止、左右の `−5s` / `+5s` でシークします。再生中は行ごとに書体・大きさ・縦横を変えて歌詞が切り替わり、拍の信頼度が高いときは切り替えが次の拍に寄ります。ピルには fps も出ます。
 
 ## Real lyrics setup
 
@@ -48,6 +51,6 @@ AudD Standardの時刻は、録音クリップ中のどの瞬間に対応する�
 ## Device validation
 
 - Speak, clap, and play music nearby to verify motion response.
-- Check Ambient and Jazz manually by temporarily injecting fixed VisualState values in development.
+- Long-press the `FIX` pill in a development build to play the fixture song: lines should change face, size and orientation as directed, a `−5s` seek should replay the entrance, and the pill should stay at 55 fps or more for a minute.
 - Deny microphone access after reinstalling Expo Go to verify recovery copy.
 - 認識は「曲を読み取る」を押すまで始まらないこと、トークンが画面に表示されないこと、削除後は再設定が必要になることをiPhoneで確認します。
