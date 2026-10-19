@@ -1,4 +1,4 @@
-const mockFile = { exists: true, text: jest.fn(), write: jest.fn() };
+const mockFile = { exists: true, text: jest.fn(), write: jest.fn(), create: jest.fn() };
 
 jest.mock('expo-file-system', () => ({
   File: jest.fn(() => mockFile),
@@ -11,6 +11,7 @@ beforeEach(() => {
   mockFile.exists = true;
   mockFile.text.mockReset();
   mockFile.write.mockReset();
+  mockFile.create.mockReset();
 });
 
 describe('settingsStore', () => {
@@ -34,5 +35,26 @@ describe('settingsStore', () => {
     const written = mockFile.write.mock.calls[0][0] as string;
     mockFile.text.mockResolvedValue(written);
     expect(await loadSettings()).toEqual({ autoRecognize: false });
+  });
+
+  test('saveSettings creates a missing file and returns true', async () => {
+    mockFile.exists = false;
+    expect(await saveSettings({ autoRecognize: true })).toBe(true);
+    expect(mockFile.create).toHaveBeenCalledTimes(1);
+    expect(mockFile.write).toHaveBeenCalledTimes(1);
+  });
+
+  test('saveSettings does not create an existing file', async () => {
+    mockFile.exists = true;
+    await saveSettings({ autoRecognize: true });
+    expect(mockFile.create).not.toHaveBeenCalled();
+  });
+
+  test('saveSettings resolves false when write throws', async () => {
+    mockFile.write.mockImplementation(() => {
+      throw new Error('disk');
+    });
+    expect(await saveSettings({ autoRecognize: true })).toBe(false);
+    mockFile.write.mockReset();
   });
 });

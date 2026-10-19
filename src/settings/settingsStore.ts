@@ -28,6 +28,13 @@ export async function loadSettings(): Promise<Settings> {
   }
 }
 
-export async function saveSettings(s: Settings): Promise<void> {
-  settingsFile().write(JSON.stringify(s));
+export async function saveSettings(s: Settings): Promise<boolean> {
+  try {
+    const file = settingsFile();
+    if (!file.exists) file.create();
+    file.write(JSON.stringify(s));
+    return true;
+  } catch {
+    return false;
+  }
 }

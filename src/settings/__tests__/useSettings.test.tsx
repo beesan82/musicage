@@ -33,3 +33,16 @@ test('loads settings on mount, ready flips to true, update saves and reflects', 
   expect(saveSettings).toHaveBeenCalledWith({ autoRecognize: true });
   expect(result.current.settings).toEqual({ autoRecognize: true });
 });
+
+test('update resolves and reflects the new value when saving fails', async () => {
+  loadSettings.mockResolvedValue({ autoRecognize: true });
+  saveSettings.mockResolvedValue(false);
+
+  const { result } = await renderHook(() => useSettings());
+  await waitFor(() => expect(result.current.ready).toBe(true));
+
+  await act(async () => {
+    await expect(result.current.update({ autoRecognize: false })).resolves.toBeUndefined();
+  });
+  expect(result.current.settings).toEqual({ autoRecognize: false });
+});

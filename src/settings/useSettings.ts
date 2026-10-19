@@ -28,6 +28,7 @@ export function useSettings(): {
     const next = { ...latest.current, ...patch };
     latest.current = next;
     setSettings(next);
+    // Persistence failure is non-fatal: the value still applies for this session.
     await saveSettings(next);
   }, []);
 
