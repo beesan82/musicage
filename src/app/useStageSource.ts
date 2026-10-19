@@ -11,6 +11,7 @@ import type { FixturePlayback } from '../dev/fixture/useFixturePlayback';
 import { directSongByRules } from '../direction/ruleBasedDirector';
 import type { SongDirection } from '../direction/types';
 import { parseLrc } from '../recognition/lrc';
+import { SILENCE_REARM_MS } from '../recognition/autoRecognition';
 import type { LyricLine, LyricResult } from '../recognition/types';
 import { isPastOutro, scheduleLine } from '../sync/lineScheduler';
 import type { ScheduledLine } from '../sync/lineScheduler';
@@ -81,11 +82,15 @@ export function useStageSource({
   // changes: every re-anchor is pinned at a later UI frame by a varying lag, so
   // re-anchoring on each ear frame would make entrances stall or skip.
   const [nowMonotonicMs, setNowMonotonicMs] = useState(() => performance.now());
+  // performance.now() when the computed beat last turned silent; null while
+  // there is sound (or the ear is not listening).
+  const silentSinceRef = useRef<number | null>(null);
 
   useEffect(() => {
     const engine = engineRef.current!;
     if (status !== 'listening') {
       engine.reset();
+      silentSinceRef.current = null;
       setBeat(QUIET_BEAT);
       return undefined;
     }
@@ -99,6 +104,8 @@ export function useStageSource({
       const pushed = engine.push(frame);
       heardSound ||= frame.rms >= SILENCE_RMS;
       const next = heardSound ? pushed : { ...pushed, silence: true };
+      if (!next.silence) silentSinceRef.current = null;
+      else silentSinceRef.current ??= performance.now();
       const newPulseHead = next.pulse > previous.pulse;
       previous = next;
       if (
@@ -151,7 +158,13 @@ export function useStageSource({
       const previous = previousRef.current;
       // OUTRO_MS after the last line the stage returns to idle (index −1).
       const outro = isPastOutro(lines, positionMs);
-      const next = outro
+      // A recognized song in a room silent for SILENCE_REARM_MS (the needle
+      // was lifted) is no longer in sync: show the idle line until sound
+      // returns, then resume from the song clock.
+      const silentSince = silentSinceRef.current;
+      const quiet =
+        !active && silentSince !== null && now - silentSince >= SILENCE_REARM_MS;
+      const next = outro || quiet
         ? previous?.index === -1 && previous.isEmpty
           ? previous
           : { index: -1, startedAtMs: now, isEmpty: true }

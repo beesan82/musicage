@@ -143,6 +143,55 @@ describe('useStageSource', () => {
     expect(hook.result.current.pastOutro).toBe(false);
   });
 
+  describe('when the room goes quiet (the needle is lifted)', () => {
+    // One long line so the song clock alone never changes the scheduled line.
+    const longSong: TimestampedLyricResult = {
+      ...result,
+      lines: [
+        { startMs: 0, text: '夜の底で' },
+        { startMs: 600_000, text: '走れ！' },
+      ],
+      anchor: { offsetMs: 1_000, anchoredAtMonotonicMs: 10_000 },
+    };
+
+    /** Frames every 50 ms on the mocked clock, from `fromMs` for `forMs`. */
+    const emitFor = async (fromMs: number, forMs: number, level: number) => {
+      for (let t = fromMs; t <= fromMs + forMs; t += 50) {
+        clockMs = 10_000 + t;
+        await act(async () => emitter.emit(frame(clockMs, level)));
+      }
+    };
+    const pause = () => act(async () => new Promise((resolve) => setTimeout(resolve, 120)));
+
+    test('4.1 s of silence turns the synced line into the idle line', async () => {
+      const hook = await setup({ result: longSong });
+      expect(syncedOf(hook.result.current).scheduled.index).toBe(0);
+
+      await emitFor(0, 4_100, 0);
+      await waitFor(() => expect(syncedOf(hook.result.current).scheduled.index).toBe(-1));
+      expect(syncedOf(hook.result.current).scheduled.isEmpty).toBe(true);
+      expect(hook.result.current.pastOutro).toBe(false);
+    });
+
+    test('3.5 s of silence keeps the line', async () => {
+      const hook = await setup({ result: longSong });
+
+      await emitFor(0, 3_500, 0);
+      await pause();
+      expect(syncedOf(hook.result.current).scheduled.index).toBe(0);
+    });
+
+    test('when sound returns the line comes back from the song clock', async () => {
+      const hook = await setup({ result: longSong });
+      await emitFor(0, 4_100, 0);
+      await waitFor(() => expect(syncedOf(hook.result.current).scheduled.index).toBe(-1));
+
+      await emitFor(4_150, 200, 0.3);
+      await waitFor(() => expect(syncedOf(hook.result.current).scheduled.index).toBe(0));
+      expect(hook.result.current.pastOutro).toBe(false);
+    });
+  });
+
   test('the fixture wins over a recognized song while it is active', async () => {
     clockMs = 10_500;
     const playing: FixturePlayback = {
