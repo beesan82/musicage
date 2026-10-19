@@ -1,47 +1,63 @@
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import type { RecognitionPhase, RecognitionViewState } from '../recognition/types';
+import type { RecognitionViewState } from '../recognition/types';
 
 export interface RecognitionControlsProps {
   state: RecognitionViewState;
   onRecognize(): void;
-  onRetry(): void;
+  onCancel(): void;
+  onOpenSettings(): void;
 }
-
-const PROGRESS_LABELS: Partial<Record<RecognitionPhase, string>> = {
-  listening: '聴いています…',
-  resolving_lyrics: '歌詞を探しています…',
-};
 
 export function RecognitionControls({
   state,
   onRecognize,
-  onRetry,
+  onCancel,
+  onOpenSettings,
 }: RecognitionControlsProps) {
-  const progressLabel = PROGRESS_LABELS[state.phase];
-  const isNoMatch = state.result?.kind === 'not_recognized';
-  const retries = state.retryable || isNoMatch;
-  const label = progressLabel ?? (retries ? 'もう一度読み取る' : '曲を読み取る');
-  const disabled = Boolean(progressLabel);
-  const onPress = retries ? onRetry : onRecognize;
+  const listening = state.phase === 'listening';
+  const resolving = state.phase === 'resolving_lyrics';
+  const unavailable = state.phase === 'unavailable';
+  const retries =
+    !unavailable &&
+    (state.phase === 'error' || state.result?.kind === 'not_recognized' || Boolean(state.message));
+  const label = listening
+    ? '聴き取り中…'
+    : resolving
+      ? '歌詞を探しています…'
+      : retries
+        ? 'もう一度読み取る'
+        : '曲を読み取る';
+  const disabled = resolving || unavailable;
+  const onPress = listening ? onCancel : onRecognize;
 
   return (
     <View style={styles.root} testID="recognition-controls">
       {state.message ? <Text style={styles.message}>{state.message}</Text> : null}
-      <Pressable
-        accessibilityLabel={label}
-        accessibilityRole="button"
-        accessibilityState={{ disabled }}
-        disabled={disabled}
-        onPress={onPress}
-        style={({ pressed }) => [
-          styles.button,
-          disabled && styles.buttonDisabled,
-          pressed && !disabled && styles.buttonPressed,
-        ]}
-      >
-        <Text style={styles.buttonText}>{label}</Text>
-      </Pressable>
+      <View style={styles.row}>
+        <Pressable
+          accessibilityLabel={label}
+          accessibilityRole="button"
+          accessibilityState={{ disabled }}
+          disabled={disabled}
+          onPress={onPress}
+          style={({ pressed }) => [
+            styles.button,
+            disabled && styles.buttonDisabled,
+            pressed && !disabled && styles.buttonPressed,
+          ]}
+        >
+          <Text style={styles.buttonText}>{label}</Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel="設定"
+          accessibilityRole="button"
+          onPress={onOpenSettings}
+          style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
+        >
+          <Text style={styles.buttonText}>設定</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -49,6 +65,11 @@ export function RecognitionControls({
 const styles = StyleSheet.create({
   root: {
     alignItems: 'flex-start',
+    gap: 10,
+  },
+  row: {
+    alignItems: 'center',
+    flexDirection: 'row',
     gap: 10,
   },
   message: {

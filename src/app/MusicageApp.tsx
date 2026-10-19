@@ -101,8 +101,9 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
               testID="controls-stack"
             >
               <RecognitionControls
+                onCancel={noop}
+                onOpenSettings={noop}
                 onRecognize={noop}
-                onRetry={noop}
                 state={RECOGNITION_UNAVAILABLE}
               />
               <ListeningControls
