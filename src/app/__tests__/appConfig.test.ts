@@ -22,6 +22,7 @@ test('eas.json has a development client profile with internal distribution', () 
   expect(easJson.cli.appVersionSource).toBe('remote');
 });
 
-test('Expo Go keeps a start script', () => {
+test('expo-dev-client is a dependency and Expo Go keeps a start script', () => {
+  expect(packageJson.dependencies['expo-dev-client']).toMatch(/^~57./);
   expect(packageJson.scripts['start:go']).toBe('expo start --go');
 });
