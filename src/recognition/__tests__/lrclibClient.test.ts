@@ -2,12 +2,11 @@ import { LrclibRequestError, lookupLrclib } from '../lrclibClient';
 import type { Track } from '../types';
 
 const testTrack: Track = {
+  trackId: 'sk-1',
   title: 'Test Track',
   artist: 'Test Artist',
   album: 'Test Album',
-  durationSeconds: 213,
-  timecodeRaw: '01:12',
-  timecodeMs: 72_000,
+  artworkUrl: null,
 };
 
 function jsonResponse(payload: unknown, status = 200, retryAfter: string | null = null): Response {
@@ -20,7 +19,7 @@ function jsonResponse(payload: unknown, status = 200, retryAfter: string | null 
 }
 
 describe('lookupLrclib', () => {
-  it('uses direct LRCLIB signature parameters and the required client header', async () => {
+  it('sends track, artist and album only, with the required client header', async () => {
     const fetchMock = jest.fn().mockResolvedValue(
       jsonResponse({
         id: 42,
@@ -41,7 +40,7 @@ describe('lookupLrclib', () => {
     expect(String(fetchMock.mock.calls[0][0])).toContain('track_name=Test+Track');
     expect(String(fetchMock.mock.calls[0][0])).toContain('artist_name=Test+Artist');
     expect(String(fetchMock.mock.calls[0][0])).toContain('album_name=Test+Album');
-    expect(String(fetchMock.mock.calls[0][0])).toContain('duration=213');
+    expect(String(fetchMock.mock.calls[0][0])).not.toContain('duration=');
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
       headers: { 'Lrclib-Client': 'MUSICAGE/0.1 (personal-use Expo client)' },
     });

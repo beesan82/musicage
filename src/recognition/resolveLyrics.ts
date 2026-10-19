@@ -1,15 +1,12 @@
 import type { LrclibLyricsRecord } from './lrclibClient';
 import { parseLrc } from './lrc';
-import type {
-  LyricResult,
-  TimestampedLyricTimingEvidence,
-  Track,
-} from './types';
+import type { LyricAnchor } from '../sync/lyricClock';
+import type { LyricResult, Track } from './types';
 
 export function resolveLyrics(
   track: Track,
   record: LrclibLyricsRecord | null,
-  timingEvidence: TimestampedLyricTimingEvidence,
+  anchor: LyricAnchor,
 ): LyricResult {
   if (!record) {
     return { kind: 'lyrics_unavailable', track };
@@ -26,7 +23,7 @@ export function resolveLyrics(
       kind: 'timestamped',
       track,
       lines,
-      timingEvidence,
+      anchor,
     };
   }
 

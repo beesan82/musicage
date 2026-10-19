@@ -6,12 +6,10 @@ export interface RecognitionControlsProps {
   state: RecognitionViewState;
   onRecognize(): void;
   onRetry(): void;
-  onOpenSettings(): void;
 }
 
 const PROGRESS_LABELS: Partial<Record<RecognitionPhase, string>> = {
-  capturing: '音を読み取っています…',
-  identifying: '曲を特定しています…',
+  listening: '聴いています…',
   resolving_lyrics: '歌詞を探しています…',
 };
 
@@ -19,16 +17,13 @@ export function RecognitionControls({
   state,
   onRecognize,
   onRetry,
-  onOpenSettings,
 }: RecognitionControlsProps) {
   const progressLabel = PROGRESS_LABELS[state.phase];
   const isNoMatch = state.result?.kind === 'not_recognized';
-  const opensSettings = state.phase === 'setup_required';
-  const retries = !opensSettings && (state.retryable || isNoMatch);
-  const label = progressLabel
-    ?? (opensSettings ? 'AudDキーを設定' : retries ? 'もう一度読み取る' : '曲を読み取る');
+  const retries = state.retryable || isNoMatch;
+  const label = progressLabel ?? (retries ? 'もう一度読み取る' : '曲を読み取る');
   const disabled = Boolean(progressLabel);
-  const onPress = opensSettings ? onOpenSettings : retries ? onRetry : onRecognize;
+  const onPress = retries ? onRetry : onRecognize;
 
   return (
     <View style={styles.root} testID="recognition-controls">

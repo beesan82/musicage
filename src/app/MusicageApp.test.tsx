@@ -7,12 +7,7 @@ import type { AudioFeatures, EarFeatures } from '../audio/types';
 import { useMicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import type { ListeningStatus, MicrophoneAnalysis } from '../audio/useMicrophoneAnalysis';
 import { FIXTURE_LRC, FIXTURE_TRACK } from '../dev/fixture/fixtureSong';
-import { useSongRecognition } from '../recognition/useSongRecognition';
-import type { SongRecognition } from '../recognition/useSongRecognition';
 import { parseLrc } from '../recognition/lrc';
-import type { LyricResult, Track } from '../recognition/types';
-import { useSyncDiagnostics } from '../recognition/syncDiagnostics/useSyncDiagnostics';
-import type { SyncDiagnosticsController } from '../recognition/syncDiagnostics/useSyncDiagnostics';
 import { OUTRO_MS } from '../sync/lineScheduler';
 import { LyricStage } from '../typesetting/LyricStage';
 import type { LyricStageProps } from '../typesetting/LyricStage';
@@ -20,19 +15,6 @@ import { MusicageApp } from './MusicageApp';
 
 jest.mock('../audio/useMicrophoneAnalysis', () => ({
   useMicrophoneAnalysis: jest.fn(),
-}));
-
-jest.mock('../recognition/useSongRecognition', () => ({
-  useSongRecognition: jest.fn(),
-}));
-
-jest.mock('../recognition/syncDiagnostics/useSyncDiagnostics', () => ({
-  useSyncDiagnostics: jest.fn(),
-}));
-
-jest.mock('../recognition/tokenStore', () => ({
-  clearAudDToken: jest.fn(),
-  saveAudDToken: jest.fn(),
 }));
 
 // The dev frame-rate probe really runs under jest (requestAnimationFrame
@@ -85,15 +67,6 @@ const silentFeatures: AudioFeatures = {
 
 const silentEar: EarFeatures = { timestampMs: 0, rms: 0, low: 0, mid: 0, high: 0 };
 
-const track: Track = {
-  title: 'Song',
-  artist: 'Band',
-  album: null,
-  durationSeconds: null,
-  timecodeRaw: null,
-  timecodeMs: null,
-};
-
 const nowPlayingCopy = ['NOW', 'PLAYING'].join(' ');
 
 const createAnalysis = (
@@ -112,33 +85,9 @@ const createAnalysis = (
   retry: jest.fn(),
 });
 
-const createRecognition = (result: LyricResult | null = null): SongRecognition => ({
-  state: {
-    phase: 'idle',
-    result,
-    message: null,
-    retryable: false,
-  },
-  hasToken: false,
-  pendingDiagnosticTrial: null,
-  recognize: jest.fn(),
-  retry: jest.fn(),
-  refreshTokenPresence: jest.fn().mockResolvedValue(undefined),
-});
-
-const createDiagnostics = (approvedCalibration: SyncDiagnosticsController['approvedCalibration'] = null): SyncDiagnosticsController => ({
-  ready: true, storageError: null, samples: [], evaluations: [], approvedCalibration,
-  decision: { kind: 'undecided' }, captureFlashVisible: false,
-  notifyCaptureStarted: jest.fn(), saveTrial: jest.fn().mockResolvedValue(undefined),
-  approveRecommendedCalibration: jest.fn().mockResolvedValue(undefined),
-  rejectAudDAsClock: jest.fn().mockResolvedValue(undefined), clearDiagnostics: jest.fn().mockResolvedValue(undefined),
-});
-
 describe('MusicageApp', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    (useSongRecognition as jest.Mock).mockReturnValue(createRecognition());
-    (useSyncDiagnostics as jest.Mock).mockReturnValue(createDiagnostics());
   });
 
   it('renders the visual-object shell and starts microphone analysis', async () => {
@@ -178,57 +127,6 @@ describe('MusicageApp', () => {
     expect(playButtons.map((button) => button.props.testID)).toEqual(
       __DEV__ ? ['fixture-control'] : [],
     );
-  });
-
-  it('starts local metering on mount but recognition only after an explicit press', async () => {
-    const recognition = createRecognition();
-    (useSongRecognition as jest.Mock).mockReturnValue(recognition);
-    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
-    const screen = await renderApp();
-
-    expect(recognition.recognize).not.toHaveBeenCalled();
-    fireEvent.press(screen.getByRole('button', { name: '曲を読み取る' }));
-    expect(recognition.recognize).toHaveBeenCalledTimes(1);
-  });
-
-  it('uses the approved duration for a normal owner recognition request', async () => {
-    const recognition = createRecognition();
-    (useSongRecognition as jest.Mock).mockReturnValue(recognition);
-    (useSyncDiagnostics as jest.Mock).mockReturnValue(createDiagnostics({
-      schemaVersion: 1, clipDurationMs: 5_000, anchorOffsetMs: 4_000, acceptedSampleCount: 9,
-    }));
-    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
-    const screen = await renderApp();
-
-    fireEvent.press(screen.getByRole('button', { name: '曲を読み取る' }));
-
-    expect(recognition.recognize).toHaveBeenCalledWith({ mode: 'normal', clipDurationMs: 5_000 });
-  });
-
-  it('closes token settings before opening owner-only sync diagnostics', async () => {
-    const recognition = createRecognition();
-    recognition.state = { ...recognition.state, phase: 'setup_required' };
-    (useSongRecognition as jest.Mock).mockReturnValue(recognition);
-    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
-    const screen = await renderApp();
-    const user = userEvent.setup();
-
-    await user.press(screen.getByRole('button', { name: 'AudDキーを設定' }));
-    await user.press(screen.getByRole('button', { name: '同期診断' }));
-
-    expect(screen.getByText('動画の再生位置と録音開始フラッシュを照合して保存します。')).toBeTruthy();
-    expect(screen.queryByText('PRIVATE SETUP')).toBeNull();
-  });
-
-  it('names the recognition phase in the corner status while the meter is paused', async () => {
-    const recognition = createRecognition();
-    recognition.state = { ...recognition.state, phase: 'identifying' };
-    (useSongRecognition as jest.Mock).mockReturnValue(recognition);
-    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
-    const screen = await renderApp();
-
-    expect(screen.getByText('IDENTIFYING')).toBeTruthy();
-    expect(screen.queryByText('LISTENING')).toBeNull();
   });
 
   it('hides and restores the controls when the empty scene is tapped', async () => {
@@ -279,44 +177,6 @@ describe('MusicageApp', () => {
     await fireEvent(screen.getByTestId('fixture-control'), 'longPress');
     expect(lastStageProps().source.kind).toBe('idle');
     expect(screen.getByText('FIX OFF')).toBeTruthy();
-  });
-
-  it('passes the recognized track to the stage as idle caption', async () => {
-    (useSongRecognition as jest.Mock).mockReturnValue(createRecognition({
-      kind: 'timestamped',
-      track,
-      lines: [
-        { startMs: 0, text: '夜の底で' },
-        { startMs: 4_000, text: '走れ！' },
-      ],
-      timingEvidence: { clipDurationMs: 12_000, captureStartedMonotonicMs: 0, auddTimecodeMs: null },
-    }));
-    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
-    const screen = await renderApp();
-
-    expect(screen.getByTestId('idle-caption').props.text).toBe('Band — Song');
-    const { source } = lastStageProps();
-    expect(source.kind).toBe('idle');
-    expect(source.track).toEqual({ title: 'Song', artist: 'Band' });
-    // Only timestamped lyrics get a direction (for its idle glyphs and palette).
-    expect(source.direction?.lines).toHaveLength(2);
-  });
-
-  it('gives a plain-lyrics track a caption but no direction', async () => {
-    (useSongRecognition as jest.Mock).mockReturnValue(createRecognition({
-      kind: 'plain',
-      track,
-      text: '夜の底で',
-    }));
-    (useMicrophoneAnalysis as jest.Mock).mockReturnValue(createAnalysis('listening'));
-    const screen = await renderApp();
-
-    expect(screen.getByTestId('idle-caption').props.text).toBe('Band — Song');
-    expect(lastStageProps().source).toEqual({
-      kind: 'idle',
-      direction: null,
-      track: { title: 'Song', artist: 'Band' },
-    });
   });
 
   it('keeps the stage inside the drifting text layer', async () => {
