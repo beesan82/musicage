@@ -1,0 +1,65 @@
+# Codemagic: signed build -> TestFlight for MUSICAGE (Expo SDK 57).
+# Started manually from the Codemagic UI only (no `triggering`), to save build minutes.
+#
+# One-time setup (Codemagic / App Store Connect; no secrets in this repo):
+#   1. Teams -> Integrations -> Developer Portal: reuse the App Store Connect API key
+#      integration named exactly "Pocket Agent ASC" (same team, role: App Manager).
+#      If Codemagic requires integrations to be enabled per app, enable it for this app.
+#   2. App Store Connect: create the app record for bundle ID com.musicage.app,
+#      then put its numeric Apple ID into APP_STORE_APPLE_ID below (placeholder until then).
+#   3. Codemagic does NOT create signing files during the build. `ios_signing` only picks
+#      matching files already in Settings -> codemagic.yaml settings -> Code signing identities:
+#      an Apple Distribution certificate (the team's existing one can be reused) and an
+#      App Store profile for com.musicage.app (create it in the Apple Developer portal —
+#      the App ID already has ShazamKit enabled — then Fetch profiles).
+#   4. The ios/ Xcode project is generated on the CI machine by `expo prebuild`
+#      (it is not tracked in git; never commit it — see AGENTS.md).
+workflows:
+  ios-testflight:
+    name: iOS TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    integrations:
+      app_store_connect: Pocket Agent ASC
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.musicage.app
+      vars:
+        XCODE_PROJECT: ios/MUSICAGE.xcodeproj
+        XCODE_SCHEME: MUSICAGE
+        # Placeholder: replace with the numeric Apple ID of the MUSICAGE app record
+        # in App Store Connect once it exists (one-time setup step 2 above). Until then
+        # the build-number step falls back to 0 and publishing cannot find the app.
+        APP_STORE_APPLE_ID: "6830215960"
+      xcode: "27.0"
+      node: "22"
+      cocoapods: default
+    scripts:
+      - name: Install JavaScript dependencies
+        script: npm ci
+      - name: Generate the iOS project (Expo prebuild; also installs Pods)
+        script: npx expo prebuild --platform ios
+      - name: Apply signing profiles
+        script: |
+          cd ios
+          xcode-project use-profiles
+      - name: Set build number (latest TestFlight build + 1)
+        script: |
+          LATEST=$(app-store-connect get-latest-testflight-build-number "$APP_STORE_APPLE_ID" || echo 0)
+          cd ios
+          agvtool new-version -all $((LATEST + 1))
+      - name: Build signed ipa
+        script: |
+          xcode-project build-ipa --project "$XCODE_PROJECT" --scheme "$XCODE_SCHEME"
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+    publishing:
+      app_store_connect:
+        auth: integration
+        # Same setup as Pocket Agent: internal testing needs no Beta App Review, and
+        # `true` failed post-processing there (external review needs test info).
+        # The build is uploaded to App Store Connect and reaches the internal
+        # group via automatic distribution.
+        submit_to_testflight: false
