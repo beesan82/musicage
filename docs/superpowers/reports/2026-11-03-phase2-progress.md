@@ -1,0 +1,82 @@
+# フェーズ 2 進捗（2026-11-03 時点）
+
+計画: `docs/superpowers/plans/2026-10-19-lyric-typography-phase2.md`
+ブランチ: `claude/lyric-typography-phase2`（`origin/master` の `70d0ee5` から分岐）
+実行方法: superpowers:subagent-driven-development。各タスクを実装役が書き、別のレビュー役が仕様適合と品質を確かめた。
+
+## タスクの状態
+
+| タスク | 状態 | コミット |
+| --- | --- | --- |
+| Task 0 所有者の手順 | 済み。App ID・ShazamKit・端末登録・Apple ログインは 2026 年 9 月の ShazamKit 版で実施済みだったことが分かり、既存の EAS プロジェクトを引き継いだ。`expo-dev-client` と `eas-cli` は所有者が 2026-10-20 に入れた | `3e27122`、`5636473` |
+| Task 1 EAS 設定 | 完了・レビュー済み | `831fd86`、`3e27122`、`5636473`、`26d3937` |
+| Task 2 耳モジュールの JS 契約 | 完了・レビュー済み | `8196da1` |
+| Task 3 Swift の耳モジュール | 完了・レビュー済み。**未コンパイル** | `66bf1bd`、`eae721f` |
+| Task 4 EarStream と useEar | 完了・レビュー済み | `b8e7302` |
+| Task 5 型の置き換えと AudD・校正系の削除 | 完了・レビュー済み | `d23aa8d` |
+| Task 6 認識フックと自動再認識 | 完了・レビュー済み | `6042488`、`f04342a` |
+| Task 7 設定と操作列 | 完了・レビュー済み | `972c942`、`51292d1` |
+| Task 8 舞台への配線と README | 完了・レビュー済み | `f63df41`、`ac41d93` |
+| Task 9 EAS ビルドと実機確認 | **未着手**（所有者が `eas build --platform ios --profile development` を実行するところから） | — |
+| ブランチ全体の最終レビュー | **未実施**（Task 9 の後に行い、下の「後回しにした指摘」の扱いを決める） | — |
+
+最後に確認した状態（`26d3937`）: `npm test` 42 スイート 276 件すべて通過、`npm run typecheck` 通過。`npx expo config --type public` で bundle ID・projectId・owner を確認、`expo-modules-autolinking search --platform apple` で `expo-musicage-ear` が見つかることを確認。
+
+## 計画から変えた判断（Ruling）
+
+1. **tsconfig**: `modules/**/*.ts` を `include` に足す作業を Task 1 から Task 2 に前倒しした（Task 1 が当時進められなかったため）。
+2. **README の `start:go`**: Task 1 より先に README に書いた。今は Task 1 で `package.json` に入っている。
+3. **自動再認識の発火条件**: 「最終行 + 15 秒」の発火を「無音 → 音」の発火と独立にした。式は `enabled && !recognizing && ((armed && previousSilence && !silence) || (pastOutro && !previousPastOutro && !silence))`。計画どおりの式では計画自身のテストが通らないため。外れた場合、曲の終わりに認識が 1 回余分に走る。
+4. **Shazam ID が無いマッチ**: 計画は空文字を送る指定だったが、ネイティブ側で `invalid_match` エラーにした（JS 側も空の ID を同じエラーにするので外から見た挙動は同じ）。
+5. **app.json のマイク文**: Task 5 で AudD の記述を消し、Task 1 で最終の文に置き換えた。
+6. **設定ファイル**: 書き込みが失敗しても例外を出さず、メモリ上の値はその回だけ有効にする。書き込む前にファイルが無ければ作る（SDK 57 で `write` がファイルを作るか確かめられなかったため）。
+7. **針を上げたとき**: 認識済みの曲で無音が 4 秒続いたら idle 構成に戻す（計画の実装には無く、README と設計書の受け入れ条件 4 が求めていたのでコードを直した）。外れた場合、曲中の 4 秒以上の静かな部分で、音が戻るまで歌詞が消える。
+8. **Task 1 の分割**: 所有者の操作が要る 2 つの確認（`expo-dev-client` と `projectId`）を後から足した。
+9. **EAS プロジェクトの引き継ぎ**: `eas init` をせず、既存の projectId（`4565a0df-…`）と owner `beesan` を `app.json` に入れ、`eas.json` を `appVersionSource: remote` にした。
+10. **設定の読み込み前は自動再認識を止める**: 保存した「オフ」が起動直後の既定「オン」で上書きされるのを防ぐため。
+11. **起動直後の無音扱い**: 拍エンジンは起動直後 500ms ほど無音と判定しないため、最初に音が聞こえるまで舞台側で無音とみなす（起動直後の誤った自動認識を防ぐ）。
+
+## 実機で確認すること（Task 9 と合わせて）
+
+README の「Device validation」の 9 項目に加えて:
+
+- 初回起動のマイク許可ダイアログで、許可が捨てられてマイクのボタンを 1 回押す必要がないか（ダイアログ中にアプリが inactive になるため）。
+- `.playAndRecord` + `.mixWithOthers` の音声セッションが、同じ iPhone で他のアプリが鳴らす音の経路や音量を変えないか。
+- `predictedCurrentMatchOffset` と `matchOffset` のどちらが使われたか、`artworkUrl` が取れるか。
+- 曲が切り替わる瞬間に、前の曲の行番号で 1 フレームちらつかないか。
+
+## 後回しにした指摘（最終レビューで残すか直すかを決める）
+
+ネイティブ（Swift）
+- 起動処理が `setActive(true)` の後で失敗すると、オーディオセッションが有効のまま残る。
+- 音声経路の変更（AirPods の接続など）に対応していない。中断から戻ってエンジンを再開しても JS に通知しない。
+- タップのスレッドが 20ms ごとに NSLock を取り、クロージャを 1 つ割り当てる。
+- `vDSP_create_fftsetup` 失敗時に `fatalError`。失敗可能な init にすれば `audio_setup_failed` を返せる。
+
+JS の耳と認識
+- `useNativeEar`: `audio_setup_failed` / `interrupted` で error に入るとき、ネイティブを止めていない。`requesting` 中のフレームは捨てる（計画どおり）。
+- `useEar` は条件付きでフックを呼ぶ（計画どおり。lint は未設定）。テストはメーター側だけ。
+- `index.ts` の `addErrorListener` がネイティブのエラーをそのまま渡す（`{ code }` だけに写すべき）。`clockConverter` は `samples <= 0` を `?? 0` で隠している。
+- `useEarRecognition`: 呼び出し側が listening 中にだけ `recognize()` を呼ぶ前提。ネイティブのイベントに試行 ID が無く、取り消し直後の遅い `match_timeout` が次の試行に当たりうる。`resolving_lyrics` 中のエラーで LRCLIB の要求を中断しない。同じ試行で 2 回目の認識が来ると検索が 2 回走る。
+
+設定と舞台
+- 設定の初回読み込み前の `update` は読み込み結果で上書きされる（UI は `ready` まで切り替えを無視しているので実害は小さい）。
+- 歌詞の行が変わった直後の 1 回の描画で、前の曲の行番号が新しい曲に当たる可能性がある。
+- 起動直後の無音扱いは舞台側にある。拍エンジンの初期状態を無音にする方が筋がよい。拍の間引きに末尾の公開が無い。
+- マイクを止めている間、認識済みの曲は時計どおりに進み続ける（所有者が選んだ状態なので許容）。
+
+テストの抜け
+- 無音 4 秒のタイマーが途中の物音でやり直すことのテスト、無効な状態のボタンが `onRecognize` を呼ばないことのテスト、設定ファイルのパスの確認、読み込み前のアンマウントなど。
+
+その他
+- `expo-crypto` は校正系の削除で使われなくなった。所有者が `npm uninstall expo-crypto` で外す（依存の変更は所有者のコマンドで行う）。
+- `expo-secure-store` はフェーズ 3 の Claude API キー保存に使うので残す。
+
+## 次にやること
+
+1. 所有者: `eas build --platform ios --profile development` を実行し、iPhone に入れて README の「Device validation」と上の項目を確かめる。ビルドが失敗したらビルドページの Xcode ログを渡す。
+2. エージェント: ビルドエラーがあれば Swift を直す。実機の結果を `docs/superpowers/reports/` に記録する。
+3. エージェント: ブランチ全体の最終レビュー（最も能力の高いモデルで）を行い、後回しにした指摘を直すか残すか決める。
+4. 所有者の確認後、pull request で `master` にマージする。
+5. フェーズ 3（Claude API の演出ディレクター）の計画を設計書から書く。
+6. 配布を TestFlight にするか（EAS Submit か Codemagic か）は所有者の判断待ち。

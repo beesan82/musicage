@@ -25,8 +25,6 @@
 3. Expo Go で QR コードを読み取る
 4. マイクを許可する
 
-`start:go`（`expo start --go`）は EAS 設定のタスクで `package.json` に入ります。まだ無い場合は `npx expo start --go` を直接実行してください。
-
 ## What it does
 
 - 画面全体は Skia で描く「文字の舞台」です。黒地のテクスチャ背景の上に、曲がないときは idle のグリフ構成が置かれ、マイクの音から推定した拍（`pulse`）で脈打ちます。
@@ -39,40 +37,28 @@
 
 ## Development Build
 
-所有者が行う手順（実装者は代行できません）と、ビルドのコマンドです。
+Apple Developer の App ID（`com.musicage.app`、ShazamKit の App Service 有効）、開発用 iPhone の登録、EAS プロジェクト（`app.json` の `extra.eas.projectId`、所有者 `beesan`）は作成済みです。**`eas init` は実行しないでください**（別の EAS プロジェクトができてしまいます）。
 
-1. Apple Developer ポータルの Identifiers で App ID（Explicit、`com.musicage.app`）を作り、「App Services」で **ShazamKit** を有効にする（ShazamKit は entitlement ではなく App Service なので、後から有効化しても証明書の作り直しは不要）。
-2. EAS CLI を入れてログインを確認する（PowerShell）:
+ビルドは所有者が PowerShell で行います（Apple ID のログインが要ります）。
+
+1. EAS CLI が入っていなければ入れて、ログインを確認する:
 
    ```powershell
    npm install -g eas-cli
    eas whoami
    ```
 
-   表示されなければ `eas login`。
-3. 開発用 iPhone を EAS に登録する:
-
-   ```powershell
-   eas device:create
-   ```
-
-   表示された URL（または QR）を iPhone の Safari で開き、プロファイルをインストールすると UDID が登録されます。
-4. 依存を追加して EAS プロジェクトを作る（リポジトリのルートで）:
-
-   ```powershell
-   npx expo install expo-dev-client
-   eas init
-   ```
-
-5. 設定の解決を確認してからビルドする:
+   `beesan` と出なければ `eas login`。
+2. 設定の解決を確認してからビルドする:
 
    ```powershell
    npx expo config --type public
    eas build --platform ios --profile development
    ```
 
-   `ios.bundleIdentifier` が `com.musicage.app`、`extra.eas.projectId` が入っていることを確かめます。初回は Apple ID のログインと、証明書・プロビジョニングプロファイルの生成を承認します（EAS が管理）。失敗したらビルドページの Xcode ログ（`Run fastlane` の Swift エラー）を見ます。1 往復 15〜30 分を見込んでください。
-6. ビルドの URL を iPhone で開いてインストールし、上の「Run → Development Build」で起動します。
+   証明書やプロビジョニングプロファイルについて聞かれたら、EAS に任せる既定の答えで進めます。1 回 15〜30 分かかります。失敗したらビルドページの Xcode ログ（`Run fastlane` の Swift エラー）を見ます。
+3. 新しい iPhone を足すときだけ `eas device:create` で登録してから、もう一度ビルドします。
+4. ビルドの URL を iPhone で開いてインストールし、上の「Run → Development Build」で起動します。
 
 ## Device validation
 
