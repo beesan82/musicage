@@ -38,6 +38,10 @@ workflows:
     scripts:
       - name: Install JavaScript dependencies
         script: npm ci
+      - name: Generate the app icon
+        script: |
+          python3 -m pip install --quiet pillow
+          python3 scripts/generate_icon.py
       - name: Generate the iOS project (Expo prebuild; also installs Pods)
         script: npx expo prebuild --platform ios
       - name: Apply signing profiles
