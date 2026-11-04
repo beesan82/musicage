@@ -80,3 +80,27 @@ JS の耳と認識
 4. 所有者の確認後、pull request で `master` にマージする。
 5. フェーズ 3（Claude API の演出ディレクター）の計画を設計書から書く。
 6. 配布を TestFlight にするか（EAS Submit か Codemagic か）は所有者の判断待ち。
+
+## 追記（2026-11-04）: 起動即死クラッシュの真因（シーンライフサイクル未対応）の修正
+
+- 発端: Codemagic の TestFlight 配布ビルド（0.1.0 (1)）が実機で起動した瞬間に終了した。本人の iPhone から取得した .ips ログで確定した診断: 例外は EXC_BREAKPOINT (SIGTRAP)、起動から約 0.24 秒後、メインスレッド。最上位フレームは UIKitCore の `___UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption_block_invoke` で、`-[UIApplication workspace:didCreateScene:...]` の呼び出し中。iOS 27 が「シーンライフサイクル（UIScene）を採用していないアプリ」をシーン生成時点で強制終了していた。JS バンドル評価・耳モジュール・テクスチャシェーダには到達していない（先の追記のテクスチャ候補はこのクラッシュの原因ではなかった）。
+- 原因の特定根拠（生成される Info.plist に `UIApplicationSceneManifest` が入らない理由）:
+  - 最終 Info.plist は「テンプレートの Info.plist ＋ app.json の `ios.infoPlist` ＋ プラグインの withInfoPlist 結果」で決まるが、どれにもシーン manifest が無い。
+  - Expo SDK 57 の標準テンプレート（expo-template-bare-minimum@57.0.33 を取得して確認）の Info.plist に `UIApplicationSceneManifest` は無く、AppDelegate.swift は classic 形式（didFinishLaunching で `UIWindow(frame:)` を作り即 RN 起動）。
+  - @expo/config-plugins 57.0.9 全体と @expo/prebuild-config のデフォルト iOS プラグイン一覧（withIosExpoPlugins）に、シーン manifest を追加するものは無い。
+  - expo 57.0.20 の `ExpoAppDelegate.swift` に `application:configurationForConnectingSceneSession:` の実装が無い。`UIWindowSceneDelegate` に適合するクラスは依存パッケージのどこにも存在しない。
+  - MUSICAGE の app.json の infoPlist 上書きにも無く、採用プラグイン（expo-audio 等）にも無い。`npx expo config --type prebuild` の ios.infoPlist にも現れない。
+  - 決め手として、修正前のプロジェクトを実際に prebuild して生成物を確認した: 生成された Info.plist に `UIApplicationSceneManifest` は 0 件、SceneDelegate.swift は存在せず、AppDelegate は classic 形式のままだった。つまり現行構成では構造的にシーン対応が生成されず、Xcode 27（DTAppStoreToolsBuild 27B52）で iOS 27 SDK にリンクされたビルドが実機のシーン生成で終了する。
+- 修正（ブランチ `fix/ios-scene-lifecycle`、feat/codemagic-testflight から分岐、push は所有者の承認待ち）: ローカル config plugin `plugins/withSceneLifecycle.js` を新設し、app.json の plugins に `./plugins/withSceneLifecycle` を追加。生成物 ios/ の手編集はしていない。plugin の内容:
+  1. withInfoPlist で `UIApplicationSceneManifest` を追加（複数シーン不可、構成名 "Default Configuration"、delegate は `$(PRODUCT_MODULE_NAME).SceneDelegate`）。
+  2. `IOSConfig.XcodeProjectFile.withBuildSourceFile` で `SceneDelegate.swift` をアプリターゲットに生成・リンク。window を接続中の windowScene で作り、AppDelegate の `startReactNative(in:)` を呼ぶ。
+  3. withAppDelegate でテンプレートの AppDelegate.swift を最小改変: didFinishLaunching は factory の準備と launchOptions の保持だけにし、window 生成と RN 起動を `startReactNative(in:)` に分離。シーン接続と didFinishLaunching の前後どちらの順でも、また二重起動にならないようガード付き。テンプレート文面が変わってアンカーが見つからない場合は prebuild をエラーで止める（黙って壊れた生成物を出さない）。
+- ローカル検証（この環境は Linux で Swift のコンパイルはできないため、生成物の確認まで）:
+  - 修正後を実際に prebuild して確認: 生成 Info.plist に `UIApplicationSceneManifest` が入り（中身も上記のとおり）、`SceneDelegate.swift` が生成され project.pbxproj の Sources にリンクされ、AppDelegate.swift が意図どおり書き換わった。
+  - `npm test -- --watchman=false`: 42 suites / 276 tests 全通過。`npm run typecheck`: 通過。
+  - Swift のコンパイル自体は未検証。Codemagic か EAS のビルドが通るまでは「未検証」として扱う。
+- 実機で確認すること:
+  1. この修正入りビルドを TestFlight で再配布し、実機で起動して即死せず、舞台（idle 構成）が表示されること。あわせて Task 9 の Device validation。
+  2. 開発ビルド（expo-dev-client）でも起動と dev launcher の表示が壊れていないこと（window の生成タイミングがシーン接続時に変わるため）。
+  3. スプラッシュ表示から舞台への遷移、画面の向き（縦固定）、ダークな見た目が従来どおりであること。
+- 次にやること: 所有者承認後に push し、フェーズ 2 ブランチへの取り込み方を決めて再ビルド → TestFlight 再配布 → 実機確認。テクスチャ遅延初期化のブランチ（fix/texture-shader-lazy-init）とは独立で、混ぜていない。

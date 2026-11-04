@@ -23,7 +23,8 @@
       ],
       "expo-asset",
       "expo-secure-store",
-      "expo-status-bar"
+      "expo-status-bar",
+      "./plugins/withSceneLifecycle"
     ],
     "owner": "beesan",
     "extra": {
