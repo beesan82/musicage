@@ -1,5 +1,6 @@
-import { render } from '@testing-library/react-native';
+import { act, render } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
+import { interpolateColor, makeMutable } from 'react-native-reanimated';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import type { BeatState } from '../../beat/types';
@@ -9,6 +10,8 @@ import type { LyricLine } from '../../recognition/types';
 import * as fonts from '../fonts';
 import { anchoredTime, LyricStage } from '../LyricStage';
 import type { LyricStageProps } from '../LyricStage';
+import * as motion from '../motion';
+import type { BeatSharedValues } from '../useBeatSharedValues';
 
 const METRICS = {
   frame: { x: 0, y: 0, width: 390, height: 844 },
@@ -19,8 +22,24 @@ function inProvider(element: ReactElement) {
   return <SafeAreaProvider initialMetrics={METRICS}>{element}</SafeAreaProvider>;
 }
 
-function renderStage(props: LyricStageProps) {
-  return render(inProvider(<LyricStage {...props} />));
+const sv = (value: number) => makeMutable(value);
+const beatValues: BeatSharedValues = {
+  pulse: sv(0),
+  phase: sv(0),
+  bar: sv(2),
+  confidence: sv(0.9),
+  energy: sv(0.3),
+  lastOnsetAtMs: sv(0),
+  nextBeatAtMs: sv(0),
+  periodMs: sv(0),
+  low: sv(0),
+  mid: sv(0),
+  high: sv(0),
+  write: () => {},
+};
+
+function renderStage(props: Omit<LyricStageProps, 'beatValues'>) {
+  return render(inProvider(<LyricStage beatValues={beatValues} {...props} />));
 }
 
 function toLines(texts: string[]): LyricLine[] {
@@ -143,19 +162,33 @@ test('renders no glyphs but still the background while typefaces are loading', a
   expect(queryAllByTestId(/^glyph-/)).toHaveLength(0);
 });
 
-test('uses the accent colour for emphasized glyphs of an accent line', async () => {
+test('emphasized glyphs of an accent line migrate to the accent colour across the line', async () => {
   const accented: SongDirection = {
     ...direction,
     palette: { background: '#000000', ink: '#EEEEEE', accent: '#FF0000' },
     lines: direction.lines.map((line) => ({ ...line, accent: true, emphasis: [0] })),
   };
-  const { getAllByTestId } = await renderStage({
-    source: synced(TEXTS, 0, accented),
-    beat,
-    nowMonotonicMs: 100,
-  });
-  const colors = getAllByTestId(/^glyph-/).map((g) => textsIn(g as unknown as Node)[0]?.props.color);
-  expect(colors).toEqual(['#FF0000', '#EEEEEE', '#EEEEEE', '#EEEEEE']);
+  const colorAt = async (nowMonotonicMs: number) => {
+    const { getAllByTestId, unmount } = await renderStage({
+      source: synced(TEXTS, 0, accented),
+      beat,
+      nowMonotonicMs,
+    });
+    const colors = getAllByTestId(/^glyph-/).map(
+      (g) => textsIn(g as unknown as Node)[0]?.props.color.value as string,
+    );
+    await unmount();
+    return colors;
+  };
+  // 100ms into a 4000ms line the migration has barely started: not accent yet.
+  const early = await colorAt(100);
+  expect(early[0]).not.toBe('#FF0000');
+  expect(early[0]).not.toBe('#EEEEEE');
+  expect(early.slice(1)).toEqual(['#EEEEEE', '#EEEEEE', '#EEEEEE']);
+  // At the line's end the emphasized glyph is fully accent.
+  const late = await colorAt(4000);
+  expect(late[0]).toBe(interpolateColor(1, [0, 1], ['#EEEEEE', '#FF0000']));
+  expect(late.slice(1)).toEqual(['#EEEEEE', '#EEEEEE', '#EEEEEE']);
 });
 
 test('uses the ink colour for emphasized glyphs of a line without accent', async () => {
@@ -168,7 +201,9 @@ test('uses the ink colour for emphasized glyphs of a line without accent', async
     beat,
     nowMonotonicMs: 100,
   });
-  const colors = getAllByTestId(/^glyph-/).map((g) => textsIn(g as unknown as Node)[0]?.props.color);
+  const colors = getAllByTestId(/^glyph-/).map(
+    (g) => textsIn(g as unknown as Node)[0]?.props.color.value,
+  );
   expect(new Set(colors)).toEqual(new Set([direction.palette.ink]));
 });
 
@@ -253,6 +288,88 @@ test('renders a still stage with reducedMotion', async () => {
     reducedMotion: true,
   });
   expect(getAllByTestId(/^glyph-/)).toHaveLength(4);
+});
+
+test('keeps the previous line as an exiting layer on a line change, then drops it', async () => {
+  const dropDirection: SongDirection = {
+    ...direction,
+    lines: direction.lines.map((line) => ({
+      ...line,
+      entrance: 'drop' as const,
+      hold: 'still' as const,
+    })),
+  };
+  const stageAt = (index: number, startedAtMs: number) => (
+    <LyricStage
+      beatValues={beatValues}
+      source={{
+        kind: 'synced',
+        lines: toLines(TEXTS),
+        direction: dropDirection,
+        scheduled: { index, startedAtMs, isEmpty: false },
+        track: null,
+      }}
+      beat={beat}
+      nowMonotonicMs={startedAtMs}
+    />
+  );
+  const view = await render(inProvider(stageAt(0, 0)));
+  expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+  expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
+
+  await view.rerender(inProvider(stageAt(1, 4000)));
+  // The new line ('走れ！', 3 glyphs) is current; the old line ('夜の底で',
+  // 4 glyphs) is on its way out underneath.
+  expect(view.getAllByTestId(/^glyph-/)).toHaveLength(3);
+  expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+
+  // The exit of a drop line runs 320ms (+80ms of slack in the stage's timer).
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  });
+  expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
+  expect(view.getAllByTestId(/^glyph-/)).toHaveLength(3);
+});
+
+test('draws stroke twins only for heavy lines (gothic-heavy face or bold weight)', async () => {
+  const heavyDirection: SongDirection = {
+    ...direction,
+    lines: direction.lines.map((line) => ({
+      ...line,
+      font: 'gothic-heavy' as const,
+      weight: 'regular' as const,
+    })),
+  };
+  const heavy = await renderStage({
+    source: synced(TEXTS, 0, heavyDirection),
+    beat,
+    nowMonotonicMs: 100,
+  });
+  expect(heavy.getAllByTestId(/^glyph-/)).toHaveLength(4);
+  for (const group of heavy.getAllByTestId(/^glyph-/)) {
+    expect(textsIn(group as unknown as Node)).toHaveLength(2);
+  }
+  await heavy.unmount();
+
+  const plain = await renderStage({ source: synced(TEXTS, 0), beat, nowMonotonicMs: 100 });
+  for (const group of plain.getAllByTestId(/^glyph-/)) {
+    expect(textsIn(group as unknown as Node)).toHaveLength(1);
+  }
+});
+
+test('passes the scheduler landing through to the line motion', async () => {
+  const spy = jest.spyOn(motion, 'glyphTransform');
+  const source: LyricStageProps['source'] = {
+    kind: 'synced',
+    lines: toLines(TEXTS),
+    direction,
+    scheduled: { index: 0, startedAtMs: 1000, isEmpty: false, landsAtMs: 1200 },
+    track: null,
+  };
+  await renderStage({ source, beat, nowMonotonicMs: 1100 });
+  const inputs = spy.mock.calls.map(([input]) => input as motion.MotionInput);
+  expect(inputs.length).toBeGreaterThan(0);
+  expect(inputs.some((i) => i.anticipationMs === 200 && i.elapsedMs === -100)).toBe(true);
 });
 
 describe('anchoredTime', () => {

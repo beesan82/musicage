@@ -1,5 +1,11 @@
 import type { BeatState } from '../../beat/types';
-import { ALIGN_WINDOW_MS, OUTRO_MS, isPastOutro, scheduleLine } from '../lineScheduler';
+import {
+  ALIGN_WINDOW_MS,
+  LANDING_WINDOW_MS,
+  OUTRO_MS,
+  isPastOutro,
+  scheduleLine,
+} from '../lineScheduler';
 
 const LINES = [
   { startMs: 0, text: 'a' },
@@ -20,6 +26,7 @@ const prev0 = { index: 0, startedAtMs: 0, isEmpty: false };
 
 test('constants', () => {
   expect(ALIGN_WINDOW_MS).toBe(80);
+  expect(LANDING_WINDOW_MS).toBe(250);
   expect(OUTRO_MS).toBe(15_000);
 });
 
@@ -66,6 +73,51 @@ test('waits for a beat exactly 80ms away', () => {
 test('ignores beats when confidence is below 0.5', () => {
   const beat = { ...noBeat, confidence: 0.49, nextBeatAtMs: 10_050 };
   expect(scheduleLine(LINES, 4000, beat, 10_000, prev0).index).toBe(2);
+});
+
+describe('landsAtMs (lookahead landing on a beat 80-250ms ahead)', () => {
+  const landingBeat = (untilMs: number, confidence = 0.8): BeatState => ({
+    ...noBeat,
+    confidence,
+    nextBeatAtMs: 10_000 + untilMs,
+  });
+
+  test('confirms the line at once and annotates the beat head 150ms ahead', () => {
+    const s = scheduleLine(LINES, 4000, landingBeat(150), 10_000, prev0);
+    expect(s).toEqual({ index: 2, startedAtMs: 10_000, isEmpty: false, landsAtMs: 10_150 });
+  });
+
+  test('annotates a beat exactly 250ms ahead, but not one further out', () => {
+    expect(scheduleLine(LINES, 4000, landingBeat(250), 10_000, prev0).landsAtMs).toBe(10_250);
+    const far = scheduleLine(LINES, 4000, landingBeat(251), 10_000, prev0);
+    expect(far.index).toBe(2);
+    expect(far.landsAtMs).toBeUndefined();
+  });
+
+  test('a beat 81ms ahead lands instead of waiting (waiting is only within 80ms)', () => {
+    const s = scheduleLine(LINES, 4000, landingBeat(81), 10_000, prev0);
+    expect(s.index).toBe(2);
+    expect(s.landsAtMs).toBe(10_081);
+  });
+
+  test('does not look ahead when confidence is below 0.5', () => {
+    const s = scheduleLine(LINES, 4000, landingBeat(150, 0.49), 10_000, prev0);
+    expect(s.index).toBe(2);
+    expect(s.landsAtMs).toBeUndefined();
+  });
+
+  test('does not annotate a rewind, even with a beat in the landing window', () => {
+    const prev = { index: 2, startedAtMs: 10_000, isEmpty: false };
+    const s = scheduleLine(LINES, 500, landingBeat(150), 10_000, prev);
+    expect(s.index).toBe(0);
+    expect(s.landsAtMs).toBeUndefined();
+  });
+
+  test('no annotation without a predicted beat', () => {
+    const s = scheduleLine(LINES, 4000, { ...noBeat, confidence: 0.9 }, 10_000, prev0);
+    expect(s.index).toBe(2);
+    expect(s.landsAtMs).toBeUndefined();
+  });
 });
 
 test('does not wait for a beat that is already past', () => {

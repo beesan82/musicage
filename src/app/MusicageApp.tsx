@@ -112,6 +112,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
         <View pointerEvents="none" style={styles.fill}>
           <LyricStage
             beat={stage.beat}
+            beatValues={stage.beatValues}
             nowMonotonicMs={stage.nowMonotonicMs}
             reducedMotion={reducedMotion}
             source={stage.source}

@@ -1,6 +1,6 @@
 import { Canvas, Group, Text } from '@shopify/react-native-skia';
 import type { SkFont } from '@shopify/react-native-skia';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
 import { useFrameCallback, useSharedValue } from 'react-native-reanimated';
@@ -15,12 +15,13 @@ import { TextureBackground } from '../textures/TextureBackground';
 import { createStageFont, FONT_SOURCES, useStageTypefaces } from './fonts';
 import type { FontKey, FontWeight } from './fonts';
 import { GlyphLayer } from './GlyphLayer';
-import { composeIdle } from './idleComposition';
+import { composeIdle, IDLE_EPOCH_BARS } from './idleComposition';
 import type { IdleTrack } from './idleComposition';
 import { layoutLine, SIZE_RATIO } from './layout';
 import type { GlyphMeasure, LineLayout, PlacedGlyph, Viewport } from './layout';
+import { exitDurationMs, TEMPO_FEEL_FACTOR } from './motion';
 import { Ornament } from './Ornaments';
-import { useBeatSharedValues } from './useBeatSharedValues';
+import type { BeatSharedValues } from './useBeatSharedValues';
 
 export type StageSource =
   | {
@@ -35,6 +36,8 @@ export type StageSource =
 export interface LyricStageProps {
   source: StageSource;
   beat: BeatState;
+  /** Shared values written by the ear on every frame; worklets read these. */
+  beatValues: BeatSharedValues;
   /** `performance.now()` at render; the clock `scheduled.startedAtMs` is on. */
   nowMonotonicMs: number;
   reducedMotion?: boolean;
@@ -145,9 +148,14 @@ interface LineScene {
  * change (idle also when the bar changes); all motion is derived on the UI
  * thread from the `time` shared value and the beat shared values.
  */
-export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false }: LyricStageProps) {
+export function LyricStage({
+  source,
+  beat,
+  beatValues,
+  nowMonotonicMs,
+  reducedMotion = false,
+}: LyricStageProps) {
   const fonts = useStageFonts();
-  const beatValues = useBeatSharedValues(beat);
   const insets = useSafeAreaInsets();
   const frame = useSafeAreaFrame();
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
@@ -192,6 +200,7 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
   const songDirection = source.direction;
   const lineIndex = scheduled?.index ?? -1;
   const lineIsEmpty = scheduled?.isEmpty ?? true;
+  const lineStartedAtMs = scheduled?.startedAtMs ?? 0;
 
   const lineScene = useMemo<LineScene | null>(() => {
     if (fonts === null || lines === null || songDirection === null || lineIsEmpty) return null;
@@ -214,21 +223,78 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
     };
   }, [fonts, lineIndex, lineIsEmpty, lines, songDirection, viewport]);
 
+  // The leaving line: when the displayed scene changes, the previous scene is
+  // kept for the length of its exit (derived from its entrance, capped at one
+  // beat) so a line change is a handover in one tempo, not an instant swap.
+  const [exiting, setExiting] = useState<{ scene: LineScene; startedAtMs: number } | null>(null);
+  const lastSceneRef = useRef<LineScene | null>(null);
+  useEffect(() => {
+    const prev = lastSceneRef.current;
+    lastSceneRef.current = lineScene;
+    if (prev === null || (lineScene !== null && lineScene.index === prev.index)) return;
+    const duration = exitDurationMs(
+      prev.direction.entrance,
+      prev.layout.glyphs.length,
+      beatValues.periodMs.value,
+    );
+    if (duration <= 0 || reducedMotion) {
+      setExiting(null);
+      return;
+    }
+    setExiting({ scene: prev, startedAtMs: scheduled?.startedAtMs ?? nowMonotonicMs });
+  }, [lineScene, beatValues, scheduled, nowMonotonicMs, reducedMotion]);
+  useEffect(() => {
+    if (exiting === null) return undefined;
+    const duration = exitDurationMs(
+      exiting.scene.direction.entrance,
+      exiting.scene.layout.glyphs.length,
+      beatValues.periodMs.value,
+    );
+    const id = setTimeout(
+      () => setExiting((current) => (current === exiting ? null : current)),
+      duration + 80,
+    );
+    return () => clearTimeout(id);
+  }, [exiting, beatValues]);
+
   const showIdle = fonts !== null && lineScene === null;
   const idleGlyphs = songDirection?.idleGlyphs ?? DEFAULT_IDLE_GLYPHS;
   const trackTitle = source.track?.title ?? null;
   const trackArtist = source.track?.artist ?? null;
+  // The idle composition is fixed inside an 8-bar epoch; one glyph swaps per
+  // bar. `beat.bar` reaches the stage frozen through silence, so a quiet room
+  // holds the composition still.
+  const epoch = Math.floor(beat.bar / IDLE_EPOCH_BARS);
+  const barInEpoch = beat.bar % IDLE_EPOCH_BARS;
   const idle = useMemo(() => {
     if (!showIdle || fonts === null) return null;
     const track =
       trackTitle !== null && trackArtist !== null ? { title: trackTitle, artist: trackArtist } : null;
-    return composeIdle(beat.bar, idleGlyphs, viewport, track, measureWith(fonts, 'gothic', 'regular'));
-  }, [beat.bar, fonts, idleGlyphs, showIdle, trackArtist, trackTitle, viewport]);
+    return composeIdle(epoch, barInEpoch, idleGlyphs, viewport, track, measureWith(fonts, 'gothic', 'regular'));
+  }, [barInEpoch, epoch, fonts, idleGlyphs, showIdle, trackArtist, trackTitle, viewport]);
+  // Stage-clock times at which the current bar / epoch first appeared, so the
+  // idle layers can time their `rise` entrances: the whole composition rises
+  // at an epoch change, and the one swapped glyph rises at its bar change.
+  // (The stage clock tracks performance.now(); see the anchor logic above.)
+  const barRef = useRef(beat.bar);
+  const barStartedAtRef = useRef(nowMonotonicMs);
+  if (barRef.current !== beat.bar) {
+    barRef.current = beat.bar;
+    barStartedAtRef.current = performance.now();
+  }
+  const epochRef = useRef(epoch);
+  const epochStartedAtRef = useRef(nowMonotonicMs);
+  if (epochRef.current !== epoch) {
+    epochRef.current = epoch;
+    epochStartedAtRef.current = performance.now();
+  }
+  const idleSwapped = idle?.glyphs.find((g) => g.index >= 1000) ?? null;
+  const idleBase = idle?.glyphs.filter((g) => g !== idleSwapped) ?? null;
 
   const palette = songDirection?.palette ?? DEFAULT_PALETTE;
   const texture = songDirection?.texture ?? 'grain';
-  const lineStartedAtMs = scheduled?.startedAtMs ?? 0;
-  const shared = { time, beat: beatValues, reducedMotion, palette } as const;
+  const feel = TEMPO_FEEL_FACTOR[songDirection?.tempoFeel ?? 'sway'];
+  const shared = { time, beat: beatValues, reducedMotion, palette, feel } as const;
   // Stable font getters keep the memoised GlyphLayers from re-rendering on every beat update.
   const gothic = useCallback((sizePx: number) => fonts!('gothic', 'regular', sizePx), [fonts]);
   const lineFace = lineScene?.direction.font ?? 'gothic';
@@ -237,6 +303,23 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
     (sizePx: number) => fonts!(lineFace, lineWeight, sizePx),
     [fonts, lineFace, lineWeight],
   );
+  const lineHeavy = lineWeight === 'bold' || lineFace === 'gothic-heavy';
+  const lineLandsAtMs = scheduled?.landsAtMs ?? null;
+  // The line's end on the stage clock: lines play in real time, so the next
+  // line's song-time distance from this one is also its stage-time distance.
+  const currentLine = lines !== null && lineIndex >= 0 ? lines[lineIndex] : undefined;
+  const nextLine = lines !== null && lineIndex >= 0 ? lines[lineIndex + 1] : undefined;
+  const lineEndsAtMs =
+    currentLine !== undefined && nextLine !== undefined
+      ? lineStartedAtMs + (nextLine.startMs - currentLine.startMs)
+      : null;
+  const exitFace = exiting?.scene.direction.font ?? 'gothic';
+  const exitWeight = exiting?.scene.direction.weight ?? 'regular';
+  const exitFont = useCallback(
+    (sizePx: number) => fonts!(exitFace, exitWeight, sizePx),
+    [fonts, exitFace, exitWeight],
+  );
+  const exitHeavy = exitWeight === 'bold' || exitFace === 'gothic-heavy';
 
   return (
     <View
@@ -250,6 +333,10 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
           palette={palette}
           pulse={beatValues.pulse}
           energy={beatValues.energy}
+          low={beatValues.low}
+          mid={beatValues.mid}
+          high={beatValues.high}
+          confidence={beatValues.confidence}
           width={width}
           height={height}
           reducedMotion={reducedMotion}
@@ -257,6 +344,21 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
       </View>
       {fonts !== null ? (
         <Canvas style={styles.layer}>
+          {exiting !== null ? (
+            <GlyphLayer
+              {...shared}
+              glyphs={exiting.scene.layout.glyphs}
+              fontFor={exitFont}
+              lineStartedAtMs={exiting.startedAtMs}
+              entrance={exiting.scene.direction.entrance}
+              hold={exiting.scene.direction.hold}
+              accent={exiting.scene.direction.accent}
+              heavy={exitHeavy}
+              exiting
+              seed={exiting.scene.index + 1}
+              testIDPrefix="exit-glyph"
+            />
+          ) : null}
           {lineScene !== null ? (
             <>
               <Ornament
@@ -273,9 +375,12 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
                 glyphs={lineScene.layout.glyphs}
                 fontFor={lineFont}
                 lineStartedAtMs={lineStartedAtMs}
+                lineLandsAtMs={lineLandsAtMs}
+                lineEndsAtMs={lineEndsAtMs}
                 entrance={lineScene.direction.entrance}
                 hold={lineScene.direction.hold}
                 accent={lineScene.direction.accent}
+                heavy={lineHeavy}
                 seed={lineScene.index + 1}
               />
               {(['prev', 'next'] as const).map((side) => {
@@ -300,18 +405,30 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
               })}
             </>
           ) : null}
-          {idle !== null ? (
+          {idle !== null && idleBase !== null ? (
             <>
               <GlyphLayer
                 {...shared}
-                glyphs={idle.glyphs}
+                glyphs={idleBase}
                 fontFor={gothic}
-                lineStartedAtMs={0}
-                entrance="cut"
-                hold="pulse"
+                lineStartedAtMs={epochStartedAtRef.current}
+                entrance="rise"
+                hold="breathe"
                 accent={false}
-                seed={beat.bar}
+                seed={epoch}
               />
+              {idleSwapped !== null ? (
+                <GlyphLayer
+                  {...shared}
+                  glyphs={[idleSwapped]}
+                  fontFor={gothic}
+                  lineStartedAtMs={barStartedAtRef.current}
+                  entrance="rise"
+                  hold="breathe"
+                  accent={false}
+                  seed={epoch}
+                />
+              ) : null}
               {idle.caption !== null ? (
                 <Text
                   x={idle.caption.x}

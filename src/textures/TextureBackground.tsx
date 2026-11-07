@@ -14,6 +14,14 @@ export interface TextureBackgroundProps {
   pulse: SharedValue<number>;
   /** Audio energy 0..1, owned and animated by the parent. */
   energy: SharedValue<number>;
+  /** Smoothed low-band envelope 0..1; rests at 0 when the stage does not drive it. */
+  low?: SharedValue<number>;
+  /** Smoothed mid-band envelope 0..1; rests at 0 when not driven. */
+  mid?: SharedValue<number>;
+  /** Smoothed high-band envelope 0..1; rests at 0 when not driven. */
+  high?: SharedValue<number>;
+  /** Beat confidence 0..1; gates the pulse response. Ungated (1) when not driven. */
+  confidence?: SharedValue<number>;
   width: number;
   height: number;
   reducedMotion?: boolean;
@@ -31,11 +39,23 @@ export function TextureBackground({
   palette,
   pulse,
   energy,
+  low,
+  mid,
+  high,
+  confidence,
   width,
   height,
   reducedMotion = false,
 }: TextureBackgroundProps) {
   const time = useSharedValue(0);
+  const restLow = useSharedValue(0);
+  const restMid = useSharedValue(0);
+  const restHigh = useSharedValue(0);
+  const ungated = useSharedValue(1);
+  const lowValue = low ?? restLow;
+  const midValue = mid ?? restMid;
+  const highValue = high ?? restHigh;
+  const confidenceValue = confidence ?? ungated;
 
   const frame = useFrameCallback((info) => {
     'worklet';
@@ -66,11 +86,15 @@ export function TextureBackground({
       iTime: time.value,
       iPulse: pulse.value,
       iEnergy: energy.value,
+      iLow: lowValue.value,
+      iMid: midValue.value,
+      iHigh: highValue.value,
+      iConfidence: confidenceValue.value,
       iBackground: colors.background,
       iInk: colors.ink,
       iAccent: colors.accent,
     }),
-    [width, height, colors],
+    [width, height, colors, lowValue, midValue, highValue, confidenceValue],
   );
 
   return (

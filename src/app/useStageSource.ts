@@ -18,6 +18,8 @@ import type { ScheduledLine } from '../sync/lineScheduler';
 import { songPositionMs } from '../sync/lyricClock';
 import type { StageSource } from '../typesetting/LyricStage';
 import type { IdleTrack } from '../typesetting/idleComposition';
+import { useBeatSharedValues } from '../typesetting/useBeatSharedValues';
+import type { BeatSharedValues } from '../typesetting/useBeatSharedValues';
 
 const SCHEDULER_INTERVAL_MS = 50;
 /** A steady bed publishes the beat at most this often; a new pulse head at once. */
@@ -45,6 +47,8 @@ export interface StageSourceInput {
 export interface StageInputs {
   source: StageSource;
   beat: BeatState;
+  /** Shared values the ear writes on every frame; the stage's worklets read these. */
+  beatValues: BeatSharedValues;
   nowMonotonicMs: number;
   /** The recognized song's clock is OUTRO_MS past its last line. */
   pastOutro: boolean;
@@ -75,9 +79,14 @@ export function useStageSource({
 }: StageSourceInput): StageInputs {
   const engineRef = useRef<BeatEngine | null>(null);
   engineRef.current ??= createBeatEngine();
+  const beatValues = useBeatSharedValues();
   const [beat, setBeat] = useState<BeatState>(QUIET_BEAT);
   const beatRef = useRef(beat);
   beatRef.current = beat;
+  // The bar the stage last saw while there was sound. The engine's grid keeps
+  // counting bars through silence, but the stage's bar freezes so the idle
+  // composition holds still in a quiet room.
+  const frozenBarRef = useRef(0);
   // The stage clock's anchor. Set only at mount and when the scheduled line
   // changes: every re-anchor is pinned at a later UI frame by a varying lag, so
   // re-anchoring on each ear frame would make entrances stall or skip.
@@ -91,6 +100,11 @@ export function useStageSource({
     if (status !== 'listening') {
       engine.reset();
       silentSinceRef.current = null;
+      frozenBarRef.current = 0;
+      beatValues.write(
+        { timestampMs: performance.now(), rms: 0, low: 0, mid: 0, high: 0 },
+        QUIET_BEAT,
+      );
       setBeat(QUIET_BEAT);
       return undefined;
     }
@@ -103,9 +117,17 @@ export function useStageSource({
     return earStream.subscribe((frame) => {
       const pushed = engine.push(frame);
       heardSound ||= frame.rms >= SILENCE_RMS;
-      const next = heardSound ? pushed : { ...pushed, silence: true };
-      if (!next.silence) silentSinceRef.current = null;
-      else silentSinceRef.current ??= performance.now();
+      const raw = heardSound ? pushed : { ...pushed, silence: true };
+      if (!raw.silence) {
+        silentSinceRef.current = null;
+        frozenBarRef.current = raw.bar;
+      } else {
+        silentSinceRef.current ??= performance.now();
+      }
+      const next = raw.silence ? { ...raw, bar: frozenBarRef.current } : raw;
+      // Every frame reaches the shared values before the throttled publish:
+      // worklets derive the continuous beat from them without re-rendering.
+      beatValues.write(frame, next);
       const newPulseHead = next.pulse > previous.pulse;
       previous = next;
       if (
@@ -117,7 +139,7 @@ export function useStageSource({
         setBeat(next);
       }
     });
-  }, [earStream, status]);
+  }, [beatValues, earStream, status]);
 
   const timed = result?.kind === 'timestamped' ? result : null;
   const timedLines = timed?.lines ?? null;
@@ -223,5 +245,5 @@ export function useStageSource({
     return { kind: 'idle', direction: recognizedDirection, track: recognizedTrack };
   }, [active, fixtureDirection, recognizedDirection, recognizedTrack, schedule, timedLines]);
 
-  return { source, beat, nowMonotonicMs, pastOutro: schedule?.pastOutro ?? false };
+  return { source, beat, beatValues, nowMonotonicMs, pastOutro: schedule?.pastOutro ?? false };
 }

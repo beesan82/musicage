@@ -130,3 +130,46 @@ JS の耳と認識
 - 今回はドキュメントのみで、アプリのコード（`src/`・`modules/`）は無変更（git status で確認済み）。push はしていない。
 - 次にやること: 段階 1（スライス A）から実装に着手する。段階 3 以降は設計書改定済みが前提で、段階 2 までの実機所見を見て順序を調整してよい。
 
+## 追記（2026-11-07）: ノリノリ化・段階 1（スライス A）の実装
+
+ブランチ `feat/groove-stage1`（`docs/groove-tier2` から分岐）。計画書の段階 1 の 4 項目をすべて実装した。TDD で進め、各項目とも先にテストを書いて失敗を確認してから実装した。
+
+- 拍の連続量配線: `useBeatSharedValues` を「購読するたび React state 経由」から「`write(frame, state)` で全フレーム書き込むバンドル」に作り替えた。所有権は `useStageSource` に移し、耳の 20ms フレームごとに（React 公開の 60ms スロットルの手前で）shared value へ直接書く。書き込むのは pulse / phase / bar / confidence / energy に加え、`lastOnsetAtMs`（pulse の立ち上がりエッジ＝拍頭のステージ時計時刻）、`nextBeatAtMs`、`periodMs`、そして帯域エンベロープ（low / mid / high、アタック 20ms・リリース 150ms の平滑）。worklet 側（`motion.ts`）はこれらから連続量を導出する: pulse は拍頭からの指数減衰（τ=120ms）、phase はグリッド（nextBeatAtMs / periodMs）から連続計算。旧来の 60ms 刻みの階段状・遅延は解消された。
+- idle 再配置の見直し: `composeIdle` のシグネチャを `(epoch, barInEpoch, …)` に変え、構成は 8 小節のエポックで固定（`IDLE_EPOCH_BARS = 8`）。小節ごとに 1 文字だけ 'rise' で差し替える（累積式、現在の文字を除外して再抽選するので必ず見た目が変わる）。差し替え文字は `index = 1000 + epoch*8 + barInEpoch` の専用レイヤーで描き、エポック開始時刻を基準に rise する（本体レイヤーはエポック中ずっと安定）。数字・長音の 90° 横倒し（`rotateDeg`）は全構成で 0 に廃止。整列モード（3 文字が一直線）も追加（分析 §6.3）。無音中は `useStageSource` が最後に音があったときの bar で公開値を凍結し、idle 構成が静止する。
+- hold の振幅増＋low 連動: hold のスケール振幅を旧 2〜8% から `(0.06 + 0.06·low)·feel·pulse`（強調文字 1.6 倍）に拡大し、拍頭直前の anticipation（位相の最後 15% で最大 −2%）を追加。breathe は `(0.02 + 0.02·low)` で、グリッド位相＋セル位置（`PlacedGlyph.phaseOffset`、任意フィールドとして追加）による行・列の波を入れた。drift の振幅も `2 + 4·low` px。`feel` は未使用だった `tempoFeel` から `TEMPO_FEEL_FACTOR`（still 0.5 / sway 1.0 / march 1.3 / drive 1.6）で曲ごとに変わる。拍由来の hold（pulse / shake / breathe）はすべて confidence < 0.5 で 0.25 倍に減衰。**音量そのものは大きさに直結させていない**（low はエンベロープの味付けとドリフト・呼吸の振幅のみ。設計書のアンチゴール維持）。
+- テクスチャ uniform 拡張: プリリュードに `iLow / iMid / iHigh / iConfidence` を追加し、`TextureBackground` が（任意 props、未指定時は帯域 0・confidence 1 で従来互換）uniform へ渡す。4 シェーダ共通の拍の持ち上げを `iPulse * 0.04` → `iPulse * iConfidence * 0.06` に変更し、帯域連動を入れた: grain は粒の粗さが iHigh、paper は繊維の張りが iLow、scan は線の深さが iMid＋位相ずれを confidence でゲート、void は中央の持ち上げが iLow×iConfidence＋広がりが iEnergy。
+- 判断（仕様の隙間への最小解釈、報告用）:
+  1. 分析 §6.2 のグリッド位相 breathe の波は、GlyphLayer がビューポート／セル位置を持たないため、`PlacedGlyph` への任意フィールド `phaseOffset` 追加で受け渡した（計画の「PlacedGlyph の形は変えず」は差し替え機構の文脈と解釈し、差し替えは index トリックどおり維持）。
+  2. idle の整列モードは §6.3 の文字どおり「3 文字・一直線」とした（文字数を保存する解釈は採らなかった）。
+  3. 「xl 相当は振幅 0.5 倍」の特例は、motion へサイズ段階を渡す経路が計画に無いため見送り。§3.4 の letter-spacing の dx も計画の motion 項目に無いため見送り（段階 2 以降で扱うなら計画改定が要る）。
+- 検証: `npm test -- --watchman=false` は 42 suites / 294 tests 全通過（段階 1 着手前のベースライン 276 件から +18 件）。`npm run typecheck` 通過。Swift・ネイティブの変更はなし。
+- 実機で確認すること（段階 1 分）:
+  1. 静かな部屋で idle が静止し続けること（無音で bar が凍結し、文字が勝手に差し替わらない・揺れない）。
+  2. 音楽を流すと idle が呼吸し、1 小節に 1 文字だけ rise で差し替わること。数字・長音が横倒しにならないこと。
+  3. フィクスチャ曲・実曲で hold の弾み（拍頭の跳ね）が体感できること。バラード（still）と速い曲（drive）で振幅の差が出ること。
+  4. 背景のきらめきが拍の確信度に連動し、確信が低い場面で暴れないこと。
+  5. FIX ピル表示時と実機で fps が 55 以上を保つこと。idle を 10 分放置しても発熱しないこと。
+- 次にやること: 段階 2（スライス B: 退場、予備動作つき入場、文字波と強調の移り、太さ）。push はしていない（ローカル commit のみ）。
+
+
+## 追記（2026-11-07）: ノリノリ化・段階 2（スライス B）の実装
+
+ブランチ `feat/groove-stage2`（`feat/groove-stage1` から分岐）。計画書の段階 2 の 4 項目をすべて実装した。TDD で進め、各項目とも先にテストを書いて失敗を確認してから実装した。
+
+- 退場の振り付け: `motion.ts` に exit を追加し、entrance から決定的に導く（`exitForEntrance`: drop→fall（下へ落ちる）、rise→rise（上へ抜ける）、scatter→散る、trace→末尾から消える、fade→薄れる、cut→即消し）。退場の長さ（`exitDurationMs`）は拍グリッドがあるとき 1 拍以内に収まるよう周期で上限をかける。`LyricStage` は `lineScene` を「現在行＋退場中」の 2 枚持ちにし、行交代で前の行を退場レイヤー（`testIDPrefix: 'exit-glyph'`、現在行の下に描画）として残し、退場の長さ＋80ms で落とす。退場中も hold は掛けず、退場の変形だけが走る。reducedMotion のときは退場レイヤー自体を出さない。
+- 予備動作つき入場: `lineScheduler` に `LANDING_WINDOW_MS = 250` を追加。前方切替で次の拍頭が 80ms 以内なら従来どおり待ち、80〜250ms 先なら行を即確定して `ScheduledLine.landsAtMs` に拍頭を併記する（`confidence ≥ 0.5` のときだけ。巻き戻しには付けない）。歌詞時刻そのものは動かさない（設計書 §5 の ±80ms の考え方は維持し、先読みは着地の準備にだけ使う）。`landsAtMs` は `useStageSource` → `StageSource.scheduled` → `GlyphLayer` へ無加工で届く（受け渡しの統合テストを追加）。`motion.ts` では着地に錨を打った入場の spring を再パラメータ化し、拍頭（elapsed 0）でちょうどグリフが定位置を横切るようにした。着地前はグリフが定位置へ寄りながら scale が最大 −8% 沈む（crouch）。`scatter` の文字ずらしは固定 40ms をやめ、拍グリッドがあるときは 1 拍（9 文字以上は 2 拍）を 16 分音符に量子化して割り当てる（グリッドが無いときは従来の 40ms）。
+- 行内の文字波と強調の移り: hold `pulse` の pulse を文字順にずらし、1 拍かけて行内を波が渡るようにした（`derivePulse(time − (index/count)·period)`。歌の進みとは一致させない装飾で、グリッドが無いときは波なし）。強調の移りは `GlyphLayer` の `color` を `useDerivedValue`＋`interpolateColor` に変更し、行の経過率 0→1 で強調文字が順に accent 色へ移る。行の終わりは次行の `startMs` から舞台時計へ換算して `lineEndsAtMs` として渡す（次行が無い行は従来どおり accent 色で固定）。
+- 太さ: 太い行（`weight === 'bold'` または `font === 'gothic-heavy'`、判定は `LyricStage`）に限り、`GlyphLayer` が塗りの下に同色ストロークの双子を重ね、`strokeWidth` を `sizePx·0.02·pulse·low`（confidence < 0.5 では 0.25 倍）で連続制御する。対象を太い行に限ることでグリフ描画の 2 倍化を局所化した（fps は実機で要確認）。
+- 判断（仕様の隙間への最小解釈、報告用）:
+  1. 分析 §3.2 の予備動作の式は符号と「0.96→1.02→1」の内訳が一意に読めなかったため、計画のテスト条件（予備動作区間で scale < 1、着地で定位置・不透明度 1）を満たす形として、spring の引数を「着地で spring が初めて 1 に達する」よう写像し直す解釈を採った。着地後の settle は従来の ENTRANCE_DURATION_MS の範囲で同じ spring が続く。
+  2. `lineEndsAtMs` は計画の文言（「次行の startMs を渡す」）をそのまま舞台時計の値として渡すと時計系が混ざるため、`lineStartedAtMs + (次行.startMs − 現在行.startMs)` に換算して渡した（行は実時間で進む前提）。
+  3. 退場レイヤーには前後行（context）と Ornament は含めない（退場するのは主行のグリフだけとした）。退場中レイヤーの強調色は移りなし（accent 色で固定）。
+  4. 段階 1 の `phaseOffset` 受け渡しや hold の形には触れていない。`useStageSource.ts` 本体は無変更（`landsAtMs` はスケジューラの戻り値に乗って自然に届くため、受け渡しのテストだけを追加した）。
+- 検証: `npm test -- --watchman=false` は 42 suites / 333 tests 全通過（段階 2 着手前の 294 件から +39 件: lineScheduler +6、motion +16、GlyphLayer +7、LyricStage +3・既存 2 件を新仕様に更新、useStageSource +1）。`npm run typecheck` 通過。Swift・ネイティブの変更はなし。
+- 実機で確認すること（段階 2 分）:
+  1. 行の交代で前の行が即消えせず、その行の入り方に応じた向き（drop→下、rise→上、scatter→散り、trace→末尾から）で 1 拍以内に退場すること。
+  2. 行が拍頭に「着地」する感触があること（着地前にグリフが寄って沈む予備動作が見えること）。先読みが外れた場面（confidence が低い曲）で歌詞時刻とのずれが気にならないこと。
+  3. 強調色が行の経過に沿って文字順に移ること。
+  4. 太ゴシック（gothic-heavy）の行で拍頭に文字が膨らむこと。太い行でも fps 55 を割らないこと（グリフ描画が 2 倍になるため特に要確認）。
+  5. scatter の行で文字が拍の分割に乗って現れること（速い曲・遅い曲の両方で）。
+- 次にやること: 段階 3（認識確定のドロップ）または段階 4（小節頭推定）。どちらも段階 2 の退場機構・連続量が前提で、順序は実機所見を見て決める。push はしていない（ローカル commit のみ）。

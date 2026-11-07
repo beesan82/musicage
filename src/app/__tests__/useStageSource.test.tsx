@@ -248,6 +248,52 @@ describe('useStageSource', () => {
     expect(hook.result.current.beat.pulse).toBeGreaterThan(0.5);
   });
 
+  test('ear frames write the shared beat values every frame, independent of the 60 ms publish', async () => {
+    const hook = await setup({ result: null });
+    for (let i = 0; i < 45; i += 1) {
+      await act(async () => emitter.emit(frame(i * 20, 0.1)));
+    }
+    const published = hook.result.current.beat;
+    const values = hook.result.current.beatValues;
+    // The band envelopes have settled on the bed level.
+    expect(values.low.value).toBeCloseTo(0.1, 5);
+    expect(values.mid.value).toBeCloseTo(0.1, 5);
+    expect(values.confidence.value).toBe(published.confidence);
+
+    // 10 ms after the last frame (50 ms after the last publish): no new pulse
+    // head (rms and low are flat, and mid/high never drive onsets), so the
+    // React beat is not republished — but the shared values still move.
+    const bandFrame: EarFeatures = { timestampMs: 890, rms: 0.1, low: 0.1, mid: 0.9, high: 0.8 };
+    await act(async () => emitter.emit(bandFrame));
+    expect(hook.result.current.beat).toBe(published);
+    expect(values.mid.value).toBeGreaterThan(0.35);
+    expect(values.high.value).toBeGreaterThan(0.3);
+    expect(values.low.value).toBeCloseTo(0.1, 5);
+  });
+
+  test('the published bar freezes while the room is silent', async () => {
+    const hook = await setup({ result: null });
+    // A 120 BPM click train (a hit every 500 ms over a faint bed) long enough
+    // for the engine to find the tempo and advance the bar.
+    const run = async (fromMs: number, toMs: number, bed: number, hit: number | null) => {
+      await act(async () => {
+        for (let t = fromMs; t <= toMs; t += 20) {
+          emitter.emit(frame(t, hit !== null && t % 500 === 0 ? hit : bed));
+        }
+      });
+    };
+    await run(0, 11_500, 0.02, 0.9);
+    const barWithSound = hook.result.current.beat.bar;
+    expect(barWithSound).toBeGreaterThan(0);
+    expect(hook.result.current.beat.silence).toBe(false);
+
+    // Three seconds of silence: the engine's grid keeps counting bars, but
+    // the bar the stage sees must not move.
+    await run(11_520, 14_500, 0, null);
+    expect(hook.result.current.beat.silence).toBe(true);
+    expect(hook.result.current.beat.bar).toBe(barWithSound);
+  });
+
   test('the beat stays silent from the start of listening until the first audible frame', async () => {
     const hook = await setup({ result: null });
 
@@ -259,6 +305,41 @@ describe('useStageSource', () => {
     await act(async () => emitter.emit(frame(200, 0.3)));
     await act(async () => emitter.emit(frame(260, 0.3)));
     expect(hook.result.current.beat.silence).toBe(false);
+  });
+
+  test('a line confirmed ahead of a beat head carries landsAtMs through to the stage', async () => {
+    clockMs = 10_000;
+    const hook = await setup({ result: null });
+
+    // A 120 BPM click train (a hit every 500 ms over a faint bed) on the same
+    // clock as performance.now(), long enough for the engine to hold a grid.
+    await act(async () => {
+      for (let t = 10_000; t <= 21_500; t += 20) {
+        emitter.emit(frame(t, t % 500 === 0 ? 0.9 : 0.02));
+      }
+    });
+    const beat = hook.result.current.beat;
+    expect(beat.confidence).toBeGreaterThanOrEqual(0.5);
+    expect(beat.nextBeatAtMs).not.toBeNull();
+    const head = beat.nextBeatAtMs!;
+
+    // Hand over a song whose second line (position 4000) begins exactly
+    // 150 ms before that predicted head: the switch moment T and the anchor
+    // offset are both derived from the measured head.
+    const T = head - 150;
+    const landingResult: TimestampedLyricResult = {
+      ...result,
+      anchor: { offsetMs: 4_000 - (T - 10_000), anchoredAtMonotonicMs: 10_000 },
+    };
+    clockMs = 10_500; // position still before the first line
+    await hook.rerender({ status: 'listening', playback: playbackOff, result: landingResult });
+    expect(syncedOf(hook.result.current).scheduled.index).toBe(-1);
+
+    clockMs = T;
+    await waitFor(() => expect(syncedOf(hook.result.current).scheduled.index).toBe(1));
+    const scheduled = syncedOf(hook.result.current).scheduled;
+    expect(scheduled.startedAtMs).toBe(T);
+    expect(scheduled.landsAtMs).toBe(head);
   });
 
   test('leaving listening resets to the quiet beat', async () => {
