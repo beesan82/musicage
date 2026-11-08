@@ -1,27 +1,12 @@
-import type {
-  ClipDurationMs,
-  DiagnosticInvalidReason,
-  SyncDiagnosticSample,
-} from './syncDiagnostics/types';
-
-export interface RecognitionRequest {
-  mode: 'normal' | 'diagnostic';
-  clipDurationMs: ClipDurationMs;
-  onCaptureStarted?: (startedMonotonicMs: number) => void;
-}
-
-export interface PendingDiagnosticTrial {
-  sample: SyncDiagnosticSample;
-  invalidReasons: readonly DiagnosticInvalidReason[];
-}
+import type { EarRecognition } from '../../modules/expo-musicage-ear/src/types';
+import type { LyricAnchor } from '../sync/lyricClock';
 
 export interface Track {
+  trackId: string;
   title: string;
   artist: string;
   album: string | null;
-  durationSeconds: number | null;
-  timecodeRaw: string | null;
-  timecodeMs: number | null;
+  artworkUrl: string | null;
 }
 
 export interface LyricLine {
@@ -29,26 +14,12 @@ export interface LyricLine {
   text: string;
 }
 
-export interface TimestampedLyricTimingEvidence {
-  clipDurationMs: ClipDurationMs;
-  captureStartedMonotonicMs: number;
-  auddTimecodeMs: number | null;
-}
-
 export interface TimestampedLyricResult {
   kind: 'timestamped';
   track: Track;
   lines: LyricLine[];
-  timingEvidence: TimestampedLyricTimingEvidence;
+  anchor: LyricAnchor;
 }
-
-export type LyricTimingStatus =
-  | { kind: 'unverified' }
-  | {
-      kind: 'calibrated';
-      localAnchorMonotonicMs: number;
-      auddTimecodeMs: number;
-    };
 
 export type LyricResult =
   | TimestampedLyricResult
@@ -63,15 +34,24 @@ export type LyricResult =
 
 export type RecognitionPhase =
   | 'idle'
-  | 'setup_required'
-  | 'capturing'
-  | 'identifying'
+  | 'listening'
   | 'resolving_lyrics'
-  | 'error';
+  | 'error'
+  | 'unavailable';
 
 export interface RecognitionViewState {
   phase: RecognitionPhase;
   result: LyricResult | null;
   message: string | null;
   retryable: boolean;
+}
+
+export function trackFromRecognition(r: EarRecognition): Track {
+  return {
+    trackId: r.trackId,
+    title: r.title,
+    artist: r.artist,
+    album: r.album ?? null,
+    artworkUrl: r.artworkUrl ?? null,
+  };
 }

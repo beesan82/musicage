@@ -1,9 +1,9 @@
 import { Canvas, Group, Text } from '@shopify/react-native-skia';
 import type { SkFont } from '@shopify/react-native-skia';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
-import { useFrameCallback, useSharedValue } from 'react-native-reanimated';
+import { useDerivedValue, useFrameCallback, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaFrame, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { BeatState } from '../beat/types';
@@ -14,13 +14,16 @@ import type { ScheduledLine } from '../sync/lineScheduler';
 import { TextureBackground } from '../textures/TextureBackground';
 import { createStageFont, FONT_SOURCES, useStageTypefaces } from './fonts';
 import type { FontKey, FontWeight } from './fonts';
+import { GlowLayer } from './GlowLayer';
 import { GlyphLayer } from './GlyphLayer';
-import { composeIdle } from './idleComposition';
-import type { IdleTrack } from './idleComposition';
+import { captionText, composeIdle, IDLE_EPOCH_BARS } from './idleComposition';
+import type { IdleComposition, IdleTrack } from './idleComposition';
 import { layoutLine, SIZE_RATIO } from './layout';
 import type { GlyphMeasure, LineLayout, PlacedGlyph, Viewport } from './layout';
+import { dropHeadMs, entranceDurationMs, exitDurationMs, TEMPO_FEEL_FACTOR } from './motion';
 import { Ornament } from './Ornaments';
-import { useBeatSharedValues } from './useBeatSharedValues';
+import { surgeAccent, surgeInk } from './surgeColors';
+import type { BeatSharedValues } from './useBeatSharedValues';
 
 export type StageSource =
   | {
@@ -29,12 +32,22 @@ export type StageSource =
       direction: SongDirection;
       scheduled: ScheduledLine;
       track: IdleTrack;
+      /**
+       * When the recognition drop fired (the source became synced for a new
+       * song), on the `performance.now()` clock; null when it did not (a
+       * re-anchor of the same trackId). The stage plays the drop once per
+       * fire time: the idle glyphs scatter on the next beat head, the
+       * background dips, and the first line drops in (design spec §7).
+       */
+      dropAtMs?: number | null;
     }
   | { kind: 'idle'; direction: SongDirection | null; track: IdleTrack };
 
 export interface LyricStageProps {
   source: StageSource;
   beat: BeatState;
+  /** Shared values written by the ear on every frame; worklets read these. */
+  beatValues: BeatSharedValues;
   /** `performance.now()` at render; the clock `scheduled.startedAtMs` is on. */
   nowMonotonicMs: number;
   reducedMotion?: boolean;
@@ -129,12 +142,55 @@ function contextGlyphs(
   return glyphs.map((g) => ({ ...g, x: g.x + dx, y: g.y + dy }));
 }
 
+/** The idle caption laid out glyph by glyph, so it can trace in after the drop. */
+function captionGlyphs(caption: NonNullable<IdleComposition['caption']>, measure: GlyphMeasure): PlacedGlyph[] {
+  const glyphs: PlacedGlyph[] = [];
+  let x = caption.x;
+  [...caption.text].forEach((char, index) => {
+    const { advance } = measure(char, caption.sizePx);
+    if (char.trim() !== '') {
+      glyphs.push({ char, index, x, y: caption.y, rotateDeg: 0, sizePx: caption.sizePx, emphasized: false });
+    }
+    x += advance;
+  });
+  return glyphs;
+}
+
 interface LineScene {
   index: number;
   direction: LineDirection;
   layout: LineLayout;
   prev: PlacedGlyph[] | null;
   next: PlacedGlyph[] | null;
+}
+
+/** Marks a drop whose line has been and gone: no later line takes the drop entrance. */
+const DROP_LINE_DONE = -2;
+/** Slack after an exit's computed end before its layer is removed. */
+const EXIT_SLACK_MS = 80;
+
+/**
+ * One recognition drop (design spec §7), keyed by its fire time. The stage
+ * computes it once per fire: the beat head it lands on, the idle glyphs on
+ * stage at the fire (they scatter on the head), when a fresh idle may rise
+ * after that scatter, and which line (the first one shown after the fire)
+ * drops in.
+ */
+interface Drop {
+  fireAtMs: number;
+  headMs: number;
+  idleRiseAtMs: number;
+  idleGlyphs: PlacedGlyph[] | null;
+  lineIndex: number | null;
+}
+
+/** The parts of a drop that are on stage for a bounded time (state, so they are removed by timers). */
+interface DropPlay {
+  fireAtMs: number;
+  /** The idle glyphs scattering on the head; null once they are gone. */
+  idleExit: PlacedGlyph[] | null;
+  /** The caption traces in from the head while this is true, then stands still as plain text. */
+  captionTracing: boolean;
 }
 
 /**
@@ -145,9 +201,14 @@ interface LineScene {
  * change (idle also when the bar changes); all motion is derived on the UI
  * thread from the `time` shared value and the beat shared values.
  */
-export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false }: LyricStageProps) {
+export function LyricStage({
+  source,
+  beat,
+  beatValues,
+  nowMonotonicMs,
+  reducedMotion = false,
+}: LyricStageProps) {
   const fonts = useStageFonts();
-  const beatValues = useBeatSharedValues(beat);
   const insets = useSafeAreaInsets();
   const frame = useSafeAreaFrame();
   const [size, setSize] = useState<{ width: number; height: number } | null>(null);
@@ -192,6 +253,7 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
   const songDirection = source.direction;
   const lineIndex = scheduled?.index ?? -1;
   const lineIsEmpty = scheduled?.isEmpty ?? true;
+  const lineStartedAtMs = scheduled?.startedAtMs ?? 0;
 
   const lineScene = useMemo<LineScene | null>(() => {
     if (fonts === null || lines === null || songDirection === null || lineIsEmpty) return null;
@@ -214,29 +276,213 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
     };
   }, [fonts, lineIndex, lineIsEmpty, lines, songDirection, viewport]);
 
-  const showIdle = fonts !== null && lineScene === null;
+  // The recognition drop (design spec §7), once per fire time. Computed in
+  // render so the line shown in the very same render can take it: the head
+  // it lands on (the next beat head, if the grid is trusted), the idle glyphs
+  // on stage at the fire, and when a fresh idle may rise after their scatter.
+  // Skipped under reduced motion, where the stage clock does not advance.
+  const dropAtMs = source.kind === 'synced' ? (source.dropAtMs ?? null) : null;
+  const dropRef = useRef<Drop | null>(null);
+  // The idle composition shown in the previous render (null while a line is on
+  // stage): the glyphs a drop firing now sends scattering.
+  const idleShownRef = useRef<IdleComposition | null>(null);
+  if (dropAtMs !== null && !reducedMotion && dropRef.current?.fireAtMs !== dropAtMs) {
+    const periodMs = beatValues.periodMs.value;
+    const headMs = dropHeadMs(
+      dropAtMs,
+      beatValues.nextBeatAtMs.value,
+      periodMs,
+      beatValues.confidence.value,
+    );
+    const idleGlyphs = idleShownRef.current?.glyphs ?? null;
+    dropRef.current = {
+      fireAtMs: dropAtMs,
+      headMs,
+      idleRiseAtMs: headMs + exitDurationMs('scatter', idleGlyphs?.length ?? 0, periodMs),
+      idleGlyphs,
+      lineIndex: null,
+    };
+  }
+  const drop = dropRef.current;
+  // The first line shown after the fire is the one that drops in; once the
+  // stage has moved past it, no later line takes the drop.
+  if (drop !== null && lineScene !== null) {
+    if (drop.lineIndex === null) drop.lineIndex = lineScene.index;
+    else if (drop.lineIndex !== lineScene.index) drop.lineIndex = DROP_LINE_DONE;
+  }
+  const isDropLine = drop !== null && lineScene !== null && drop.lineIndex === lineScene.index;
+  const scene = useMemo<LineScene | null>(
+    () =>
+      lineScene !== null && isDropLine
+        ? { ...lineScene, direction: { ...lineScene.direction, entrance: 'drop' } }
+        : lineScene,
+    [lineScene, isDropLine],
+  );
+
+  // The drop's bounded stage presence: the scattering idle glyphs and the
+  // caption's trace are removed by timers once they have run.
+  const [dropPlay, setDropPlay] = useState<DropPlay | null>(null);
+  const captionCountRef = useRef(0);
+  useEffect(() => {
+    const current = dropRef.current;
+    if (current === null || current.fireAtMs !== dropAtMs) return undefined;
+    const { fireAtMs, headMs, idleGlyphs } = current;
+    setDropPlay({ fireAtMs, idleExit: idleGlyphs, captionTracing: true });
+    const wait = headMs - fireAtMs;
+    const periodMs = beatValues.periodMs.value;
+    const exitEnd = wait + exitDurationMs('scatter', idleGlyphs?.length ?? 0, periodMs) + EXIT_SLACK_MS;
+    const captionEnd = wait + entranceDurationMs('trace', captionCountRef.current, periodMs) + EXIT_SLACK_MS;
+    const update = (patch: Partial<DropPlay>) =>
+      setDropPlay((play) => {
+        if (play === null || play.fireAtMs !== fireAtMs) return play;
+        const next = { ...play, ...patch };
+        return next.idleExit === null && !next.captionTracing ? null : next;
+      });
+    const ids = [
+      setTimeout(() => update({ idleExit: null }), exitEnd),
+      setTimeout(() => update({ captionTracing: false }), captionEnd),
+    ];
+    return () => ids.forEach((id) => clearTimeout(id));
+  }, [dropAtMs, beatValues]);
+
+  // The leaving line: when the displayed scene changes, the previous scene is
+  // kept for the length of its exit (derived from its entrance, capped at one
+  // beat) so a line change is a handover in one tempo, not an instant swap.
+  const [exiting, setExiting] = useState<{ scene: LineScene; startedAtMs: number } | null>(null);
+  const lastSceneRef = useRef<LineScene | null>(null);
+  useEffect(() => {
+    const prev = lastSceneRef.current;
+    lastSceneRef.current = scene;
+    if (prev === null || (scene !== null && scene.index === prev.index)) return;
+    const duration = exitDurationMs(
+      prev.direction.entrance,
+      prev.layout.glyphs.length,
+      beatValues.periodMs.value,
+    );
+    if (duration <= 0 || reducedMotion) {
+      setExiting(null);
+      return;
+    }
+    setExiting({ scene: prev, startedAtMs: scheduled?.startedAtMs ?? nowMonotonicMs });
+  }, [scene, beatValues, scheduled, nowMonotonicMs, reducedMotion]);
+  useEffect(() => {
+    if (exiting === null) return undefined;
+    const duration = exitDurationMs(
+      exiting.scene.direction.entrance,
+      exiting.scene.layout.glyphs.length,
+      beatValues.periodMs.value,
+    );
+    const id = setTimeout(
+      () => setExiting((current) => (current === exiting ? null : current)),
+      duration + EXIT_SLACK_MS,
+    );
+    return () => clearTimeout(id);
+  }, [exiting, beatValues]);
+
+  const showIdle = fonts !== null && scene === null;
   const idleGlyphs = songDirection?.idleGlyphs ?? DEFAULT_IDLE_GLYPHS;
   const trackTitle = source.track?.title ?? null;
   const trackArtist = source.track?.artist ?? null;
+  captionCountRef.current =
+    trackTitle !== null && trackArtist !== null
+      ? [...captionText({ title: trackTitle, artist: trackArtist })].filter((c) => c.trim() !== '').length
+      : 0;
+  // The idle composition is fixed inside an 8-bar epoch; one glyph swaps per
+  // bar. `beat.bar` reaches the stage frozen through silence, so a quiet room
+  // holds the composition still.
+  const epoch = Math.floor(beat.bar / IDLE_EPOCH_BARS);
+  const barInEpoch = beat.bar % IDLE_EPOCH_BARS;
   const idle = useMemo(() => {
     if (!showIdle || fonts === null) return null;
     const track =
       trackTitle !== null && trackArtist !== null ? { title: trackTitle, artist: trackArtist } : null;
-    return composeIdle(beat.bar, idleGlyphs, viewport, track, measureWith(fonts, 'gothic', 'regular'));
-  }, [beat.bar, fonts, idleGlyphs, showIdle, trackArtist, trackTitle, viewport]);
+    return composeIdle(epoch, barInEpoch, idleGlyphs, viewport, track, measureWith(fonts, 'gothic', 'regular'));
+  }, [barInEpoch, epoch, fonts, idleGlyphs, showIdle, trackArtist, trackTitle, viewport]);
+  // Stage-clock times at which the current bar / epoch first appeared, so the
+  // idle layers can time their `rise` entrances: the whole composition rises
+  // at an epoch change, and the one swapped glyph rises at its bar change.
+  // (The stage clock tracks performance.now(); see the anchor logic above.)
+  const barRef = useRef(beat.bar);
+  const barStartedAtRef = useRef(nowMonotonicMs);
+  if (barRef.current !== beat.bar) {
+    barRef.current = beat.bar;
+    barStartedAtRef.current = performance.now();
+  }
+  const epochRef = useRef(epoch);
+  const epochStartedAtRef = useRef(nowMonotonicMs);
+  if (epochRef.current !== epoch) {
+    epochRef.current = epoch;
+    epochStartedAtRef.current = performance.now();
+  }
+  const idleSwapped = idle?.glyphs.find((g) => g.index >= 1000) ?? null;
+  const idleBase = idle?.glyphs.filter((g) => g !== idleSwapped) ?? null;
+  idleShownRef.current = idle;
+  // After a drop the idle layers are remounted (key) so their rise replays,
+  // timed to begin once the previous idle glyphs have scattered.
+  const idleKey = drop?.fireAtMs ?? 0;
+  const idleRiseAtMs = drop?.idleRiseAtMs ?? 0;
+  const idleExit = dropPlay?.idleExit ?? null;
+  // While the caption traces in it is drawn glyph by glyph from the head.
+  const captionTraceFromMs = dropPlay?.captionTracing === true && drop !== null ? drop.headMs : null;
+  const caption = idle?.caption ?? null;
+  const captionTrace = useMemo(
+    () =>
+      caption !== null && captionTraceFromMs !== null && fonts !== null
+        ? captionGlyphs(caption, measureWith(fonts, 'gothic', 'regular'))
+        : null,
+    [caption, captionTraceFromMs, fonts],
+  );
 
   const palette = songDirection?.palette ?? DEFAULT_PALETTE;
   const texture = songDirection?.texture ?? 'grain';
-  const lineStartedAtMs = scheduled?.startedAtMs ?? 0;
-  const shared = { time, beat: beatValues, reducedMotion, palette } as const;
+  const feel = TEMPO_FEEL_FACTOR[songDirection?.tempoFeel ?? 'sway'];
+  // The palette's continuous change (design spec §4, §6): the ink and accent
+  // as they stand at the current surge strength, derived once per frame on
+  // the UI thread and shared by every glyph layer and the glow.
+  const inkNow = useDerivedValue(() => surgeInk(palette, beatValues.surge.value), [palette, beatValues]);
+  const accentNow = useDerivedValue(
+    () => surgeAccent(palette, beatValues.surge.value),
+    [palette, beatValues],
+  );
+  const shared = {
+    time,
+    beat: beatValues,
+    reducedMotion,
+    palette,
+    feel,
+    inkValue: inkNow,
+    accentValue: accentNow,
+  } as const;
   // Stable font getters keep the memoised GlyphLayers from re-rendering on every beat update.
   const gothic = useCallback((sizePx: number) => fonts!('gothic', 'regular', sizePx), [fonts]);
-  const lineFace = lineScene?.direction.font ?? 'gothic';
-  const lineWeight = lineScene?.direction.weight ?? 'regular';
+  const lineFace = scene?.direction.font ?? 'gothic';
+  const lineWeight = scene?.direction.weight ?? 'regular';
   const lineFont = useCallback(
     (sizePx: number) => fonts!(lineFace, lineWeight, sizePx),
     [fonts, lineFace, lineWeight],
   );
+  const lineHeavy = lineWeight === 'bold' || lineFace === 'gothic-heavy';
+  // The drop line lands on the drop's head when that is still ahead of the
+  // line's start; otherwise (and for every other line) the scheduler's landing.
+  const lineLandsAtMs =
+    drop !== null && isDropLine && drop.headMs > lineStartedAtMs
+      ? drop.headMs
+      : (scheduled?.landsAtMs ?? null);
+  // The line's end on the stage clock: lines play in real time, so the next
+  // line's song-time distance from this one is also its stage-time distance.
+  const currentLine = lines !== null && lineIndex >= 0 ? lines[lineIndex] : undefined;
+  const nextLine = lines !== null && lineIndex >= 0 ? lines[lineIndex + 1] : undefined;
+  const lineEndsAtMs =
+    currentLine !== undefined && nextLine !== undefined
+      ? lineStartedAtMs + (nextLine.startMs - currentLine.startMs)
+      : null;
+  const exitFace = exiting?.scene.direction.font ?? 'gothic';
+  const exitWeight = exiting?.scene.direction.weight ?? 'regular';
+  const exitFont = useCallback(
+    (sizePx: number) => fonts!(exitFace, exitWeight, sizePx),
+    [fonts, exitFace, exitWeight],
+  );
+  const exitHeavy = exitWeight === 'bold' || exitFace === 'gothic-heavy';
 
   return (
     <View
@@ -250,6 +496,13 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
           palette={palette}
           pulse={beatValues.pulse}
           energy={beatValues.energy}
+          low={beatValues.low}
+          mid={beatValues.mid}
+          high={beatValues.high}
+          confidence={beatValues.confidence}
+          surge={beatValues.surge}
+          time={time}
+          dropAtMs={drop?.fireAtMs ?? null}
           width={width}
           height={height}
           reducedMotion={reducedMotion}
@@ -257,29 +510,81 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
       </View>
       {fonts !== null ? (
         <Canvas style={styles.layer}>
-          {lineScene !== null ? (
+          {idleExit !== null && drop !== null ? (
+            // The idle glyphs at the fire: held in place until the head, then
+            // scattered (the exit derived from `scatter`).
+            <GlyphLayer
+              {...shared}
+              glyphs={idleExit}
+              fontFor={gothic}
+              lineStartedAtMs={drop.headMs}
+              entrance="scatter"
+              hold="still"
+              accent={false}
+              exiting
+              seed={epoch + 1}
+              testIDPrefix="exit-idle-glyph"
+            />
+          ) : null}
+          {exiting !== null ? (
+            <GlyphLayer
+              {...shared}
+              glyphs={exiting.scene.layout.glyphs}
+              fontFor={exitFont}
+              lineStartedAtMs={exiting.startedAtMs}
+              entrance={exiting.scene.direction.entrance}
+              hold={exiting.scene.direction.hold}
+              accent={exiting.scene.direction.accent}
+              heavy={exitHeavy}
+              exiting
+              seed={exiting.scene.index + 1}
+              testIDPrefix="exit-glyph"
+            />
+          ) : null}
+          {scene !== null ? (
             <>
               <Ornament
-                ornament={lineScene.direction.ornament}
-                orientation={lineScene.direction.orientation}
-                bounds={lineScene.layout.bounds}
+                ornament={scene.direction.ornament}
+                orientation={scene.direction.orientation}
+                bounds={scene.layout.bounds}
                 viewport={viewport}
                 ink={palette.ink}
                 bar={beat.bar}
                 numeralFont={gothic(viewport.width * SIZE_RATIO.xs)}
               />
+              {!reducedMotion ? (
+                // The beat-head glow of the surge (spec §5): blurred twins of
+                // the emphasized glyphs only, under the line, dark outside a
+                // surge. Never under reduced motion (the clock stands still).
+                <GlowLayer
+                  glyphs={scene.layout.glyphs}
+                  fontFor={lineFont}
+                  time={time}
+                  lineStartedAtMs={lineStartedAtMs}
+                  lineLandsAtMs={lineLandsAtMs}
+                  entrance={scene.direction.entrance}
+                  hold={scene.direction.hold}
+                  color={accentNow}
+                  beat={beatValues}
+                  seed={scene.index + 1}
+                  feel={feel}
+                />
+              ) : null}
               <GlyphLayer
                 {...shared}
-                glyphs={lineScene.layout.glyphs}
+                glyphs={scene.layout.glyphs}
                 fontFor={lineFont}
                 lineStartedAtMs={lineStartedAtMs}
-                entrance={lineScene.direction.entrance}
-                hold={lineScene.direction.hold}
-                accent={lineScene.direction.accent}
-                seed={lineScene.index + 1}
+                lineLandsAtMs={lineLandsAtMs}
+                lineEndsAtMs={lineEndsAtMs}
+                entrance={scene.direction.entrance}
+                hold={scene.direction.hold}
+                accent={scene.direction.accent}
+                heavy={lineHeavy}
+                seed={scene.index + 1}
               />
               {(['prev', 'next'] as const).map((side) => {
-                const glyphs = lineScene[side];
+                const glyphs = scene[side];
                 if (glyphs === null) return null;
                 const testProps = { testID: `context-${side}` } as object;
                 return (
@@ -292,7 +597,7 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
                       entrance={CONTEXT_DIRECTION.entrance}
                       hold={CONTEXT_DIRECTION.hold}
                       accent={false}
-                      seed={lineScene.index + 1}
+                      seed={scene.index + 1}
                       testIDPrefix={`context-${side}-glyph`}
                     />
                   </Group>
@@ -300,25 +605,55 @@ export function LyricStage({ source, beat, nowMonotonicMs, reducedMotion = false
               })}
             </>
           ) : null}
-          {idle !== null ? (
+          {idle !== null && idleBase !== null ? (
             <>
               <GlyphLayer
+                key={`idle-base-${idleKey}`}
                 {...shared}
-                glyphs={idle.glyphs}
+                glyphs={idleBase}
                 fontFor={gothic}
-                lineStartedAtMs={0}
-                entrance="cut"
-                hold="pulse"
+                lineStartedAtMs={Math.max(epochStartedAtRef.current, idleRiseAtMs)}
+                entrance="rise"
+                hold="breathe"
                 accent={false}
-                seed={beat.bar}
+                seed={epoch}
               />
-              {idle.caption !== null ? (
+              {idleSwapped !== null ? (
+                <GlyphLayer
+                  key={`idle-swap-${idleKey}`}
+                  {...shared}
+                  glyphs={[idleSwapped]}
+                  fontFor={gothic}
+                  lineStartedAtMs={Math.max(barStartedAtRef.current, idleRiseAtMs)}
+                  entrance="rise"
+                  hold="breathe"
+                  accent={false}
+                  seed={epoch}
+                />
+              ) : null}
+              {idle.caption !== null && captionTrace !== null && captionTraceFromMs !== null ? (
+                // The caption leads the first line after a drop: traced in
+                // from the head, glyph by glyph, then it stands as plain text.
+                <Group opacity={CAPTION_OPACITY}>
+                  <GlyphLayer
+                    {...shared}
+                    glyphs={captionTrace}
+                    fontFor={gothic}
+                    lineStartedAtMs={captionTraceFromMs}
+                    entrance="trace"
+                    hold="still"
+                    accent={false}
+                    seed={0}
+                    testIDPrefix="idle-caption-glyph"
+                  />
+                </Group>
+              ) : idle.caption !== null ? (
                 <Text
                   x={idle.caption.x}
                   y={idle.caption.y}
                   text={idle.caption.text}
                   font={gothic(idle.caption.sizePx)}
-                  color={palette.ink}
+                  color={inkNow}
                   opacity={CAPTION_OPACITY}
                   {...({ testID: 'idle-caption' } as object)}
                 />

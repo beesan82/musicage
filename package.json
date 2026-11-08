@@ -9,6 +9,7 @@
   "scripts": {
     "start": "expo start",
     "start:tunnel": "expo start --tunnel",
+    "start:go": "expo start --go",
     "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "typecheck": "tsc --noEmit"
@@ -23,7 +24,7 @@
     "expo": "^57.0.20",
     "expo-asset": "~57.0.16",
     "expo-audio": "~57.0.4",
-    "expo-crypto": "~57.0.2",
+    "expo-dev-client": "~57.0.20",
     "expo-file-system": "~57.0.6",
     "expo-keep-awake": "~57.0.2",
     "expo-secure-store": "~57.0.3",

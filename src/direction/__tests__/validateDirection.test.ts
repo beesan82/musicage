@@ -73,6 +73,34 @@ describe('validateSongDirection', () => {
     expect(validateSongDirection(input, TEXTS)).toBeNull();
   });
 
+  describe('the optional second accent (palette.accentHigh)', () => {
+    const base = direction([line(), line(), line()]);
+    const withoutHigh = {
+      background: DEFAULT_PALETTE.background,
+      ink: DEFAULT_PALETTE.ink,
+      accent: DEFAULT_PALETTE.accent,
+    };
+
+    test('passes and is kept when it is a well-formed colour', () => {
+      const input = { ...base, palette: { ...withoutHigh, accentHigh: '#FF8800' } };
+      expect(validateSongDirection(input, TEXTS)?.palette).toEqual({ ...withoutHigh, accentHigh: '#FF8800' });
+    });
+
+    test('passes when it is left out, and the result has no accentHigh', () => {
+      const input = { ...base, palette: withoutHigh };
+      const palette = validateSongDirection(input, TEXTS)?.palette;
+      expect(palette).toEqual(withoutHigh);
+      expect(palette).not.toHaveProperty('accentHigh');
+    });
+
+    test('fails when it is a broken colour or not a string', () => {
+      for (const accentHigh of ['red', '#FF88', '#GGGGGG', 123, null]) {
+        const input = { ...base, palette: { ...withoutHigh, accentHigh } };
+        expect(validateSongDirection(input, TEXTS)).toBeNull();
+      }
+    });
+  });
+
   test('rejects bad colors, unknown enums and non-objects', () => {
     const base = direction([line(), line(), line()]);
     expect(

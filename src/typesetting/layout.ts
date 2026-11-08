@@ -41,6 +41,12 @@ export interface PlacedGlyph {
   rotateDeg: 0 | 90;
   sizePx: number;
   emphasized: boolean;
+  /**
+   * Extra breathe phase for this glyph, in cycles. Only the idle composition
+   * sets it (from the glyph's grid cell, so the breathe wave crosses the
+   * grid); line layouts leave it unset, which motion reads as 0.
+   */
+  phaseOffset?: number;
 }
 
 export interface LineLayout {

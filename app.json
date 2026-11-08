@@ -3,20 +3,35 @@
     "name": "MUSICAGE",
     "slug": "musicage",
     "version": "0.1.0",
+    "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "ios": {
+      "bundleIdentifier": "com.musicage.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "周囲で流れている音楽を聴き取り、曲を認識して歌詞を表示するためにマイクを使用します。音声は端末の外に送らず、保存もしません（曲の照合には ShazamKit のフィンガープリントだけを使います）。",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
     "plugins": [
       [
         "expo-audio",
         {
-          "microphonePermission": "周囲で流れている音楽に反応する映像を表示するためにマイクを使用します。『曲を読み取る』を押したときだけ、最大12秒の音をAudDへ送信して曲を識別します。音声は履歴として保存しません。",
+          "microphonePermission": "周囲で流れている音楽を聴き取り、曲を認識して歌詞を表示するためにマイクを使用します。音声は端末の外に送らず、保存もしません（曲の照合には ShazamKit のフィンガープリントだけを使います）。",
           "enableBackgroundRecording": false,
           "enableBackgroundPlayback": false
         }
       ],
       "expo-asset",
       "expo-secure-store",
-      "expo-status-bar"
-    ]
+      "expo-status-bar",
+      "./plugins/withSceneLifecycle"
+    ],
+    "owner": "beesan",
+    "extra": {
+      "eas": {
+        "projectId": "4565a0df-4a9a-45fd-ac1e-5093f45a0249"
+      }
+    }
   }
 }

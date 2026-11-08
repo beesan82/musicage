@@ -23,6 +23,12 @@ export interface Palette {
   background: string;
   ink: string;
   accent: string;
+  /**
+   * Optional second accent for surge passages (design spec §4, 2026-11-07):
+   * the accent moves towards it, and the ink takes a trace of it, as the
+   * surge strength rises. Without it the accent itself is the high colour.
+   */
+  accentHigh?: string;
 }
 
 export interface SongDirection {
@@ -37,6 +43,7 @@ export const DEFAULT_PALETTE: Palette = {
   background: '#0B0B0C',
   ink: '#F2EFE6',
   accent: '#D7263D',
+  accentHigh: '#FF4D5E',
 };
 
 export const DEFAULT_IDLE_GLYPHS = '0123456789○△□＝ー';

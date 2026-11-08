@@ -85,7 +85,7 @@ export function validateSongDirection(
   if (!isRecord(input)) return null;
   const { palette, texture, tempoFeel, idleGlyphs, lines } = input;
   if (!isRecord(palette)) return null;
-  const { background, ink, accent } = palette;
+  const { background, ink, accent, accentHigh } = palette;
   if (
     typeof background !== 'string' ||
     typeof ink !== 'string' ||
@@ -94,6 +94,10 @@ export function validateSongDirection(
     !HEX_COLOR.test(ink) ||
     !HEX_COLOR.test(accent)
   ) {
+    return null;
+  }
+  // The second accent is optional; when given it must be a colour like the others.
+  if (accentHigh !== undefined && (typeof accentHigh !== 'string' || !HEX_COLOR.test(accentHigh))) {
     return null;
   }
   if (!isOneOf(TEXTURES, texture) || !isOneOf(TEMPO_FEELS, tempoFeel)) return null;
@@ -118,7 +122,7 @@ export function validateSongDirection(
   }
 
   return {
-    palette: { background, ink, accent },
+    palette: accentHigh === undefined ? { background, ink, accent } : { background, ink, accent, accentHigh },
     texture,
     tempoFeel,
     idleGlyphs,

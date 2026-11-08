@@ -65,10 +65,6 @@ function buildLookupUrl(track: Track): string {
     params.set('album_name', track.album);
   }
 
-  if (track.durationSeconds !== null && Number.isFinite(track.durationSeconds)) {
-    params.set('duration', String(track.durationSeconds));
-  }
-
   return `${LRCLIB_ENDPOINT}?${params.toString()}`;
 }
 

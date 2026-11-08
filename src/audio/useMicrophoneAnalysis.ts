@@ -10,10 +10,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
 import { deleteTemporaryRecording } from './deleteTemporaryRecording';
+import { createEarEmitter } from './earStream';
+import type { EarStream } from './earStream';
 import { createMeterEarAdapter } from './earFeaturesFromMeter';
 import type { MeterEarAdapter } from './earFeaturesFromMeter';
 import { createMeterFeatureProcessor } from './meterFeatureProcessor';
-import type { AudioFeatures, EarFeatures, MeterFeatureProcessor } from './types';
+import type {
+  AudioFeatures,
+  EarFeatures,
+  ListeningStatus,
+  MeterFeatureProcessor,
+} from './types';
 
 const METER_RECORDING_OPTIONS = {
   ...RecordingPresets.LOW_QUALITY,
@@ -21,23 +28,17 @@ const METER_RECORDING_OPTIONS = {
 };
 const METER_SEGMENT_DURATION_MS = 45_000;
 
-export type ListeningStatus =
-  | 'idle'
-  | 'requesting'
-  | 'listening'
-  | 'denied'
-  | 'error';
+export type { ListeningStatus } from './types';
 
 export interface MicrophoneAnalysis {
   status: ListeningStatus;
   features: AudioFeatures;
   ear: EarFeatures;
+  earStream: EarStream;
   errorMessage: string | null;
   start(): Promise<void>;
   stop(): void;
   retry(): Promise<void>;
-  pauseForRecognition(): Promise<boolean>;
-  resumeAfterRecognition(shouldResume: boolean): Promise<void>;
 }
 
 const MICROPHONE_ERROR_MESSAGE =
@@ -74,6 +75,8 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   }
 
   const earAdapter = earAdapterRef.current;
+  const emitterRef = useRef(createEarEmitter());
+  const emitter = emitterRef.current;
   const [ear, setEar] = useState<EarFeatures>(() => createSilentEar());
   const [status, setStatus] = useState<ListeningStatus>('idle');
   const [features, setFeatures] = useState<AudioFeatures>(() => createSilentFeatures());
@@ -83,7 +86,6 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
   const nativeFailureHandlerRef = useRef<(() => void) | null>(null);
   const recorderIdRef = useRef<string | null>(null);
   const expectedFinishedUrisRef = useRef(new Set<string>());
-  const recognitionPauseRef = useRef(false);
   const resumeWhenActiveRef = useRef(false);
   const rotationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rotateMeterSegmentRef = useRef<((generation: number) => Promise<void>) | null>(null);
@@ -268,7 +270,6 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     }
 
     startAttemptRef.current += 1;
-    recognitionPauseRef.current = false;
     resumeWhenActiveRef.current = false;
     clearRotationTimer();
     resetFeatures();
@@ -284,12 +285,13 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     // stamps and the line scheduler compares it with `performance.now()`.
     const timestampMs = performance.now();
     setFeatures(processor.process(meterState.metering, timestampMs));
-    setEar(earAdapter.process(meterState.metering, timestampMs));
-  }, [earAdapter, meterState.metering, processor]);
+    const nextEar = earAdapter.process(meterState.metering, timestampMs);
+    setEar(nextEar);
+    emitter.emit(nextEar);
+  }, [earAdapter, emitter, meterState.metering, processor]);
 
   const stop = useCallback(() => {
     startAttemptRef.current += 1;
-    recognitionPauseRef.current = false;
     resumeWhenActiveRef.current = false;
     clearRotationTimer();
     resetFeatures();
@@ -366,59 +368,6 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     }
   }, [resetFeatures, setListeningStatus, startMeterSegment, stopAndDeleteMeterSegment]);
 
-  const pauseForRecognition = useCallback(async (): Promise<boolean> => {
-    if (statusRef.current !== 'listening' || !meterRecorder.isRecording) {
-      return false;
-    }
-
-    const generation = startAttemptRef.current + 1;
-    startAttemptRef.current = generation;
-    recognitionPauseRef.current = false;
-    resumeWhenActiveRef.current = false;
-    clearRotationTimer();
-
-    try {
-      await stopAndDeleteMeterSegment();
-    } catch {
-      if (startAttemptRef.current === generation && mountedRef.current) {
-        resetFeatures();
-        setErrorMessage(MICROPHONE_ERROR_MESSAGE);
-        setListeningStatus('error');
-      }
-      return false;
-    }
-
-    if (startAttemptRef.current !== generation || !mountedRef.current) {
-      return false;
-    }
-
-    recognitionPauseRef.current = true;
-    resetFeatures();
-    setListeningStatus('idle');
-    return true;
-  }, [
-    clearRotationTimer,
-    meterRecorder,
-    resetFeatures,
-    setListeningStatus,
-    stopAndDeleteMeterSegment,
-  ]);
-
-  const resumeAfterRecognition = useCallback(
-    async (shouldResume: boolean) => {
-      if (!shouldResume || !recognitionPauseRef.current) {
-        return;
-      }
-
-      recognitionPauseRef.current = false;
-
-      if (mountedRef.current && appStateRef.current === 'active') {
-        await start();
-      }
-    },
-    [start],
-  );
-
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       const wasActive = appStateRef.current === 'active';
@@ -430,8 +379,7 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
         resumeWhenActiveRef.current = wasListening;
 
         if (wasListening) {
-          recognitionPauseRef.current = false;
-          clearRotationTimer();
+                clearRotationTimer();
           resetFeatures();
           setListeningStatus('idle');
           void stopAndDeleteMeterSegment().catch(() => undefined);
@@ -475,11 +423,10 @@ export function useMicrophoneAnalysis(): MicrophoneAnalysis {
     status,
     features,
     ear,
+    earStream: emitter,
     errorMessage,
     start,
     stop,
     retry: start,
-    pauseForRecognition,
-    resumeAfterRecognition,
   };
 }
