@@ -42,6 +42,21 @@ describe('RecognitionControls', () => {
     expect(idle.handlers.onRecognize).toHaveBeenCalledTimes(1);
   });
 
+  test.each<RecognitionPhase>(['resolving_lyrics', 'unavailable'])(
+    'pressing the disabled button in phase %s calls neither onRecognize nor onCancel',
+    async (phase) => {
+      const s = setup({ ...idleState, phase });
+      const screen = await s.render();
+      const button = screen.getByRole('button', { name: phase === 'unavailable' ? '曲を読み取る' : '歌詞を探しています…' });
+      expect(button.props.accessibilityState.disabled).toBe(true);
+
+      await fireEvent.press(button);
+
+      expect(s.handlers.onRecognize).not.toHaveBeenCalled();
+      expect(s.handlers.onCancel).not.toHaveBeenCalled();
+    },
+  );
+
   test('an error message is shown with もう一度読み取る', async () => {
     const s = setup({ ...idleState, phase: 'error', message: RECOGNITION_COPY.match_failed });
     const screen = await s.render();

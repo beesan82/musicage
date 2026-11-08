@@ -14,6 +14,9 @@ struct EarFrame {
 /// Pure DSP: 48 kHz mono Float32 in, one `EarFrame` per 960-sample hop out.
 /// Everything is allocated in `init`; `push` does no allocation and is meant
 /// to run on the audio tap thread. Not thread-safe: call `push` from one thread.
+///
+/// `init` is failable: if vDSP cannot build the FFT setup the analyzer is nil
+/// and the module reports `audio_setup_failed` instead of aborting the process.
 final class EarAnalyzer {
   static let hop = 960
   static let windowSize = 1024
@@ -46,12 +49,13 @@ final class EarAnalyzer {
   /// Samples of the current hop already written into `history`.
   private var filled = 0
 
-  init(sampleRate: Double = 48_000) {
-    self.sampleRate = sampleRate
-
+  init?(sampleRate: Double = 48_000) {
+    // Nothing is allocated before this point, so returning nil leaks nothing
+    // (deinit does not run for an instance whose init failed here).
     guard let setup = vDSP_create_fftsetup(EarAnalyzer.log2n, FFTRadix(kFFTRadix2)) else {
-      fatalError("EarAnalyzer: vDSP_create_fftsetup failed")
+      return nil
     }
+    self.sampleRate = sampleRate
     fftSetup = setup
 
     let n = EarAnalyzer.windowSize

@@ -23,6 +23,10 @@ public final class ExpoMusicageEarModule: Module {
   private var analysisMixer: AVAudioMixerNode?
   private var analyzer: EarAnalyzer?
   private var interruptionObserver: NSObjectProtocol?
+  /// True from a successful session activation until `deactivateAudioSession`,
+  /// whether or not an engine was kept: a setup that fails after activation
+  /// still has a session to release.
+  private var sessionActive = false
 
   /// Bumped by every stopListening, so a permission answer that arrives after
   /// a stop knows it was cancelled and does not start the engine.
@@ -98,7 +102,7 @@ public final class ExpoMusicageEarModule: Module {
       // Already set up. Restart only if an interruption left it stopped.
       if !engine.isRunning {
         do {
-          try AVAudioSession.sharedInstance().setActive(true)
+          try activateAudioSession()
           try engine.start()
         } catch {
           stopListening()
@@ -111,7 +115,7 @@ public final class ExpoMusicageEarModule: Module {
     do {
       let audioSession = AVAudioSession.sharedInstance()
       try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers])
-      try audioSession.setActive(true)
+      try activateAudioSession()
 
       let engine = AVAudioEngine()
       let inputNode = engine.inputNode
@@ -130,7 +134,9 @@ public final class ExpoMusicageEarModule: Module {
       // Never play the mic back. The tap below is on analysisMixer, before this mute.
       engine.mainMixerNode.outputVolume = 0
 
-      let analyzer = EarAnalyzer(sampleRate: 48_000)
+      guard let analyzer = EarAnalyzer(sampleRate: 48_000) else {
+        throw EarSetupError.analyzerUnavailable
+      }
       let sink = matchSink
       let eventQueue = self.eventQueue
 
@@ -163,6 +169,9 @@ public final class ExpoMusicageEarModule: Module {
       try engine.start()
       observeInterruptions()
     } catch {
+      // Every failure path lands here, including the guards that throw after
+      // the session was activated but before an engine was kept; stopListening
+      // releases the session either way.
       stopListening()
       sendEvent("onEarError", ["code": "audio_setup_failed"])
     }
@@ -175,12 +184,28 @@ public final class ExpoMusicageEarModule: Module {
       NotificationCenter.default.removeObserver(observer)
       interruptionObserver = nil
     }
-    guard let engine = engine else { return }
-    analysisMixer?.removeTap(onBus: 0)
-    engine.stop()
-    self.engine = nil
-    analysisMixer = nil
-    analyzer = nil
+    if let engine = engine {
+      analysisMixer?.removeTap(onBus: 0)
+      engine.stop()
+      self.engine = nil
+      analysisMixer = nil
+      analyzer = nil
+    }
+    deactivateAudioSession()
+  }
+
+  // MARK: - Audio session (controlQueue only)
+
+  private func activateAudioSession() throws {
+    try AVAudioSession.sharedInstance().setActive(true)
+    sessionActive = true
+  }
+
+  /// Releases the session if this module activated it; a no-op otherwise, so
+  /// stopping an ear that never started does not touch other apps' audio.
+  private func deactivateAudioSession() {
+    guard sessionActive else { return }
+    sessionActive = false
     try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
   }
 
@@ -215,7 +240,7 @@ public final class ExpoMusicageEarModule: Module {
     }
     guard shouldResume, !engine.isRunning else { return }
     do {
-      try AVAudioSession.sharedInstance().setActive(true)
+      try activateAudioSession()
       try engine.start()
     } catch {
       sendEvent("onEarError", ["code": "audio_setup_failed"])
@@ -329,6 +354,8 @@ public final class ExpoMusicageEarModule: Module {
 private enum EarSetupError: Error {
   case noInput
   case badFormat
+  /// `EarAnalyzer.init` returned nil (vDSP could not build the FFT setup).
+  case analyzerUnavailable
 }
 
 /// The SHSession the tap should stream into, or nil when not matching.

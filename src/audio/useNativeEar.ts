@@ -66,10 +66,13 @@ export function useNativeEar(module: EarModule): Ear {
     } else if (failed) {
       setErrorMessage(NATIVE_EAR_ERROR_COPY.audio_setup_failed);
       updateStatus('error');
+      // Whatever the native side kept of a half-started engine goes with the
+      // error state, so a retry starts from nothing.
+      stopNative();
     } else {
       updateStatus('listening');
     }
-  }, [module, updateStatus]);
+  }, [module, stopNative, updateStatus]);
 
   startRef.current = start;
 
@@ -103,6 +106,11 @@ export function useNativeEar(module: EarModule): Ear {
         generationRef.current += 1;
         setErrorMessage(NATIVE_EAR_ERROR_COPY[code]);
         updateStatus('error');
+        // The native side may still hold the engine (an interruption keeps
+        // it for a resume) or the audio session (a failed resume keeps it):
+        // release it so the error state and the native state agree, and
+        // the retry starts clean.
+        stopNative();
       }
     });
 
@@ -112,7 +120,7 @@ export function useNativeEar(module: EarModule): Ear {
       generationRef.current += 1;
       void module.stopListening().catch(() => undefined);
     };
-  }, [emitter, module, updateStatus]);
+  }, [emitter, module, stopNative, updateStatus]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {

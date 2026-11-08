@@ -2,7 +2,7 @@
 
 ## 状態
 
-承認待ちの設計。2026-10-18 の改善メモ（`docs/2026-10-18-huqqs-comparison-and-improvements.md`）と ShazamKit 設計（`docs/superpowers/specs/2026-09-06-shazamkit-lyric-sync-design.md`）を前提にし、両者を一本の製品方針にまとめる。ShazamKit 設計のうち「既存のビジュアライザは変更しない」という制約は本設計で解除する。
+承認済みの設計（フェーズ 1・2 はこの設計に沿って実装済み。改定は下の「改定履歴」に記す。2026-11-08 注記: 当初の「承認待ち」の表記を現状に合わせて改めた）。2026-10-18 の改善メモ（`docs/2026-10-18-huqqs-comparison-and-improvements.md`）と ShazamKit 設計（`docs/superpowers/specs/2026-09-06-shazamkit-lyric-sync-design.md`）を前提にし、両者を一本の製品方針にまとめる。ShazamKit 設計のうち「既存のビジュアライザは変更しない」という制約は本設計で解除する。
 
 ### 改定履歴
 
@@ -257,7 +257,7 @@ type SongDirection = {
    - 開発用コントロールとして、偽時計の開始・一時停止・シーク、演出 JSON の再読み込み、拍エンジンを実マイク入力で回す切り替えを用意する。見た目は偽時計で、拍の乗りは実際に曲を鳴らして確認する。
    - このフェーズの判断は「組版と動きの質」に限る。実在曲での平沢風の到達点はフェーズ 2 の実機同期後に判断する。
 2. **Development Build と耳モジュール**: EAS 設定、Swift モジュール（ShazamKit + 帯域解析）、同期時計、自動再認識、AudD と校正系と旧シーンの削除。実機で行単位の同期を確認する。
-   - 所有者が行う手順（実装者は代行できない）を先頭に置く: Apple Developer ポータルで App ID（`com.musicage.app`）を作り ShazamKit を有効化、開発用 iPhone の UDID 登録、EAS 初回ビルド時の Apple ログインと証明書生成の承認。Expo アカウント（beesan）はこの PC にログイン済み。EAS プロジェクト（`eas.json`、`projectId`）はまだ無く、このフェーズで作る。
+   - 所有者が行う手順（実装者は代行できない）を先頭に置く: Apple Developer ポータルで App ID（`com.musicage.app`）を作り ShazamKit を有効化、開発用 iPhone の UDID 登録、EAS 初回ビルド時の Apple ログインと証明書生成の承認。Expo アカウント（beesan）はこの PC にログイン済み。EAS プロジェクト（`eas.json`、`projectId`）はまだ無く、このフェーズで作る。（2026-11-08 注記: EAS プロジェクトは作成済み。2026 年 9 月の ShazamKit 版で作られた既存プロジェクト（所有者 `beesan`）を `app.json` の `extra.eas.projectId` に引き継ぎ、`eas.json` は `appVersionSource: remote`。`eas init` は実行しない。`AGENTS.md` と進捗記録の Ruling 9 を参照。）
    - Swift のコンパイルエラーは EAS ビルドログで直す。ビルド往復は 1 回 15〜30 分を見込む。
    - ここで実在曲（平沢進を含む）を鳴らして、同期と演出を所有者が評価する。見劣りするなら方針を見直す。
 3. **演出ディレクター**: Claude API 生成、キャッシュ、ルールベースのフォールバック、設定画面。

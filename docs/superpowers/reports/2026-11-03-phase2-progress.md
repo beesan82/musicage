@@ -358,3 +358,57 @@ JS の耳と認識
   8. 認識のドロップ（`iDrop`）と段階 5 の surge（文字の色）が従来どおり働くこと（uniform 契約は無変更だが、シェーダを書き換えたので回帰確認）。
 - 次にやること: 人による `npm test` / `npm run typecheck` の実行と結果の追記。通れば EAS Development Build を更新し、段階 5・6 の実機所見（グローと色の品、テクスチャの変化と fps）をまとめて見る。これでノリ改善の第 2 階梯（段階 1〜6）は実装が揃うので、実機所見を受けた調整のあと、フェーズ 3（Claude API による演出ディレクター）の計画へ。push はしていない（ローカル commit もこのセッションでは行っていない）。
 - 検証結果（2026-11-08、呼び出し側で実行）: `npm test -- --watchman=false` は 44 スイート・403 件全通過、`npm run typecheck` も通過。シェーダの実描画・コンパイル可否は単体テストでは保証できないため、次回ビルドの実機確認で担保する（進捗の実機確認項目参照）。
+
+## 追記（2026-11-08）: フェーズ 2 最終レビュー修正
+
+ブランチ `feat/final-review`（ノリノリ化の段階 6 `b342005` の上に作成）。最終レビュー下準備メモ（`~/workspace/projects/musicage-review/final-review-prep.md`）の裁定に沿って修正した。メモの照合時点が古く行番号がずれているため、各指摘は現行コードで再確認してから手を入れた（なお、本セッションの実行環境ではメモ本体の読み取りが権限で拒否されたため、依頼文に書き写された裁定を基準にした。メモ本文と食い違う点があれば指摘してほしい）。本セッションではテスト・typecheck・git の実行が承認制約で行えないため、検証は呼び出し側に委ねる（下記「検証」）。
+
+### 判定と変更（指摘ごと）
+
+| 指摘 | 判定 | 根拠と変更 |
+| --- | --- | --- |
+| J1 `useNativeEar` のエラー時にネイティブを止めない | **直した** | 現行コードでも `audio_setup_failed` / `interrupted` で `error` に入るだけで `stopListening` を呼んでいなかった。エラーハンドラと、`startListening` が reject した経路の両方で `stopNative()` を呼ぶようにした。`interrupted` はネイティブがエンジンを保持したまま（復帰を待つ）なので、JS の error 状態（再試行を促す）とネイティブの状態を揃える意味がある。テスト 3 件追加（両コードで `stopListening` が 1 回呼ばれ、retry で再停止しない／reject 時に呼ばれる／listening でないときは呼ばれない）。 |
+| J6 `useEarRecognition` のエラーで LRCLIB を中断しない | **直した** | エラーハンドラで試行を終える直前に `attempt.controller.abort()` を呼ぶ。遅れて来た lookup の結果は `activeRef` の照合で捨てられる（既存の仕組み）。テスト 1 件追加（`resolving_lyrics` 中の `match_timeout` で signal が aborted になり、遅い成功が状態を変えない）。 |
+| T2 曲替わり直後の 1 描画で旧曲の行インデックスが新曲に当たる | **直した（現行コードでも残っていた）** | 段階 1〜6 の変更後も、`schedule` は effect の `tick` が描画後に更新する state のままで、`timedLines` が変わった描画では旧曲の `schedule.line` が新曲の `lines` と組になっていた（`LyricStage` はその描画で新曲の行を旧インデックスで組版し、次の描画で退場させる）。`Schedule` に `lines`（スケジューラが走った行配列）を持たせ、現在の行配列と一致しない schedule は「無い」ものとして扱う（その 1 描画は idle。初回認識で schedule が無い間と同じ挙動）。`pastOutro` も同じ照合を通す。フィクスチャ開始・停止でも同じ経路で守られる。テスト 2 件追加（全描画の `source` を記録し、新曲の行配列と組になった描画のインデックスがすべて新曲のものであること／フィクスチャ開始でも同様）。副作用: 曲替わりの 1 描画が idle になるため、`LyricStage` のドロップは「その描画の idle 構成」を散らす対象として捉える（旧曲の行は通常の退場、idle グリフが拍頭で散り、新曲の最初の行が drop で着地）。これは idle → synced のドロップと同じ振り付けで、設計書 §7 の範囲内と判断した。実機で違和感があれば報告してほしい。 |
+| O2 テスト追加 4 件 | **直した** | (a) `useStageSource.test.tsx`: 3 秒無音 → 200ms の物音 → 3.5 秒無音で行が残り、その後の無音が続いて初めて idle になる。(b) `RecognitionControls.test.tsx`: `resolving_lyrics` と `unavailable` の無効ボタンを press しても `onRecognize` / `onCancel` が呼ばれない。(c) `settingsStore.test.ts`: 読み書きとも `File(Paths.document, 'musicage-settings.json')` だけを開く。(d) `useSettings.test.tsx`: ロード前にアンマウントすると、遅れて解決したロードは `ready` を立てず、保存も走らず、`console.error` も出ない。 |
+| S4 `EarAnalyzer` の `fatalError` | **直した（未コンパイル）** | `init?` にして `vDSP_create_fftsetup` が nil なら `return nil`（何も確保する前なのでリークなし。失敗した init では deinit は走らない）。モジュール側は `guard let analyzer = EarAnalyzer(...) else { throw EarSetupError.analyzerUnavailable }` で既存の catch → `audio_setup_failed` に乗せる。`nativeContract.test.ts` に「`fatalError(` を含まない／`init?(sampleRate: Double = 48_000)`／guard-throw の形」の照合を追加。 |
+| S1 `setActive(true)` 後の guard throw でセッションが残る | **直した（未コンパイル）** | `sessionActive` フラグを足し、`activateAudioSession()`（`setActive(true)` と同時にフラグを立てる）／`deactivateAudioSession()`（フラグが立っているときだけ `setActive(false, .notifyOthersOnDeactivation)`）に集約。`stopListening()` はエンジンの有無で早期 return せず、最後に必ず `deactivateAudioSession()` を呼ぶ。これで `noInput` / `badFormat` / `analyzerUnavailable` の throw 経路（セッション有効・エンジン未保持）でもセッションが解除される。一方、一度も開始していない耳を止めても他アプリの音声には触れない（フラグが無いので no-op）。中断からの復帰（`handleInterruption`）と再開経路も同じヘルパーを通す。`nativeContract.test.ts` に「`setActive(true)` は 1 箇所でフラグと対／`stopListening` が無条件に解除する」の照合を追加。 |
+| テクスチャ遅延初期化（旧 `fix/texture-shader-lazy-init` の `a41311c`） | **取り込んだ** | 意図をそのまま現行コードへ再適用: `compileTextureEffect(body)` は throw せず `Make` の結果（null 可）を返す。モジュールスコープの `TEXTURE_EFFECTS` を廃し `getTextureEffect(texture)` の遅延＋キャッシュ（失敗も含めて記憶）に変更。`TextureBackground` は `useMemo` で初回描画時に取得し、null ならパレットの背景色の単色 `<Fill color>` にフォールバック。段階 1/3/5/6 で増えた uniform（`iLow/iMid/iHigh/iConfidence`、`iDrop`、`iInk/iAccent` の補間、`energyBlend` / `blendTextures` のプレリュード）と `TextureBackground` の渡し方は無変更（uniform の derived value はそのまま。シェーダが無いときは Shader 要素を出さないだけ）。テスト: 新規 `textureShader.test.tsx`（Make が null のときに単色 Fill へフォールバックし Shader 要素が無い／`compileTextureEffect` がプレリュード＋本体で Make を呼び null を返す／`getTextureEffect` が null を返す／遅延コンパイルとキャッシュ／コンパイル成功時は Shader が出る）。既存 `TextureBackground.test.tsx` の「全テクスチャがコンパイルされる」は `getTextureEffect` ベースに更新。段階 6 の実機項目 1「起動時に `compileTextureEffect` が投げないこと」は、投げなくなったので「4 シェーダが単色フォールバックに落ちていないこと（質感が見えること）」に読み替える。 |
+| O1 `expo-crypto` | **直した** | `src/`・`modules/`・`App.tsx`・`jest/`・設定ファイルに import が無いことを再確認したうえで `package.json` の依存から外した。**`package-lock.json` は触っていない**。ロックの同期は呼び出し側が `npm install`（または `npm uninstall expo-crypto`）で行い、生成された `package-lock.json` を同じコミットに含めてほしい。 |
+| `.gitignore` | **直した** | `.env` を追加（現時点で `.env` ファイルは存在しない）。 |
+| D1 設計書の「承認待ち」 | **直した（文書のみ）** | 冒頭の状態を「承認済み（フェーズ 1・2 を実装済み、改定履歴あり）」に改め、注記を付けた。 |
+| D2 計画書 Task 0 Step 4 の `eas init` | **直した（文書のみ）** | 本文は履歴として残し、直前に superseded 注記（実行しない理由、Ruling 9 と `AGENTS.md` への参照）を置いた。 |
+| D3 計画書 Task 1 の `eas.json` 例 | **直した（文書のみ）** | 例の `appVersionSource` を `remote` に直し、注記を付けた。 |
+| D4 設計書の「EAS プロジェクトはまだ無い」 | **直した（文書のみ）** | 作成済み・引き継ぎ済み・`eas init` は実行しない旨の注記を付けた。 |
+| Codemagic 移行の記録 | **直した（文書のみ）** | `2026-11-03-codemagic-testflight.md` に「移行完了（`ios-testflight` ワークフローで運用中、ビルド番号 5 まで配信済み）」の追記。 |
+| J2 / J3 / J4 / J5 / J7 / T1 / T3 / S2 / S3 | **据え置き** | 裁定に無いため変更していない。上の「後回しにした指摘」のうち本追記で扱っていない項目（音声経路の変更・中断復帰の JS 通知、タップのスレッドの NSLock と割り当て、`useEar` の条件付きフック、`addErrorListener` の素通し、`clockConverter` の `?? 0`、試行 ID の無いネイティブイベント、同じ試行での 2 回目の認識、設定の初回読み込み前の `update`、起動直後の無音扱いの置き場、マイク停止中の進行）はこのまま残る。 |
+
+### 変更ファイル
+
+- JS/TS 本体: `src/audio/useNativeEar.ts`、`src/recognition/useEarRecognition.ts`、`src/app/useStageSource.ts`、`src/textures/textureShader.ts`、`src/textures/TextureBackground.tsx`
+- テスト: `src/audio/__tests__/useNativeEar.test.tsx`、`src/recognition/__tests__/useEarRecognition.test.tsx`、`src/app/__tests__/useStageSource.test.tsx`、`src/components/__tests__/RecognitionControls.test.tsx`、`src/settings/__tests__/settingsStore.test.ts`、`src/settings/__tests__/useSettings.test.tsx`、`src/textures/__tests__/TextureBackground.test.tsx`、新規 `src/textures/__tests__/textureShader.test.tsx`、`modules/expo-musicage-ear/src/__tests__/nativeContract.test.ts`
+- Swift: `modules/expo-musicage-ear/ios/EarAnalyzer.swift`、`modules/expo-musicage-ear/ios/ExpoMusicageEarModule.swift`
+- 同梱: `package.json`（`expo-crypto` 削除。ロックは未同期）、`.gitignore`
+- 文書: `docs/superpowers/specs/2026-10-18-lyric-typography-object-design.md`、`docs/superpowers/plans/2026-10-19-lyric-typography-phase2.md`、`docs/superpowers/reports/2026-11-03-codemagic-testflight.md`、本ファイル
+
+### 検証
+
+**未検証**。呼び出し側で次を実行し、結果を本ファイルに追記してほしい（`npm install` はロックの同期のため先に）。
+
+```bash
+npm install
+npm test -- --watchman=false
+npm run typecheck
+```
+
+落ちた場合に疑う箇所: (a) `textureShader.test.tsx` の単色フォールバックは、Skia のモックが `<Fill color>` を `color` prop を持つホスト要素として出す前提。要素が見つからなければ `queryAll` の条件を実際の prop 名に合わせる（Shader 要素が無いことの確認だけでも意図は保てる）。同ファイルはモジュールのキャッシュに依存し、各テストが別のテクスチャ（paper / grain / void / scan）を初めて触る順で書いてある。順序を変えるときは `jest.isolateModules` に切り替える。(b) `useStageSource.test.tsx` の「物音で無音タイマーがやり直す」は、拍エンジンの無音ホールド 500ms を見込んで 3.5 秒＋1.5 秒の無音を流している。idle にならなければ最後の `emitFor` を 2 秒に延ばす。(c) `useNativeEar.test.tsx` の `test.each` は `as const` の配列で `code` の型を絞っている。(d) `settingsStore.test.ts` は `File` のモック（`jest.fn`）が `new` で呼ばれた引数を見る。(e) `useSettings.test.tsx` のアンマウントのテストは前のテストの `saveSettings` 呼び出しを `mockReset` で消してから数えている。
+
+### 実機・ビルドで確認すること
+
+1. **Swift 2 件（S4・S1）はビルドでしか確かめられない。** 次の Codemagic または EAS ビルドが通ること。通らなければ `EarAnalyzer.init?` の early `return nil`（Swift 5 以降は全プロパティ初期化前の `return nil` が可能）か、`activateAudioSession()` の `throws` 周りのエラーを見る。
+2. S1: マイク開始に失敗した直後（例: 入力の無い状態を作れれば）に他アプリの音声が止まったままにならないこと。通常の開始 → 停止 → 他アプリの音が戻ること（`notifyOthersOnDeactivation`）。中断（通話）からの復帰後に停止しても同様。
+3. J1: 通話などで `interrupted` が出たあと、「もう一度試してください」から再試行すると聴き取りが再開すること（ネイティブを止めてから再開するので、以前より一拍遅れる可能性がある）。
+4. T2: 曲替わりの瞬間（再生中の別の曲を手動で読み取る）に、旧曲の行番号で新曲の行が 1 フレーム出ないこと。代わりに「旧曲の行が退場 → idle グリフが拍頭で散る → 新曲の最初の行が drop」の順に見えること。違和感があれば T2 の副作用の節を見直す。
+5. テクスチャ遅延初期化: 起動して 4 種の質感がすべて見えること（単色の背景に落ちていれば、そのシェーダが実機で SkSL のコンパイルに失敗している。段階 6 の実機項目 1 を参照）。起動直後の 1 フレーム目が単色でないこと（初回描画で同期コンパイルするので変わらない見込み）。
+6. 既存の実機項目（段階 1〜6、Device validation）に退行がないこと。
+- 検証結果（2026-11-08、呼び出し側で実行）: `npm install` でロック同期後、`npm test -- --watchman=false` は 45 スイート・421 件全通過、`npm run typecheck` も通過。途中で2件の失敗を修正: (1) nativeContract の S1 検査が Swift の doc コメント内の文字列 `setActive(true)` にも一致して落ちたため、コメント側の言い回しを変更（実装の呼び出しは activateAudioSession 内の1箇所のみで不変）。(2) MusicageApp.test.tsx が1回だけ落ちたが再実行で通過（AGENTS.md 既知の単発フレークと判断）。Swift の実コンパイルは次回ビルドで確認する。

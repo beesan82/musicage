@@ -7,6 +7,7 @@ import { FIXTURE_DIRECTION, FIXTURE_LRC, FIXTURE_TRACK } from '../../dev/fixture
 import type { FixturePlayback } from '../../dev/fixture/useFixturePlayback';
 import { parseLrc } from '../../recognition/lrc';
 import type { LyricResult, TimestampedLyricResult, Track } from '../../recognition/types';
+import type { StageSource } from '../../typesetting/LyricStage';
 import { QUIET_BEAT, useStageSource } from '../useStageSource';
 import type { StageInputs } from '../useStageSource';
 
@@ -62,10 +63,13 @@ describe('useStageSource', () => {
   let clockMs = 10_000;
   let emitter: EarEmitter;
   let renders = 0;
+  /** The source of every render, in order (what the stage would have drawn). */
+  let sources: StageSource[] = [];
 
   beforeEach(() => {
     clockMs = 10_000;
     renders = 0;
+    sources = [];
     emitter = createEarEmitter();
     jest.spyOn(performance, 'now').mockImplementation(() => clockMs);
   });
@@ -75,7 +79,9 @@ describe('useStageSource', () => {
     renderHook(
       (props: Props): StageInputs => {
         renders += 1;
-        return useStageSource({ earStream: emitter, ...props });
+        const inputs = useStageSource({ earStream: emitter, ...props });
+        sources.push(inputs.source);
+        return inputs;
       },
       {
         initialProps: { status: 'listening', playback: playbackOff, result, ...initial } as Props,
@@ -122,6 +128,63 @@ describe('useStageSource', () => {
     expect(scheduled.index).toBe(0);
     expect(scheduled.startedAtMs).toBe(clockMs);
     expect(hook.result.current.nowMonotonicMs).toBe(clockMs);
+  });
+
+  describe('a different song replacing a synced one', () => {
+    // The new song's clock sits on its first line while the old one was on
+    // its second: the two indices differ, so a render that pairs the new
+    // lines with the old index is visible as index 1 on the new lines.
+    const other: TimestampedLyricResult = {
+      kind: 'timestamped',
+      track: { ...track, trackId: 'shazam-2', title: '別の歌' },
+      lines: [
+        { startMs: 0, text: '別の夜' },
+        { startMs: 8_000, text: '別の朝' },
+      ],
+      anchor: { offsetMs: 0, anchoredAtMonotonicMs: 14_000 },
+    };
+
+    test('never shows the previous song’s line index on the new lines, not even for one render', async () => {
+      clockMs = 14_000; // position 5_000 ms → line 1 of the first song
+      const hook = await setup();
+      expect(syncedOf(hook.result.current).scheduled.index).toBe(1);
+
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: other });
+
+      const onNewLines = sources.filter((s) => s.kind === 'synced' && s.lines === other.lines);
+      expect(onNewLines.length).toBeGreaterThan(0);
+      for (const s of onNewLines) {
+        if (s.kind !== 'synced') throw new Error('unreachable');
+        expect(s.scheduled.index).toBe(0);
+      }
+      const final = syncedOf(hook.result.current);
+      expect(final.lines).toBe(other.lines);
+      expect(final.scheduled.index).toBe(0);
+      expect(final.scheduled.startedAtMs).toBe(14_000);
+      expect(final.track).toEqual({ title: '別の歌', artist: track.artist });
+    });
+
+    test('the fixture starting over a synced song never pairs the fixture lines with the song’s index', async () => {
+      clockMs = 14_000; // line 1 of the recognized song
+      const hook = await setup();
+      expect(syncedOf(hook.result.current).scheduled.index).toBe(1);
+
+      const playing: FixturePlayback = {
+        ...playbackOff,
+        active: true,
+        anchor: { offsetMs: 2_500, anchoredAtMonotonicMs: clockMs }, // fixture line 0
+      };
+      await hook.rerender({ status: 'listening', playback: playing, result });
+
+      const fixtureLines = parseLrc(FIXTURE_LRC);
+      const onFixture = sources.filter((s) => s.kind === 'synced' && s.track === FIXTURE_TRACK);
+      expect(onFixture.length).toBeGreaterThan(0);
+      for (const s of onFixture) {
+        if (s.kind !== 'synced') throw new Error('unreachable');
+        expect(s.lines).toEqual(fixtureLines);
+        expect(s.scheduled.index).toBe(0);
+      }
+    });
   });
 
   test('past the outro the source is an idle line and pastOutro is true', async () => {
@@ -179,6 +242,23 @@ describe('useStageSource', () => {
       await emitFor(0, 3_500, 0);
       await pause();
       expect(syncedOf(hook.result.current).scheduled.index).toBe(0);
+    });
+
+    test('a noise in the middle restarts the silence timer', async () => {
+      const hook = await setup({ result: longSong });
+
+      // 3 s of silence, 200 ms of sound, then 3.5 s of silence: 6.5 s of
+      // near-silence in total, but never SILENCE_REARM_MS of it in a row.
+      await emitFor(0, 3_000, 0);
+      await emitFor(3_050, 200, 0.3);
+      await emitFor(3_300, 3_500, 0);
+      await pause();
+      expect(syncedOf(hook.result.current).scheduled.index).toBe(0);
+
+      // Only once the silence after the noise has lasted that long does the
+      // line go (the engine's own 500 ms silence hold adds to the wait).
+      await emitFor(6_850, 1_500, 0);
+      await waitFor(() => expect(syncedOf(hook.result.current).scheduled.index).toBe(-1));
     });
 
     test('when sound returns the line comes back from the song clock', async () => {

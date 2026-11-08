@@ -79,6 +79,8 @@ Expected: 表示された URL（または QR）を iPhone の Safari で開き�
 
 - [ ] **Step 4: 依存を追加して EAS プロジェクトを作る（PowerShell、リポジトリのルートで）**
 
+> **superseded（2026-11-08 注記）**: この Step の `eas init` は **実行しない**。EAS プロジェクトは 2026 年 9 月の ShazamKit 版で作成済みで、既存の `projectId`（所有者 `beesan`）を `app.json` に引き継いだ（進捗記録 Ruling 9、`AGENTS.md`「EAS」）。`eas init` を実行すると別の EAS プロジェクトができてしまう。`expo-dev-client` の追加は所有者が 2026-10-20 に実施済み。本文は履歴として残す。
+
 ```powershell
 npx expo install expo-dev-client
 eas init
@@ -146,11 +148,11 @@ Expected: FAIL（`eas.json` が無い、`bundleIdentifier` が無い）
 
 - [ ] **Step 3: 設定を書く**
 
-`eas.json`:
+`eas.json`（2026-11-08 注記: 実際のコミットでは `appVersionSource` を `remote` にした（Ruling 9、既存 EAS プロジェクトの設定に合わせるため）。下の例は `remote` に直してある）:
 
 ```json
 {
-  "cli": { "appVersionSource": "local" },
+  "cli": { "appVersionSource": "remote" },
   "build": {
     "development": { "developmentClient": true, "distribution": "internal" },
     "preview": { "distribution": "internal" },

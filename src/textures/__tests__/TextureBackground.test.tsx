@@ -12,10 +12,10 @@ import {
   DROP_DIP_MS,
   dropDip,
   energyBlend,
+  getTextureEffect,
   hexToRgb01,
   mixRgb,
   TEXTURE_BLEND_RANGE,
-  TEXTURE_EFFECTS,
   TEXTURE_SKSL_PRELUDE,
 } from '../textureShader';
 import { VOID_SKSL } from '../void';
@@ -30,7 +30,9 @@ test('hexToRgb01 rejects a malformed colour', () => {
 });
 
 test('compiles an effect for every texture', () => {
-  expect(Object.keys(TEXTURE_EFFECTS).sort()).toEqual([...TEXTURES].sort());
+  for (const texture of TEXTURES) {
+    expect(getTextureEffect(texture)).not.toBeNull();
+  }
 });
 
 test('renders a shader fill for each texture without throwing', async () => {

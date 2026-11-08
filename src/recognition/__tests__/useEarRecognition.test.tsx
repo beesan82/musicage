@@ -210,6 +210,35 @@ describe('useEarRecognition', () => {
     expect(result.current.state.phase).toBe('listening');
   });
 
+  test('a native error during resolving_lyrics aborts the lookup and ignores its late result', async () => {
+    let resolveLookup: (v: unknown) => void = () => undefined;
+    lookup.mockReturnValue(new Promise((r) => (resolveLookup = r)));
+    const { result } = await setup();
+    await act(async () => result.current.recognize());
+    await emitRecognition(rec());
+    expect(result.current.state.phase).toBe('resolving_lyrics');
+    const signal = lookup.mock.calls[0][2] as AbortSignal;
+
+    await emitError({ code: 'match_timeout' });
+
+    expect(signal.aborted).toBe(true);
+    expect(result.current.state).toEqual({
+      phase: 'idle',
+      result: null,
+      message: RECOGNITION_COPY.match_timeout,
+      retryable: true,
+    });
+    // The lookup's late success belongs to the ended attempt and is dropped.
+    await act(async () =>
+      resolveLookup({ recordId: 1, instrumental: false, syncedLyrics: '[00:12.00] x', plainLyrics: null }),
+    );
+    expect(result.current.state.result).toBeNull();
+    expect(result.current.state.message).toBe(RECOGNITION_COPY.match_timeout);
+    await act(async () => result.current.recognize());
+    expect(fake.listenForMatch).toHaveBeenCalledTimes(2);
+    expect(result.current.state.phase).toBe('listening');
+  });
+
   test('cancel during resolving_lyrics aborts the lookup and ignores its late result', async () => {
     let resolveLookup: (v: unknown) => void = () => undefined;
     lookup.mockReturnValue(new Promise((r) => (resolveLookup = r)));

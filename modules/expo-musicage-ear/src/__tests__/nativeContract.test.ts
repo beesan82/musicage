@@ -27,6 +27,26 @@ test('the tap sits before the mute and the mic is never played back', () => {
   expect(src).toMatch(/analysisMixer\.installTap/);
   expect(src).not.toMatch(/analysisMixer\.(volume|outputVolume) = 0/);
 });
+test('a failed FFT setup is reported as audio_setup_failed, never a process abort', () => {
+  const analyzer = ios('EarAnalyzer.swift');
+  const module = ios('ExpoMusicageEarModule.swift');
+  expect(analyzer).not.toContain('fatalError(');
+  expect(analyzer).toMatch(/init\?\(sampleRate: Double = 48_000\)/);
+  expect(module).toMatch(/guard let analyzer = EarAnalyzer\(sampleRate: 48_000\) else \{\s*throw EarSetupError\.\w+/);
+  expect(module).toContain('"code": "audio_setup_failed"');
+});
+test('the audio session is released on every stop, including a setup that failed after activating it', () => {
+  const src = ios('ExpoMusicageEarModule.swift');
+  // Activation and release go through one pair of helpers guarded by a flag...
+  expect(src).toContain('private func activateAudioSession() throws');
+  expect(src).toContain('private func deactivateAudioSession()');
+  expect(src.match(/setActive\(true\)/g)).toHaveLength(1);
+  expect(src).toMatch(/setActive\(true\)\n\s*sessionActive = true/);
+  // ...and stopListening releases the session unconditionally, not only when an engine was kept.
+  const stop = src.slice(src.indexOf('private func stopListening()'), src.indexOf('// MARK: - Audio session'));
+  expect(stop).toContain('deactivateAudioSession()');
+  expect(stop).not.toMatch(/guard let engine = engine else \{ return \}/);
+});
 test('the module config targets apple only and names the module class', () => {
   const config = JSON.parse(readFileSync(`${MODULE_ROOT}/expo-module.config.json`, 'utf8'));
   expect(config).toEqual({ platforms: ['apple'], apple: { modules: ['ExpoMusicageEarModule'] } });

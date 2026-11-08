@@ -6,7 +6,7 @@ import type { SharedValue } from 'react-native-reanimated';
 
 import { INK_TINT_MAX, surgeHighHex } from '../direction/surge';
 import type { Palette, Texture } from '../direction/types';
-import { dropDip, hexToRgb01, mixRgb, TEXTURE_EFFECTS } from './textureShader';
+import { dropDip, getTextureEffect, hexToRgb01, mixRgb } from './textureShader';
 
 export interface TextureBackgroundProps {
   texture: Texture;
@@ -98,6 +98,11 @@ export function TextureBackground({
     }
   }, [frame, reducedMotion, time]);
 
+  // Compiled on first render, never at module scope; null means the shader
+  // failed to compile on this device and the stage falls back to a plain
+  // fill in the palette's background colour.
+  const effect = useMemo(() => getTextureEffect(texture), [texture]);
+
   const colors = useMemo(
     () => ({
       background: hexToRgb01(palette.background),
@@ -145,9 +150,13 @@ export function TextureBackground({
       testID="texture-background"
     >
       <Canvas style={{ width, height }}>
-        <Fill>
-          <Shader source={TEXTURE_EFFECTS[texture]} uniforms={uniforms} />
-        </Fill>
+        {effect ? (
+          <Fill>
+            <Shader source={effect} uniforms={uniforms} />
+          </Fill>
+        ) : (
+          <Fill color={palette.background} />
+        )}
       </Canvas>
     </View>
   );

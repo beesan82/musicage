@@ -135,6 +135,10 @@ export function useEarRecognition(
       const attempt = activeRef.current;
       if (!isLive(attempt)) return;
       activeRef.current = null;
+      // The error ends the attempt: a LRCLIB lookup still running for it
+      // (resolving_lyrics) is aborted too, so its result cannot land on top
+      // of the error copy.
+      attempt.controller.abort();
       setState((s) => ({
         phase: 'idle',
         result: s.result,

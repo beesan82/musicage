@@ -5,16 +5,32 @@ jest.mock('expo-file-system', () => ({
   Paths: { document: 'doc' },
 }));
 
+import { File } from 'expo-file-system';
+
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '../settingsStore';
+
+const FileMock = File as unknown as jest.Mock;
 
 beforeEach(() => {
   mockFile.exists = true;
   mockFile.text.mockReset();
   mockFile.write.mockReset();
   mockFile.create.mockReset();
+  FileMock.mockClear();
 });
 
 describe('settingsStore', () => {
+  test('reads and writes one file, musicage-settings.json in the document directory', async () => {
+    mockFile.text.mockResolvedValue('{"autoRecognize":false}');
+    await loadSettings();
+    await saveSettings({ autoRecognize: true });
+
+    expect(FileMock).toHaveBeenCalledTimes(2);
+    for (const call of FileMock.mock.calls) {
+      expect(call).toEqual(['doc', 'musicage-settings.json']);
+    }
+  });
+
   test('returns defaults when the file is missing or malformed', async () => {
     mockFile.exists = false;
     expect(await loadSettings()).toEqual(DEFAULT_SETTINGS);

@@ -109,6 +109,37 @@ describe('useNativeEar', () => {
 
     expect(result.current.status).toBe('error');
     expect(result.current.errorMessage).toBe(NATIVE_EAR_ERROR_COPY.audio_setup_failed);
+    // Whatever native kept of the half-started engine is released with the error.
+    expect(fakeModule.stopListening).toHaveBeenCalledTimes(1);
+  });
+
+  test.each(['audio_setup_failed', 'interrupted'] as const)(
+    '%s stops native listening so the error state matches the native state',
+    async (code) => {
+      const { result } = await render();
+      await act(() => result.current.start());
+      expect(fakeModule.stopListening).not.toHaveBeenCalled();
+
+      await act(async () => emitError({ code }));
+
+      expect(result.current.status).toBe('error');
+      expect(fakeModule.stopListening).toHaveBeenCalledTimes(1);
+
+      // The retry starts native listening afresh and does not stop it again.
+      await act(() => result.current.retry());
+      expect(fakeModule.startListening).toHaveBeenCalledTimes(2);
+      expect(fakeModule.stopListening).toHaveBeenCalledTimes(1);
+      expect(result.current.status).toBe('listening');
+    },
+  );
+
+  test('an error while not listening neither changes state nor stops native', async () => {
+    const { result } = await render();
+
+    await act(async () => emitError({ code: 'interrupted' }));
+
+    expect(result.current.status).toBe('idle');
+    expect(fakeModule.stopListening).not.toHaveBeenCalled();
   });
 
   test('forwards three native frames arriving in one tick as three stream frames', async () => {

@@ -114,22 +114,41 @@ float3 blendTextures(float3 calm, float3 lively, float t) {
 }
 `;
 
-export function compileTextureEffect(name: Texture, body: string): SkRuntimeEffect {
-  const effect = Skia.RuntimeEffect.Make(TEXTURE_SKSL_PRELUDE + body);
-
-  if (!effect) {
-    throw new Error(`${name}: the SkSL texture shader failed to compile.`);
-  }
-
-  return effect;
+/**
+ * Compiles one texture body against the shared prelude. Returns null when
+ * Skia rejects the shader instead of throwing: a texture is decoration, and
+ * a device that cannot compile it must still get a stage (TextureBackground
+ * falls back to a plain fill).
+ */
+export function compileTextureEffect(body: string): SkRuntimeEffect | null {
+  return Skia.RuntimeEffect.Make(TEXTURE_SKSL_PRELUDE + body);
 }
 
-export const TEXTURE_EFFECTS: Record<Texture, SkRuntimeEffect> = {
-  paper: compileTextureEffect('paper', PAPER_SKSL),
-  grain: compileTextureEffect('grain', GRAIN_SKSL),
-  void: compileTextureEffect('void', VOID_SKSL),
-  scan: compileTextureEffect('scan', SCAN_SKSL),
+const TEXTURE_BODIES: Record<Texture, string> = {
+  paper: PAPER_SKSL,
+  grain: GRAIN_SKSL,
+  void: VOID_SKSL,
+  scan: SCAN_SKSL,
 };
+
+const effectCache = new Map<Texture, SkRuntimeEffect | null>();
+
+/**
+ * The compiled effect for a texture, or null when it failed to compile.
+ *
+ * Compilation is lazy on purpose: this module sits on the app bundle's
+ * import chain (App -> MusicageApp -> LyricStage -> TextureBackground), so
+ * compiling at module scope would run Skia before the first frame and take
+ * the whole app down with it if a shader failed. Each texture compiles on
+ * first use and the result (including failure) is cached.
+ */
+export function getTextureEffect(texture: Texture): SkRuntimeEffect | null {
+  if (!effectCache.has(texture)) {
+    effectCache.set(texture, compileTextureEffect(TEXTURE_BODIES[texture]));
+  }
+
+  return effectCache.get(texture) ?? null;
+}
 
 /** How long the recognition drop's dip lasts, from the fire time. */
 export const DROP_DIP_MS = 500;

@@ -58,6 +58,8 @@ export interface StageInputs {
 }
 
 interface Schedule {
+  /** The lines the scheduler ran against; a schedule for other lines is stale. */
+  lines: readonly LyricLine[];
   line: ScheduledLine;
   pastOutro: boolean;
 }
@@ -186,9 +188,10 @@ export function useStageSource({
   const linesRef = useRef<readonly LyricLine[] | null>(null);
   const pastOutroRef = useRef(false);
   const { active, anchor: fixtureAnchor, paused } = playback;
+  // The lines on stage: the fixture's while it plays, else the recognized song's.
+  const lines: readonly LyricLine[] | null = active ? FIXTURE_LINES : timedLines;
 
   useEffect(() => {
-    const lines: readonly LyricLine[] | null = active ? FIXTURE_LINES : timedLines;
     // A different song starts over; a new anchor for the same lines keeps the
     // previous line so the scheduler rewinds or advances from it at once.
     if (linesRef.current !== lines) {
@@ -229,7 +232,7 @@ export function useStageSource({
       if (!lineChanged && pastOutroRef.current === pastOutro) return;
       previousRef.current = next;
       pastOutroRef.current = pastOutro;
-      setSchedule({ line: next, pastOutro });
+      setSchedule({ lines, line: next, pastOutro });
       if (lineChanged) setNowMonotonicMs(now);
     };
     // Tick at once so a start, a seek or a re-recognition lands without
@@ -237,7 +240,14 @@ export function useStageSource({
     tick();
     const id = setInterval(tick, SCHEDULER_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [active, fixtureAnchor, paused, timedLines, timedAnchor]);
+  }, [active, fixtureAnchor, paused, lines, timedAnchor]);
+
+  // The schedule is state the effect above sets after the render, so for the
+  // one render in which the lines change it still belongs to the previous
+  // song. A stale schedule counts as none (the stage is idle until the
+  // scheduler's first tick, as it is for a first recognition), never as the
+  // previous song's line index applied to the new lines.
+  const current = schedule !== null && schedule.lines === lines ? schedule : null;
 
   // The recognition drop (design spec §7): fires once when a song is confirmed,
   // i.e. when the synced track is a new trackId. A re-anchor of the same
@@ -279,28 +289,28 @@ export function useStageSource({
   const fixtureDirection = playback.direction;
 
   const source = useMemo<StageSource>(() => {
-    if (schedule !== null && active) {
+    if (current !== null && active) {
       return {
         kind: 'synced',
         lines: FIXTURE_LINES,
         direction: fixtureDirection,
-        scheduled: schedule.line,
+        scheduled: current.line,
         track: FIXTURE_TRACK,
         dropAtMs,
       };
     }
-    if (schedule !== null && timedLines !== null && recognizedDirection !== null) {
+    if (current !== null && timedLines !== null && recognizedDirection !== null) {
       return {
         kind: 'synced',
         lines: timedLines,
         direction: recognizedDirection,
-        scheduled: schedule.line,
+        scheduled: current.line,
         track: recognizedTrack,
         dropAtMs,
       };
     }
     return { kind: 'idle', direction: recognizedDirection, track: recognizedTrack };
-  }, [active, dropAtMs, fixtureDirection, recognizedDirection, recognizedTrack, schedule, timedLines]);
+  }, [active, current, dropAtMs, fixtureDirection, recognizedDirection, recognizedTrack, timedLines]);
 
   // The line on stage is chorus-like (`accent`, spec §4): the surge's lyric side.
   accentLineRef.current =
@@ -308,5 +318,5 @@ export function useStageSource({
     !source.scheduled.isEmpty &&
     (source.direction.lines[source.scheduled.index]?.accent ?? false);
 
-  return { source, beat, beatValues, nowMonotonicMs, pastOutro: schedule?.pastOutro ?? false };
+  return { source, beat, beatValues, nowMonotonicMs, pastOutro: current?.pastOutro ?? false };
 }
