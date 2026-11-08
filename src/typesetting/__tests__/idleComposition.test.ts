@@ -1,21 +1,56 @@
 import { DEFAULT_IDLE_GLYPHS } from '../../direction/types';
 import { composeIdle } from '../idleComposition';
 import { SIZE_RATIO } from '../layout';
-import type { GlyphMeasure } from '../layout';
+import type { GlyphMeasure, PlacedGlyph } from '../layout';
 
 const vp = { width: 390, height: 844, insetTop: 59, insetBottom: 34 };
 const measure: GlyphMeasure = (_ch, size) => ({ advance: size, ascent: -size * 0.88, descent: size * 0.12 });
 const GLYPHS = 'ABC一二三四五六七八九十';
 const track = { title: 'Night Drive', artist: 'Kei' };
 
-// usable area: x 24..366, y 83..787 (insets + 24 margin); 3 columns x 5 rows.
-const cellOf = (g: { x: number; y: number; sizePx: number }) => {
-  const cx = g.x + g.sizePx / 2;
-  const cy = g.y - g.sizePx * 0.35;
-  return { col: Math.floor((cx - 24) / ((390 - 48) / 3)), row: Math.floor((cy - 83) / (703 / 5)) };
+// Size tiers: xl anchors, l beside them, m two columns away.
+const XL = SIZE_RATIO.xl * 390;
+const L = SIZE_RATIO.l * 390;
+const M = SIZE_RATIO.m * 390;
+const XS = SIZE_RATIO.xs * 390;
+
+// Reserved bands, from MusicageApp's layout (independent of the module's constants):
+// - wordmark row: paddingTop 12 + one 13pt line (~16px) below the top inset.
+const WORDMARK_BOTTOM = 59 + 12 + 16; // 87
+// - controls: content paddingBottom 18 + two 48px button rows with a 16px gap, above the bottom inset.
+const CONTROLS_TOP = 844 - 34 - (18 + 48 + 16 + 48); // 680
+// Caption baseline 12 above the controls; its top is the xs ascent above that.
+const CAPTION_Y = CONTROLS_TOP - 12; // 668
+const CAPTION_TOP = CAPTION_Y - XS * 0.88;
+// Glyph rows: a 24px margin under the wordmark and above the caption, four
+// baselines spread so the xl ascent touches the top and the xl descent the bottom.
+const FIRST_BASELINE = WORDMARK_BOTTOM + 24 + XL * 0.88;
+const LAST_BASELINE = CAPTION_TOP - 24 - XL * 0.12;
+const PITCH = (LAST_BASELINE - FIRST_BASELINE) / 3;
+const BASELINES = [0, 1, 2, 3].map((row) => FIRST_BASELINE + row * PITCH);
+// Columns: left edges on thirds of the 342px usable width from the 24px margin.
+const COLUMN_X = [24, 24 + 114, 24 + 228];
+
+const rowOf = (g: PlacedGlyph) => {
+  const distances = BASELINES.map((b) => Math.abs(g.y - b));
+  return distances.indexOf(Math.min(...distances));
+};
+const colOf = (g: PlacedGlyph) => COLUMN_X.indexOf(g.x);
+const boxOf = (g: PlacedGlyph) => {
+  const { advance, ascent, descent } = measure(g.char, g.sizePx);
+  return { left: g.x, top: g.y + ascent, right: g.x + advance, bottom: g.y + descent };
 };
 const compose = (epoch: number, barInEpoch: number, glyphs: string = GLYPHS) =>
   composeIdle(epoch, barInEpoch, glyphs, vp, null, measure);
+/** Every (epoch, bar) pair over 16 epochs, with the custom and the default glyph strings. */
+function eachComposition(fn: (glyphs: PlacedGlyph[], epoch: number, bar: number) => void) {
+  for (let epoch = 0; epoch < 16; epoch++) {
+    for (let bar = 0; bar < 8; bar++) {
+      fn(compose(epoch, bar).glyphs, epoch, bar);
+      fn(compose(epoch, bar, '').glyphs, epoch, bar);
+    }
+  }
+}
 
 test('is deterministic for the same epoch and bar', () => {
   expect(compose(7, 3)).toEqual(compose(7, 3));
@@ -61,66 +96,104 @@ test('the swapped slot carries a unique index (1000 + absolute bar) so its layer
 });
 
 test('never rotates glyphs sideways (digits and the long-vowel mark included)', () => {
-  for (let epoch = 0; epoch < 8; epoch++) {
-    for (let bar = 0; bar < 8; bar++) {
-      for (const g of compose(epoch, bar, '').glyphs) expect(g.rotateDeg).toBe(0);
-      for (const g of compose(epoch, bar).glyphs) expect(g.rotateDeg).toBe(0);
+  eachComposition((glyphs) => {
+    for (const g of glyphs) expect(g.rotateDeg).toBe(0);
+  });
+});
+
+test('places 5-9 glyphs on distinct cells of the 4-row x 3-column grid, every row occupied', () => {
+  eachComposition((glyphs) => {
+    expect(glyphs.length).toBeGreaterThanOrEqual(5);
+    expect(glyphs.length).toBeLessThanOrEqual(9);
+    const cells = glyphs.map((g) => {
+      const col = colOf(g);
+      expect(col).toBeGreaterThanOrEqual(0);
+      return `${col},${rowOf(g)}`;
+    });
+    expect(new Set(cells).size).toBe(glyphs.length);
+    expect(new Set(glyphs.map(rowOf))).toEqual(new Set([0, 1, 2, 3]));
+  });
+});
+
+test('glyph boxes stay out of the wordmark band, the controls band and the caption line', () => {
+  eachComposition((glyphs) => {
+    for (const g of glyphs) {
+      const box = boxOf(g);
+      expect(box.top).toBeGreaterThanOrEqual(WORDMARK_BOTTOM);
+      expect(box.bottom).toBeLessThanOrEqual(CONTROLS_TOP);
+      expect(box.bottom).toBeLessThanOrEqual(CAPTION_TOP);
+      expect(box.left).toBeGreaterThanOrEqual(24);
+      expect(box.right).toBeLessThanOrEqual(390 - 24);
+    }
+  });
+});
+
+test('glyphs on the same row share one baseline, and the baselines are the four evenly spaced rows', () => {
+  eachComposition((glyphs) => {
+    const byRow = new Map<number, PlacedGlyph[]>();
+    for (const g of glyphs) byRow.set(rowOf(g), [...(byRow.get(rowOf(g)) ?? []), g]);
+    byRow.forEach((members, row) => {
+      expect(members[0]!.y).toBeCloseTo(BASELINES[row]!, 6);
+      for (const g of members) expect(g.y).toBe(members[0]!.y);
+    });
+  });
+});
+
+test('sizes come from the three tiers: one xl anchor per row, l beside it, m two columns away', () => {
+  eachComposition((glyphs) => {
+    for (const g of glyphs) expect([XL, L, M]).toContain(g.sizePx);
+    for (let row = 0; row < 4; row++) {
+      const members = glyphs.filter((g) => rowOf(g) === row);
+      const anchors = members.filter((g) => g.sizePx === XL);
+      expect(anchors).toHaveLength(1);
+      const anchorCol = colOf(anchors[0]!);
+      for (const g of members) {
+        const distance = Math.abs(colOf(g) - anchorCol);
+        expect(g.sizePx).toBe([XL, L, M][distance]);
+      }
+    }
+  });
+});
+
+test('odd epochs line the anchors up in one column; even epochs zigzag them across the columns', () => {
+  const anchorColumns = (epoch: number) => {
+    const glyphs = compose(epoch, 0).glyphs;
+    return [0, 1, 2, 3].map((row) => colOf(glyphs.find((g) => rowOf(g) === row && g.sizePx === XL)!));
+  };
+  const zigzags = [
+    [0, 1, 2, 1],
+    [1, 2, 1, 0],
+    [2, 1, 0, 1],
+    [1, 0, 1, 2],
+  ];
+  const seenAligned = new Set<number>();
+  const seenZigzag = new Set<string>();
+  // 64 epochs: enough that the hashed column / phase cannot plausibly repeat throughout.
+  for (let epoch = 0; epoch < 64; epoch++) {
+    const columns = anchorColumns(epoch);
+    if (epoch % 2 === 1) {
+      expect(new Set(columns).size).toBe(1);
+      seenAligned.add(columns[0]!);
+    } else {
+      expect(zigzags).toContainEqual(columns);
+      seenZigzag.add(columns.join(''));
     }
   }
+  // The hashed variants are actually used, not one fixed shape.
+  expect(seenAligned.size).toBeGreaterThan(1);
+  expect(seenZigzag.size).toBeGreaterThan(1);
 });
 
 test('phaseOffset is (col + row) / 8 of the glyph grid cell', () => {
-  for (let epoch = 0; epoch < 4; epoch++) {
-    for (const g of compose(epoch, 0).glyphs) {
-      const { col, row } = cellOf(g);
-      expect(g.phaseOffset).toBe((col + row) / 8);
-    }
-  }
-});
-
-test('epoch 0 scatters 5-9 glyphs over distinct cells; epoch 1 aligns exactly 3 in a line', () => {
-  const scattered = compose(0, 0).glyphs;
-  expect(scattered.length).toBeGreaterThanOrEqual(5);
-  expect(scattered.length).toBeLessThanOrEqual(9);
-  const cells = scattered.map((g) => {
-    const { col, row } = cellOf(g);
-    expect(col).toBeGreaterThanOrEqual(0);
-    expect(col).toBeLessThan(3);
-    expect(row).toBeGreaterThanOrEqual(0);
-    expect(row).toBeLessThan(5);
-    return `${col},${row}`;
+  eachComposition((glyphs) => {
+    for (const g of glyphs) expect(g.phaseOffset).toBe((colOf(g) + rowOf(g)) / 8);
   });
-  expect(new Set(cells).size).toBe(scattered.length);
-  scattered.forEach((g) => {
-    expect([SIZE_RATIO.s * 390, SIZE_RATIO.m * 390]).toContain(g.sizePx);
-  });
-
-  const aligned = compose(1, 0).glyphs;
-  expect(aligned).toHaveLength(3);
-  const alignedCells = aligned.map(cellOf);
-  const sameCol = alignedCells.every((c) => c.col === alignedCells[0]!.col);
-  const sameRow = alignedCells.every((c) => c.row === alignedCells[0]!.row);
-  expect(sameCol || sameRow).toBe(true);
-});
-
-test('every epoch is one of the two shapes (scattered 5-9 or aligned 3)', () => {
-  for (let epoch = 0; epoch < 8; epoch++) {
-    const { glyphs } = compose(epoch, 0);
-    if (glyphs.length === 3) {
-      const cells = glyphs.map(cellOf);
-      const sameCol = cells.every((c) => c.col === cells[0]!.col);
-      const sameRow = cells.every((c) => c.row === cells[0]!.row);
-      expect(sameCol || sameRow).toBe(true);
-    } else {
-      expect(glyphs.length).toBeGreaterThanOrEqual(5);
-      expect(glyphs.length).toBeLessThanOrEqual(9);
-    }
-  }
 });
 
 test('the composition changes across epochs', () => {
   expect(compose(0, 0).glyphs).not.toEqual(compose(1, 0).glyphs);
   expect(compose(1, 0).glyphs).not.toEqual(compose(2, 0).glyphs);
+  expect(compose(0, 0).glyphs).not.toEqual(compose(2, 0).glyphs);
 });
 
 test('uses only characters from the glyph string, also after swaps', () => {
@@ -133,21 +206,24 @@ test('uses only characters from the glyph string, also after swaps', () => {
   }
 });
 
-test('caption is "artist — title" bottom-left at size xs when a track is given, null otherwise', () => {
-  const { caption } = composeIdle(3, 0, GLYPHS, vp, track, measure);
+test('caption is "artist — title" at the left margin just above the controls, size xs; null without a track', () => {
+  const { caption, glyphs } = composeIdle(3, 0, GLYPHS, vp, track, measure);
   expect(caption).toEqual({
     text: 'Kei — Night Drive',
     x: 24,
-    y: 844 - 34 - 24,
-    sizePx: SIZE_RATIO.xs * 390,
+    y: CAPTION_Y,
+    sizePx: XS,
   });
+  // The caption's box clears the controls, and the rows do not move when a track appears.
+  expect(CAPTION_Y + XS * 0.12).toBeLessThanOrEqual(CONTROLS_TOP);
+  expect(glyphs).toEqual(compose(3, 0).glyphs);
   expect(compose(3, 0).caption).toBeNull();
 });
 
 test('falls back to DEFAULT_IDLE_GLYPHS when the string is empty', () => {
   for (let epoch = 0; epoch < 3; epoch++) {
     const { glyphs } = compose(epoch, 0, '');
-    expect(glyphs.length).toBeGreaterThanOrEqual(3);
+    expect(glyphs.length).toBeGreaterThanOrEqual(5);
     for (const g of glyphs) expect([...DEFAULT_IDLE_GLYPHS]).toContain(g.char);
   }
 });
