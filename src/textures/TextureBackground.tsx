@@ -4,8 +4,9 @@ import { StyleSheet, View } from 'react-native';
 import { useDerivedValue, useFrameCallback, useSharedValue } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
 
+import { INK_TINT_MAX, surgeHighHex } from '../direction/surge';
 import type { Palette, Texture } from '../direction/types';
-import { hexToRgb01, TEXTURE_EFFECTS } from './textureShader';
+import { dropDip, hexToRgb01, mixRgb, TEXTURE_EFFECTS } from './textureShader';
 
 export interface TextureBackgroundProps {
   texture: Texture;
@@ -22,6 +23,22 @@ export interface TextureBackgroundProps {
   high?: SharedValue<number>;
   /** Beat confidence 0..1; gates the pulse response. Ungated (1) when not driven. */
   confidence?: SharedValue<number>;
+  /**
+   * Surge strength 0..1 (design spec §4). Moves the ink and accent uniforms
+   * towards the palette's high accent; the background colour never moves, so
+   * the frame's black base and mean luminance stay put. 0 when not driven.
+   */
+  surge?: SharedValue<number>;
+  /**
+   * The stage clock (LyricStage's `time`), on the same basis as `dropAtMs`.
+   * Only read for the recognition drop; without it there is no dip.
+   */
+  time?: SharedValue<number>;
+  /**
+   * When the recognition drop fired, on the stage clock; null when none has.
+   * The background sinks to black and recovers within DROP_DIP_MS of it.
+   */
+  dropAtMs?: number | null;
   width: number;
   height: number;
   reducedMotion?: boolean;
@@ -43,19 +60,29 @@ export function TextureBackground({
   mid,
   high,
   confidence,
+  surge,
+  time: stageTime,
+  dropAtMs = null,
   width,
   height,
   reducedMotion = false,
 }: TextureBackgroundProps) {
   const time = useSharedValue(0);
+  const noStageTime = useSharedValue(0);
+  const stageTimeValue = stageTime ?? noStageTime;
+  // Under reduced motion the stage clock stands still, so the dip would
+  // freeze mid-way; it is skipped instead.
+  const dropFireMs = stageTime !== undefined && !reducedMotion && dropAtMs !== null ? dropAtMs : null;
   const restLow = useSharedValue(0);
   const restMid = useSharedValue(0);
   const restHigh = useSharedValue(0);
   const ungated = useSharedValue(1);
+  const restSurge = useSharedValue(0);
   const lowValue = low ?? restLow;
   const midValue = mid ?? restMid;
   const highValue = high ?? restHigh;
   const confidenceValue = confidence ?? ungated;
+  const surgeValue = surge ?? restSurge;
 
   const frame = useFrameCallback((info) => {
     'worklet';
@@ -76,10 +103,13 @@ export function TextureBackground({
       background: hexToRgb01(palette.background),
       ink: hexToRgb01(palette.ink),
       accent: hexToRgb01(palette.accent),
+      high: hexToRgb01(surgeHighHex(palette)),
     }),
-    [palette.background, palette.ink, palette.accent],
+    [palette],
   );
 
+  // The ink and accent move with the surge (spec §6: on a slow follower, by a
+  // small amount); the background is passed through untouched.
   const uniforms = useDerivedValue(
     () => ({
       iResolution: [width, height],
@@ -90,11 +120,23 @@ export function TextureBackground({
       iMid: midValue.value,
       iHigh: highValue.value,
       iConfidence: confidenceValue.value,
+      iDrop: dropFireMs === null ? 0 : dropDip(stageTimeValue.value - dropFireMs),
       iBackground: colors.background,
-      iInk: colors.ink,
-      iAccent: colors.accent,
+      iInk: mixRgb(colors.ink, colors.high, surgeValue.value * INK_TINT_MAX),
+      iAccent: mixRgb(colors.accent, colors.high, surgeValue.value),
     }),
-    [width, height, colors, lowValue, midValue, highValue, confidenceValue],
+    [
+      width,
+      height,
+      colors,
+      lowValue,
+      midValue,
+      highValue,
+      confidenceValue,
+      surgeValue,
+      stageTimeValue,
+      dropFireMs,
+    ],
   );
 
   return (

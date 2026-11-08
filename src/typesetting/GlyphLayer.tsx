@@ -35,6 +35,13 @@ export interface GlyphLayerProps {
   entrance: Entrance;
   hold: Hold;
   palette: Palette;
+  /**
+   * The palette's ink and accent as they stand now, interpolated on the UI
+   * thread with the surge (surgeColors). When omitted the palette's static
+   * strings are used.
+   */
+  inkValue?: SharedValue<string> | null;
+  accentValue?: SharedValue<string> | null;
   /** Draw emphasized glyphs in `palette.accent` instead of `palette.ink`. */
   accent: boolean;
   /**
@@ -65,6 +72,8 @@ export const GlyphLayer = memo(function GlyphLayer({
   glyphs,
   fontFor,
   palette,
+  inkValue = null,
+  accentValue = null,
   accent,
   testIDPrefix = 'glyph',
   ...motion
@@ -86,6 +95,8 @@ export const GlyphLayer = memo(function GlyphLayer({
             font={fontFor(glyph.sizePx)}
             ink={palette.ink}
             accentColor={palette.accent}
+            inkValue={inkValue}
+            accentValue={accentValue}
             emphasisOrder={emphasisOrder}
             emphasisCount={emphasisCount}
             testID={`${testIDPrefix}-${glyph.index}`}
@@ -125,6 +136,8 @@ interface AnimatedGlyphProps extends Pick<
   font: SkFont;
   ink: string;
   accentColor: string;
+  inkValue: SharedValue<string> | null;
+  accentValue: SharedValue<string> | null;
   /** Rank among the line's emphasized glyphs; -1 when this glyph is not emphasized. */
   emphasisOrder: number;
   /** How many glyphs of the line are emphasized. */
@@ -144,6 +157,8 @@ function AnimatedGlyph({
   font,
   ink,
   accentColor,
+  inkValue,
+  accentValue,
   emphasisOrder,
   emphasisCount,
   testID,
@@ -221,14 +236,28 @@ function AnimatedGlyph({
   // Emphasis migrates: across the line's span the emphasized glyphs take the
   // accent colour one after another (each ramps over its own slice of the
   // progress). This states where inside the line we are, in line units only —
-  // never a guess at which word is being sung.
+  // never a guess at which word is being sung. The ink and accent themselves
+  // are the stage's surge-interpolated colours when it provides them.
   const color = useDerivedValue<string>(() => {
-    if (!accent || !emphasized || emphasisOrder < 0) return ink;
-    if (lineEndsAtMs === null || lineEndsAtMs <= lineStartedAtMs) return accentColor;
+    const inkNow = inkValue === null ? ink : inkValue.value;
+    if (!accent || !emphasized || emphasisOrder < 0) return inkNow;
+    const accentNow = accentValue === null ? accentColor : accentValue.value;
+    if (lineEndsAtMs === null || lineEndsAtMs <= lineStartedAtMs) return accentNow;
     const progress = clamp01((time.value - lineStartedAtMs) / (lineEndsAtMs - lineStartedAtMs));
     const local = clamp01(progress * emphasisCount - emphasisOrder);
-    return interpolateColor(local, [0, 1], [ink, accentColor]);
-  }, [accent, emphasized, emphasisOrder, emphasisCount, ink, accentColor, lineEndsAtMs, lineStartedAtMs]);
+    return interpolateColor(local, [0, 1], [inkNow, accentNow]);
+  }, [
+    accent,
+    emphasized,
+    emphasisOrder,
+    emphasisCount,
+    ink,
+    accentColor,
+    inkValue,
+    accentValue,
+    lineEndsAtMs,
+    lineStartedAtMs,
+  ]);
   // The stroke twin's width rides the beat's low band (groove analysis 4.3),
   // under the same low-confidence gate as every beat-derived motion.
   const strokeWidth = useDerivedValue<number>(() => {

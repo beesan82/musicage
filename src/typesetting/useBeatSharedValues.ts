@@ -24,6 +24,13 @@ export interface BeatSharedValues {
   mid: SharedValue<number>;
   high: SharedValue<number>;
   /**
+   * Surge strength 0..1 (design spec §4): the acoustic surge detection OR
+   * the accent line on stage, smoothed. Written by the stage source on every
+   * ear frame (see useStageSource), not by `write`. Drives the beat-head
+   * glow ceiling and the palette's continuous change.
+   */
+  surge: SharedValue<number>;
+  /**
    * Writes one ear frame and the beat state it produced straight to the
    * shared values. Called on every frame from the stage source's subscribe,
    * independent of the throttled React publish: assigning shared values never
@@ -48,6 +55,7 @@ export function useBeatSharedValues(): BeatSharedValues {
   const low = useSharedValue(0);
   const mid = useSharedValue(0);
   const high = useSharedValue(0);
+  const surge = useSharedValue(0);
 
   const envelope = useRef({ low: 0, mid: 0, high: 0, atMs: Number.NaN });
   const previousPulse = useRef(0);
@@ -101,6 +109,7 @@ export function useBeatSharedValues(): BeatSharedValues {
       low,
       mid,
       high,
+      surge,
       write,
     };
   }, [
@@ -115,5 +124,6 @@ export function useBeatSharedValues(): BeatSharedValues {
     periodMs,
     phase,
     pulse,
+    surge,
   ]);
 }

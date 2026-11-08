@@ -5,8 +5,10 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import type { BeatState } from '../../beat/types';
 import { directSongByRules } from '../../direction/ruleBasedDirector';
+import { INK_TINT_MAX } from '../../direction/surge';
 import type { SongDirection } from '../../direction/types';
 import type { LyricLine } from '../../recognition/types';
+import { dropDip, hexToRgb01 } from '../../textures/textureShader';
 import * as fonts from '../fonts';
 import { anchoredTime, LyricStage } from '../LyricStage';
 import type { LyricStageProps } from '../LyricStage';
@@ -35,6 +37,7 @@ const beatValues: BeatSharedValues = {
   low: sv(0),
   mid: sv(0),
   high: sv(0),
+  surge: sv(0),
   write: () => {},
 };
 
@@ -64,6 +67,7 @@ const beat: BeatState = {
   phase: 0,
   pulse: 0,
   bar: 2,
+  barConfidence: 0,
   nextBeatAtMs: null,
   energy: 0.3,
   silence: false,
@@ -72,7 +76,20 @@ const beat: BeatState = {
 type Node = { type: unknown; props: Record<string, any>; queryAll: (p: (n: Node) => boolean) => Node[] };
 const textsIn = (node: Node) => node.queryAll((n) => n.type === 'skText');
 
-afterEach(() => jest.restoreAllMocks());
+// Reanimated's jest runtime hands its UI-thread work (starting and stopping
+// the mappers behind useDerivedValue, the useFrameCallback loop that advances
+// the stage clock) to `setTimeout(…, 0)`. On real timers that work lands
+// whenever the event loop reaches it: sometimes inside the next render,
+// sometimes after the assertions, so a spy on the motion could see a layer
+// that had already left the stage, or a clock that had drifted by a frame.
+// Fake timers keep it pending until a test flushes it on purpose.
+beforeEach(() => {
+  jest.useFakeTimers();
+});
+afterEach(() => {
+  jest.useRealTimers();
+  jest.restoreAllMocks();
+});
 
 test('renders the stage and the texture background in idle', async () => {
   const { getByTestId, getAllByTestId } = await renderStage({
@@ -325,7 +342,7 @@ test('keeps the previous line as an exiting layer on a line change, then drops i
 
   // The exit of a drop line runs 320ms (+80ms of slack in the stage's timer).
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 600));
+    jest.advanceTimersByTime(600);
   });
   expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
   expect(view.getAllByTestId(/^glyph-/)).toHaveLength(3);
@@ -370,6 +387,277 @@ test('passes the scheduler landing through to the line motion', async () => {
   const inputs = spy.mock.calls.map(([input]) => input as motion.MotionInput);
   expect(inputs.length).toBeGreaterThan(0);
   expect(inputs.some((i) => i.anticipationMs === 200 && i.elapsedMs === -100)).toBe(true);
+});
+
+describe('the recognition drop', () => {
+  // Every line xl so no context lines join the glyph inputs; rise so the
+  // drop override on the first line is visible.
+  const dropDirection: SongDirection = {
+    ...direction,
+    lines: direction.lines.map((line) => ({
+      ...line,
+      size: 'xl' as const,
+      entrance: 'rise' as const,
+      hold: 'still' as const,
+    })),
+  };
+  // A 120 BPM grid whose next head is 300 ms after the fire at 10_000.
+  const gridValues: BeatSharedValues = {
+    ...beatValues,
+    nextBeatAtMs: sv(10_300),
+    periodMs: sv(500),
+    confidence: sv(0.9),
+  };
+  const idleSource = { kind: 'idle', direction: null, track: null } as const;
+  const track = { title: '架空の歌', artist: '架空の人' };
+  const syncedAt = (index: number, startedAtMs: number, dropAtMs: number | null): LyricStageProps['source'] => ({
+    kind: 'synced',
+    lines: toLines(TEXTS),
+    direction: dropDirection,
+    scheduled: { index, startedAtMs, isEmpty: index < 0 },
+    track,
+    dropAtMs,
+  });
+  const stage = (
+    source: LyricStageProps['source'],
+    nowMonotonicMs: number,
+    extra: Partial<LyricStageProps> = {},
+  ) => inProvider(<LyricStage beatValues={gridValues} source={source} beat={beat} nowMonotonicMs={nowMonotonicMs} {...extra} />);
+  const inputsOf = (spy: jest.SpyInstance) =>
+    spy.mock.calls.map(([input]) => input as motion.MotionInput);
+  // Runs the UI-thread work queued by the renders so far, without moving the
+  // stage clock: every glyph layer mounted, re-keyed or re-parameterised since
+  // the last flush starts its mapper and evaluates `glyphTransform` once with
+  // the clock still at the render's `nowMonotonicMs`. (The frame loop this
+  // also starts only ticks on a later advance.) Flushing after each render
+  // keeps a layer's evaluation out of the next render's spy.
+  const flushUI = () =>
+    act(async () => {
+      jest.advanceTimersByTime(0);
+    });
+  const settle = () =>
+    act(async () => {
+      jest.advanceTimersByTime(1000);
+    });
+  const uniformsOf = (container: Node) => {
+    const [shader] = container.queryAll(
+      (node) => (node.props as { uniforms?: { value?: unknown } })?.uniforms?.value !== undefined,
+    );
+    return (shader!.props as { uniforms: { value: Record<string, number> } }).uniforms.value;
+  };
+
+  test('scatters the idle glyphs on the next beat head while the first line drops onto it', async () => {
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    const view = await render(stage(idleSource, 10_000));
+    await flushUI();
+    const idleCount = view.getAllByTestId(/^glyph-/).length;
+    spy.mockClear();
+
+    await view.rerender(stage(syncedAt(0, 10_000, 10_000), 10_000));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-idle-glyph-/)).toHaveLength(idleCount);
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+    const inputs = inputsOf(spy);
+    const exits = inputs.filter((i) => i.exiting);
+    const line = inputs.filter((i) => !i.exiting);
+    expect(exits.length).toBeGreaterThan(0);
+    expect(line.length).toBeGreaterThan(0);
+    for (const i of exits) {
+      expect(i.entrance).toBe('scatter');
+      expect(i.elapsedMs).toBe(-300);
+    }
+    for (const i of line) {
+      expect(i.entrance).toBe('drop');
+      expect(i.anticipationMs).toBe(300);
+      expect(i.elapsedMs).toBe(-300);
+    }
+
+    // 300 ms to the head, a 420 ms scatter and 80 ms of slack: then the idle exit is gone.
+    await settle();
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+  });
+
+  test('fires once: a later line keeps its own entrance and no idle exit reappears', async () => {
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    const view = await render(stage(idleSource, 10_000));
+    await view.rerender(stage(syncedAt(0, 10_000, 10_000), 10_000));
+    await settle();
+    spy.mockClear();
+
+    // The line layer keeps its glyph components (keyed by glyph index) across
+    // the line change, so their motion is re-parameterised, not remounted:
+    // the flush is what evaluates it for the new line.
+    await view.rerender(stage(syncedAt(1, 14_000, 10_000), 14_000));
+    await flushUI();
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    const line = inputsOf(spy).filter((i) => !i.exiting);
+    expect(line.length).toBeGreaterThan(0);
+    for (const i of line) {
+      expect(i.entrance).toBe('rise');
+      expect(i.anticipationMs).toBe(0);
+    }
+  });
+
+  test('when the first line is still ahead, the caption traces in and a fresh idle rises after the scatter', async () => {
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    const view = await render(stage(idleSource, 10_000));
+    await flushUI();
+    const idleCount = view.getAllByTestId(/^glyph-/).length;
+    spy.mockClear();
+
+    await view.rerender(stage(syncedAt(-1, 10_000, 10_000), 10_000));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-idle-glyph-/)).toHaveLength(idleCount);
+    expect(view.queryByTestId('idle-caption')).toBeNull();
+    const captionText = view
+      .getAllByTestId(/^idle-caption-glyph-/)
+      .map((g) => textsIn(g as unknown as Node)[0]?.props.text)
+      .join('');
+    expect(captionText).toBe('架空の人—架空の歌');
+    const inputs = inputsOf(spy);
+    const caption = inputs.filter((i) => i.entrance === 'trace');
+    expect(caption.length).toBeGreaterThan(0);
+    for (const i of caption) expect(i.elapsedMs).toBe(-300);
+    const rising = inputs.filter((i) => !i.exiting && i.entrance === 'rise');
+    expect(rising.length).toBeGreaterThan(0);
+    for (const i of rising) expect(i.elapsedMs).toBe(-(300 + 420));
+  });
+
+  test('dips the background from the fire time', async () => {
+    // 100 ms after the fire (the stage clock starts at nowMonotonicMs).
+    const view = await render(stage(syncedAt(0, 10_000, 10_000), 10_100));
+    expect(uniformsOf(view.container as unknown as Node).iDrop).toBeCloseTo(dropDip(100), 5);
+    await view.unmount();
+
+    const none = await render(stage(syncedAt(0, 10_000, null), 10_100));
+    expect(uniformsOf(none.container as unknown as Node).iDrop).toBe(0);
+  });
+
+  test('under reduced motion the drop is skipped entirely', async () => {
+    const view = await render(stage(idleSource, 10_100, { reducedMotion: true }));
+    await view.rerender(stage(syncedAt(-1, 10_000, 10_000), 10_100, { reducedMotion: true }));
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    expect(view.queryAllByTestId(/^idle-caption-glyph-/)).toHaveLength(0);
+    expect(view.getByTestId('idle-caption').props.text).toBe('架空の人 — 架空の歌');
+    expect(uniformsOf(view.container as unknown as Node).iDrop).toBe(0);
+  });
+});
+
+describe('the surge: beat-head glow and the palette change', () => {
+  const palette = { background: '#000000', ink: '#EEEEEE', accent: '#FF0000', accentHigh: '#FFFF00' };
+  // Every line accent with its first glyph emphasized, entered with cut and
+  // held still so the glow's motion is identity.
+  const accented: SongDirection = {
+    ...direction,
+    palette,
+    lines: direction.lines.map((line) => ({
+      ...line,
+      accent: true,
+      emphasis: [0],
+      entrance: 'cut' as const,
+      hold: 'still' as const,
+    })),
+  };
+  const withSurge = (surge: number, lastOnsetAtMs: number, confidence = 0.9): BeatSharedValues => ({
+    ...beatValues,
+    surge: sv(surge),
+    lastOnsetAtMs: sv(lastOnsetAtMs),
+    confidence: sv(confidence),
+  });
+  const blurOf = (glow: Node) => glow.queryAll((n) => n.type === 'skBlurImageFilter')[0]!;
+  const renderWith = (values: BeatSharedValues, nowMonotonicMs: number, extra: Partial<LyricStageProps> = {}) =>
+    render(
+      inProvider(
+        <LyricStage
+          beatValues={values}
+          source={synced(TEXTS, 0, accented)}
+          beat={beat}
+          nowMonotonicMs={nowMonotonicMs}
+          {...extra}
+        />,
+      ),
+    );
+
+  test('in a surge, on a beat head, only the emphasized glyph gets a blurred twin within the 10 px limit', async () => {
+    // The stage clock starts at 100; the onset was at 100, so the pulse is fresh.
+    const view = await renderWith(withSurge(1, 100), 100);
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+    const glows = view.getAllByTestId(/^glow-/) as unknown as Node[];
+    expect(glows).toHaveLength(1);
+    expect(glows[0]!.props.testID).toBe('glow-0');
+    expect(glows[0]!.props.opacity.value).toBeGreaterThan(0.5);
+    const blur = blurOf(glows[0]!);
+    expect(blur.props.blur.value).toBeGreaterThan(0);
+    expect(blur.props.blur.value).toBeLessThanOrEqual(10);
+    // The twin is painted in the surge accent, which at full surge is the high accent.
+    const text = textsIn(glows[0]!)[0]!;
+    expect(text.props.color.value).toBe(interpolateColor(1, [0, 1], ['#FF0000', '#FFFF00']));
+    await view.unmount();
+  });
+
+  test('outside a surge the glow is dark even on a beat head', async () => {
+    const view = await renderWith(withSurge(0, 100), 100);
+    const glow = view.getAllByTestId(/^glow-/)[0] as unknown as Node;
+    expect(glow.props.opacity.value).toBe(0);
+    expect(blurOf(glow).props.blur.value).toBe(0);
+  });
+
+  test('the glow is a one-off decay from the beat head: a second later it is out', async () => {
+    const view = await renderWith(withSurge(1, 100), 1100);
+    const glow = view.getAllByTestId(/^glow-/)[0] as unknown as Node;
+    expect(glow.props.opacity.value).toBeLessThan(0.01);
+  });
+
+  test('the glow is quartered while the beat is not trusted', async () => {
+    const trusted = await renderWith(withSurge(1, 100, 0.9), 100);
+    const full = (trusted.getAllByTestId(/^glow-/)[0] as unknown as Node).props.opacity.value as number;
+    await trusted.unmount();
+    const doubtful = await renderWith(withSurge(1, 100, 0.3), 100);
+    const damped = (doubtful.getAllByTestId(/^glow-/)[0] as unknown as Node).props.opacity.value as number;
+    expect(damped).toBeCloseTo(full / 4, 5);
+  });
+
+  test('no glow under reduced motion, and none for a line without emphasis', async () => {
+    const still = await renderWith(withSurge(1, 100), 100, { reducedMotion: true });
+    expect(still.queryAllByTestId(/^glow-/)).toHaveLength(0);
+    await still.unmount();
+
+    const plain: SongDirection = {
+      ...accented,
+      lines: accented.lines.map((line) => ({ ...line, emphasis: [] })),
+    };
+    const none = await render(
+      inProvider(
+        <LyricStage
+          beatValues={withSurge(1, 100)}
+          source={synced(TEXTS, 0, plain)}
+          beat={beat}
+          nowMonotonicMs={100}
+        />,
+      ),
+    );
+    expect(none.queryAllByTestId(/^glow-/)).toHaveLength(0);
+    expect(none.getAllByTestId(/^glyph-/)).toHaveLength(4);
+  });
+
+  test('the ink and accent of the glyphs move with the surge; the background uniform does not', async () => {
+    const view = await renderWith(withSurge(1, 0), 100);
+    const colors = view
+      .getAllByTestId(/^glyph-/)
+      .map((g) => textsIn(g as unknown as Node)[0]!.props.color.value as string);
+    // The line ends at 4000 ms, so the emphasized glyph is mid-migration
+    // (neither colour exactly); the plain glyphs show the surge ink.
+    const inkHigh = interpolateColor(INK_TINT_MAX, [0, 1], ['#EEEEEE', '#FFFF00']);
+    expect(colors.slice(1)).toEqual([inkHigh, inkHigh, inkHigh]);
+    expect(colors[0]).not.toBe('#EEEEEE');
+    const [shader] = (view.container as unknown as Node).queryAll(
+      (node) => (node.props as { uniforms?: { value?: unknown } })?.uniforms?.value !== undefined,
+    );
+    const uniforms = (shader!.props as { uniforms: { value: Record<string, number[]> } }).uniforms.value;
+    expect(uniforms.iBackground).toEqual(hexToRgb01('#000000'));
+    expect(uniforms.iAccent!.map((v) => +v.toFixed(3))).toEqual([1, 1, 0]);
+  });
 });
 
 describe('anchoredTime', () => {

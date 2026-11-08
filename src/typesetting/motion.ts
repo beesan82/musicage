@@ -109,6 +109,13 @@ function staggerMs(
   return 0;
 }
 
+/** How long an entrance runs for the whole line: the duration plus the last glyph's stagger. */
+export function entranceDurationMs(entrance: Entrance, glyphCount: number, periodMs = 0): number {
+  'worklet';
+  const last = glyphCount > 0 ? glyphCount - 1 : 0;
+  return ENTRANCE_DURATION_MS[entrance] + staggerMs(entrance, last, glyphCount, periodMs);
+}
+
 export function entranceDone(
   entrance: Entrance,
   glyphCount: number,
@@ -116,8 +123,7 @@ export function entranceDone(
   periodMs = 0,
 ): boolean {
   'worklet';
-  const last = glyphCount > 0 ? glyphCount - 1 : 0;
-  return elapsedMs >= ENTRANCE_DURATION_MS[entrance] + staggerMs(entrance, last, glyphCount, periodMs);
+  return elapsedMs >= entranceDurationMs(entrance, glyphCount, periodMs);
 }
 
 /**
@@ -232,10 +238,43 @@ export function exitDurationMs(entrance: Entrance, glyphCount: number, periodMs:
   return periodMs > 0 ? Math.min(natural, periodMs) : natural;
 }
 
-/** The transform of a leaving glyph; `input.elapsedMs` is the time since the exit began. */
+/**
+ * The longest the recognition drop waits for a beat head. With the scatter
+ * (at most one beat, capped at 420 ms) and the first line's settle this keeps
+ * the whole transition inside the spec's two seconds even at 60 BPM.
+ */
+export const DROP_MAX_WAIT_MS = 1000;
+
+/**
+ * When the recognition drop lands: the first beat head at or after the fire
+ * time, so the idle glyphs scatter and the first line drops on the beat. A
+ * stale prediction is carried forward by whole periods. Without a grid, with
+ * low confidence (never look synced on a guess), or when the head is further
+ * than DROP_MAX_WAIT_MS away, the drop lands at once.
+ */
+export function dropHeadMs(
+  fireAtMs: number,
+  nextBeatAtMs: number,
+  periodMs: number,
+  confidence: number,
+): number {
+  'worklet';
+  if (nextBeatAtMs <= 0 || periodMs <= 0 || confidence < 0.5) return fireAtMs;
+  let head = nextBeatAtMs;
+  if (head < fireAtMs) head += Math.ceil((fireAtMs - head) / periodMs) * periodMs;
+  return head - fireAtMs > DROP_MAX_WAIT_MS ? fireAtMs : head;
+}
+
+/**
+ * The transform of a leaving glyph; `input.elapsedMs` is the time since the
+ * exit began. A negative elapsed (the exit clock is anchored ahead, as the
+ * recognition drop anchors the idle glyphs' scatter at the next beat head)
+ * holds the glyph exactly in place until then.
+ */
 function exitTransform(input: MotionInput): GlyphTransform {
   'worklet';
   const zero: GlyphTransform = { dx: 0, dy: 0, scale: 1, opacity: 0, rotateDeg: 0 };
+  if (input.elapsedMs < 0) return { dx: 0, dy: 0, scale: 1, opacity: 1, rotateDeg: 0 };
   const duration = exitDurationMs(input.entrance, input.glyphCount, input.periodMs);
   if (duration <= 0) return zero;
   const p = clamp01(input.elapsedMs / duration);

@@ -1,6 +1,8 @@
 import {
   derivePhase,
   derivePulse,
+  DROP_MAX_WAIT_MS,
+  dropHeadMs,
   ENTRANCE_DURATION_MS,
   entranceDone,
   exitDurationMs,
@@ -434,5 +436,36 @@ describe('exits (derived from the entrance)', () => {
     expect(
       at({ entrance: 'drop', exiting: true, elapsedMs: 0, reducedMotion: true }).opacity,
     ).toBe(0);
+  });
+});
+
+describe('the recognition drop', () => {
+  test('dropHeadMs is the first beat head at or after the fire time', () => {
+    expect(dropHeadMs(10_000, 10_300, 500, 0.9)).toBe(10_300);
+    expect(dropHeadMs(10_000, 10_000, 500, 0.9)).toBe(10_000);
+    // A stale prediction is carried forward by whole periods.
+    expect(dropHeadMs(10_000, 9_400, 500, 0.9)).toBe(10_400);
+  });
+
+  test('without a grid, or with low confidence, the drop is immediate', () => {
+    expect(dropHeadMs(10_000, 0, 0, 1)).toBe(10_000);
+    expect(dropHeadMs(10_000, 10_300, 500, 0.3)).toBe(10_000);
+  });
+
+  test('the wait for the head is capped so the whole drop stays inside two seconds', () => {
+    expect(DROP_MAX_WAIT_MS).toBeLessThanOrEqual(1000);
+    expect(dropHeadMs(10_000, 10_000 + DROP_MAX_WAIT_MS, 1500, 0.9)).toBe(10_000 + DROP_MAX_WAIT_MS);
+    expect(dropHeadMs(10_000, 10_000 + DROP_MAX_WAIT_MS + 1, 1500, 0.9)).toBe(10_000);
+  });
+
+  test('the idle exit holds still until the beat head, then scatters', () => {
+    // The exit clock is anchored at the head: before it (negative elapsed)
+    // the glyphs are exactly where they were, fully opaque.
+    expect(at({ entrance: 'scatter', exiting: true, elapsedMs: -200, periodMs: 500 })).toEqual(identity);
+    expect(at({ entrance: 'scatter', exiting: true, elapsedMs: -1, periodMs: 500, glyphIndex: 3 })).toEqual(identity);
+    const mid = at({ entrance: 'scatter', exiting: true, elapsedMs: 210, periodMs: 500, glyphIndex: 2 });
+    expect(mid.opacity).toBeCloseTo(0.5, 5);
+    expect(Math.abs(mid.dx) + Math.abs(mid.dy)).toBeGreaterThan(0);
+    expect(at({ entrance: 'scatter', exiting: true, elapsedMs: 420, periodMs: 500 }).opacity).toBe(0);
   });
 });

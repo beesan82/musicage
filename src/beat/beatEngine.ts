@@ -31,6 +31,26 @@ const SILENCE_CONFIDENCE_DECAY = Math.exp(-GRID_MS / 1000);
 const OCTAVE_TOLERANCE = 0.7;
 const BEATS_PER_BAR = 4;
 
+// Bar-head (downbeat) estimation, design spec §3 (2026-11-07): the low-band
+// onset strength is accumulated per beat-in-bar slot over a 4-beat cycle and
+// the strongest slot is taken as the bar head once it stands out clearly.
+// Each slot forgets with this factor per beat (about 8 bars of memory).
+const BAR_HISTOGRAM_DECAY = Math.exp(-1 / (8 * BEATS_PER_BAR));
+// A slot is a bar head when it exceeds the runner-up slot by this fraction of
+// itself; an established head is kept until its margin drops below the lower
+// value (hysteresis against flip-flopping). A 4/4 click with equal beats has a
+// margin near 0; a 3/4 accent walks through all four slots and peaks near 0.26
+// while the first rotations accumulate, so the lock threshold sits well above.
+const BAR_LOCK_MARGIN = 0.4;
+const BAR_UNLOCK_MARGIN = 0.2;
+// No estimate before two bars of beats have passed and the winning slot has
+// received at least two onsets, so one loud hit does not pick a head.
+const BAR_MIN_BEATS = 2 * BEATS_PER_BAR;
+const BAR_MIN_SLOT_ONSETS = 2;
+// A tempo re-lock this far from the previous period renumbers the beats, so
+// the slots accumulated so far no longer mean the same thing.
+const BAR_TEMPO_RESET_RATIO = 0.1;
+
 interface Tempo {
   periodMs: number;
   confidence: number;
@@ -133,17 +153,97 @@ export const createBeatEngine = (options: BeatEngineOptions = {}): BeatEngine =>
   let silence = false;
   let lastOnsetMs: number | null = null;
   let lastGridMs = 0;
+  // Bar-head estimation: low-onset strength per beat-in-bar slot (decayed per
+  // beat), the undecayed onset count per slot, beats seen since the histogram
+  // was last cleared, the slot currently trusted as the bar head (null = none,
+  // bars count every four beats from the lock) and its margin.
+  const barHistogram: number[] = new Array<number>(BEATS_PER_BAR).fill(0);
+  const barSlotOnsets: number[] = new Array<number>(BEATS_PER_BAR).fill(0);
+  let barHistogramBeats = 0;
+  let downbeatSlot: number | null = null;
+  let barConfidence = 0;
+  // Keeps `bar` continuous across re-alignments of the head: the count never
+  // jumps, the next increment simply lands on the next head of the new
+  // alignment (one bar is then shorter or longer than four beats, once).
+  let barOrigin = 0;
+
+  const rawBar = () => Math.floor((beats - (downbeatSlot ?? 0)) / BEATS_PER_BAR);
+  const barCount = () => Math.max(0, barOrigin + rawBar());
 
   const state = (): BeatState => ({
     bpm: periodMs === null ? null : 60000 / periodMs,
     confidence,
     phase: phase < 0 ? phase + 1 : phase,
     pulse,
-    bar: Math.floor(beats / BEATS_PER_BAR),
+    bar: barCount(),
+    barConfidence,
     nextBeatAtMs: periodMs === null ? null : lastGridMs - phase * periodMs + periodMs,
     energy,
     silence,
   });
+
+  // How clearly `slot` leads the other three: (top − runner-up) / top, 0..1.
+  const slotMargin = (slot: number) => {
+    const top = barHistogram[slot]!;
+    if (top <= 0) return 0;
+    let other = 0;
+    for (let k = 0; k < BEATS_PER_BAR; k += 1) {
+      if (k !== slot && barHistogram[k]! > other) other = barHistogram[k]!;
+    }
+    return clamp01((top - other) / top);
+  };
+
+  const realignBars = (slot: number | null) => {
+    const current = barCount();
+    downbeatSlot = slot;
+    barOrigin = current - rawBar();
+  };
+
+  const clearBarHistogram = () => {
+    barHistogram.fill(0);
+    barSlotOnsets.fill(0);
+    barHistogramBeats = 0;
+    if (downbeatSlot !== null) realignBars(null);
+    barConfidence = 0;
+  };
+
+  const advanceBeat = () => {
+    beats += 1;
+    barHistogramBeats += 1;
+    for (let k = 0; k < BEATS_PER_BAR; k += 1) {
+      barHistogram[k] = (barHistogram[k] ?? 0) * BAR_HISTOGRAM_DECAY;
+    }
+  };
+
+  // Called on each onset the engine locked onto, after the phase pull has
+  // settled which beat the onset belongs to.
+  const accumulateBarHead = (lowOnset: number) => {
+    const slot = beats % BEATS_PER_BAR;
+    barHistogram[slot] = (barHistogram[slot] ?? 0) + lowOnset;
+    barSlotOnsets[slot] = (barSlotOnsets[slot] ?? 0) + 1;
+
+    if (downbeatSlot !== null) {
+      const margin = slotMargin(downbeatSlot);
+      if (margin >= BAR_UNLOCK_MARGIN) {
+        barConfidence = margin;
+        return;
+      }
+    }
+    let best = 0;
+    for (let k = 1; k < BEATS_PER_BAR; k += 1) {
+      if (barHistogram[k]! > barHistogram[best]!) best = k;
+    }
+    const ready =
+      barHistogramBeats >= BAR_MIN_BEATS && barSlotOnsets[best]! >= BAR_MIN_SLOT_ONSETS;
+    const margin = slotMargin(best);
+    if (ready && margin >= BAR_LOCK_MARGIN) {
+      if (best !== downbeatSlot) realignBars(best);
+      barConfidence = margin;
+    } else {
+      if (downbeatSlot !== null) realignBars(null);
+      barConfidence = 0;
+    }
+  };
 
   const detectOnset = (strength: number) => {
     if (onsets.length < MIN_ONSET_HISTORY_SAMPLES) return false;
@@ -155,7 +255,8 @@ export const createBeatEngine = (options: BeatEngineOptions = {}): BeatEngine =>
     lastGridMs = timeMs;
     const lowAverage =
       recentLows.length === 0 ? low : recentLows.reduce((total, value) => total + value, 0) / recentLows.length;
-    const strength = 0.7 * Math.max(0, low - lowAverage) + 0.3 * Math.max(0, rms - previousRms);
+    const lowOnset = Math.max(0, low - lowAverage);
+    const strength = 0.7 * lowOnset + 0.3 * Math.max(0, rms - previousRms);
     recentLows = [...recentLows, low].slice(-LOW_AVERAGE_SAMPLES);
     previousRms = rms;
 
@@ -169,7 +270,7 @@ export const createBeatEngine = (options: BeatEngineOptions = {}): BeatEngine =>
       phase += GRID_MS / periodMs;
       while (phase >= 1) {
         phase -= 1;
-        beats += 1;
+        advanceBeat();
       }
     }
 
@@ -191,9 +292,10 @@ export const createBeatEngine = (options: BeatEngineOptions = {}): BeatEngine =>
         if (phase < 0.5) {
           phase *= 1 - PHASE_PULL;
         } else {
-          beats += 1;
+          advanceBeat();
           phase = (phase - 1) * (1 - PHASE_PULL);
         }
+        accumulateBarHead(lowOnset);
       }
     }
 
@@ -204,6 +306,8 @@ export const createBeatEngine = (options: BeatEngineOptions = {}): BeatEngine =>
       if (tempo) {
         if (periodMs === null) {
           phase = lastOnsetMs === null ? 0 : ((timeMs - lastOnsetMs) / tempo.periodMs) % 1;
+        } else if (Math.abs(tempo.periodMs - periodMs) > BAR_TEMPO_RESET_RATIO * periodMs) {
+          clearBarHistogram();
         }
         periodMs = tempo.periodMs;
         confidence = tempo.confidence;
@@ -228,6 +332,12 @@ export const createBeatEngine = (options: BeatEngineOptions = {}): BeatEngine =>
     silence = false;
     lastOnsetMs = null;
     lastGridMs = 0;
+    barHistogram.fill(0);
+    barSlotOnsets.fill(0);
+    barHistogramBeats = 0;
+    downbeatSlot = null;
+    barConfidence = 0;
+    barOrigin = 0;
   };
 
   const push = (features: EarFeatures): BeatState => {

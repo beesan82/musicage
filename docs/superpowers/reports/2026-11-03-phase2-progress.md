@@ -173,3 +173,188 @@ JS の耳と認識
   4. 太ゴシック（gothic-heavy）の行で拍頭に文字が膨らむこと。太い行でも fps 55 を割らないこと（グリフ描画が 2 倍になるため特に要確認）。
   5. scatter の行で文字が拍の分割に乗って現れること（速い曲・遅い曲の両方で）。
 - 次にやること: 段階 3（認識確定のドロップ）または段階 4（小節頭推定）。どちらも段階 2 の退場機構・連続量が前提で、順序は実機所見を見て決める。push はしていない（ローカル commit のみ）。
+
+## 追記（2026-11-08）: ノリノリ化・段階 3（認識確定の「ドロップ」）の実装
+
+ブランチ `feat/groove-stage3`（`feat/groove-stage2` の上に作成）。計画書の段階 3 の 3 項目をすべて実装した。テスト先行で進め、4 つのテストファイルに先に失敗するテストを書いてから実装した（ただし本セッションの実行環境ではテスト・typecheck のコマンド実行が承認待ちで走らせられなかった。下記「検証」を参照）。
+
+- 発火の判定（`useStageSource`）: `StageSource` の synced 側に `dropAtMs`（発火時刻、`performance.now()` 基準）を追加した。発火条件は「timestamped の結果の `trackId` が、それまでに見た `trackId` と異なる」こと。前回の `trackId` を ref で覚え、同じ `trackId` の再錨（再認識で同じ曲、針の上げ直し後の同じ曲）では発火しない。synced → idle（`not_recognized` など）でも発火せず、そのあと同じ曲が戻っても発火しない。別の `trackId` なら発火する。idle 側の `StageSource` は無変更。
+- 舞台側の振り付け（`LyricStage`）: 発火時刻ごとに 1 回だけ、描画中に `Drop` を組み立てる（拍頭 `headMs`、発火時に舞台にあった idle グリフ、その散りが終わる時刻 `idleRiseAtMs`、ドロップで入る行）。
+  1. idle グリフの退場: 発火時に表示していた idle 構成（直前の描画で表示していたものを ref で保持）を、段階 2 の退場レイヤーの仕組みに乗せて `testIDPrefix: 'exit-idle-glyph'` で残す。退場の時計を次の拍頭に錨付けし、拍頭までは完全に静止（`motion.ts` の `exitTransform` に「負の経過時間は恒等」を明示）、拍頭から `scatter` の退場（1 拍以内、最大 420ms）で散る。散り終わり＋80ms でレイヤーを外す。
+  2. 背景の暗転: `TextureBackground` に `time`（舞台時計）と `dropAtMs` を渡し、プレリュードに `iDrop` uniform と `dropDip(col)` を追加した。4 シェーダとも最終色に `dropDip` を掛ける。`iDrop` は JS の `dropDip(sinceMs)` で、発火から 80ms で 1（黒）に沈み、500ms で 0 に線形に戻る 1 回限りの形（`DROP_DIP_MS = 500`）。発火前・復帰後は 0。
+  3. 最初の行の `drop` 着地: 発火後に最初に表示された行だけ、演出の entrance を `drop` に差し替え、拍頭が行開始より先なら `landsAtMs` を拍頭にして段階 2 の予備動作つき入場で着地させる（退場は差し替え後の entrance から導かれるので `fall`）。その行を過ぎたら以降の行には適用しない（`DROP_LINE_DONE`）。
+  4. caption 先行: 発火時に最初の行がまだ先（`scheduled.index === -1`）なら、曲名・アーティストの caption を 1 文字ずつ `PlacedGlyph` に展開し、拍頭から `trace` で出す（`testIDPrefix: 'idle-caption-glyph'`、不透明度は従来と同じ 0.6）。trace が終わったら従来どおりの単一 `Text`（`testID: 'idle-caption'`）に戻す。同じ場合、新しい曲の idle 構成は散りが終わった時刻（`idleRiseAtMs`）から `rise` で上がる（React の `key` に発火時刻を含めて rise を再生）。
+  5. 拍頭の決め方（`motion.ts` の `dropHeadMs`）: 発火時刻以降の最初の拍頭。古い予測は周期ぶん進めて使う。グリッドが無い／`confidence < 0.5`／拍頭が `DROP_MAX_WAIT_MS = 1000` より先なら待たずに即時。これで待ち（≤1 秒）＋散り（≤420ms）＋行の着地で全体が 2 秒以内に収まる。
+  6. reducedMotion のときはドロップ自体を組み立てない（退場レイヤーなし、caption は静的、`iDrop` は 0）。
+- ラベルは一切描かない。暗転は 1 回 500ms の一過性で、設計書のアンチゴール「点滅」（1 秒に 2 回以上 × 振幅 20% 超の繰り返し）には当たらない。拍頭での全面フラッシュ（第 3 階梯）は入れていない（暗転のみ、明転はしない）。
+- 判断（仕様の隙間への最小解釈、報告用）:
+  1. フィクスチャ曲の開始（`playback.active` が false → true）も発火の対象にした。Expo Go でドロップを目視できるようにするため。フィクスチャの停止では発火しない。フィクスチャ再生中に実曲が認識された場合も発火しない（`trackId` は記録するので、フィクスチャ停止後にその曲へ戻ってもドロップしない）。計画の文言は「認識確定」だけなので、不要なら `useStageSource` の `fixtureStarted` の 1 条件を外せば元に戻る。
+  2. 分析 5.1 の「背景が 1 拍だけ沈む」は、計画書・依頼の「発火から 500ms」を採り、拍の周期には連動させていない。
+  3. 最初の行が遠い場合に idle グリフを散らしたあと舞台が空にならないよう、新しい曲の idle 構成を散り終わりから rise で戻す解釈を採った（設計書の「idle 構成が崩れて組み替わる」の範囲内と判断）。
+  4. 拍頭待ちの上限（1000ms）は計画に無いが、設計書 §7 の「1〜2 秒以内」を守るための最小の追加。60 BPM 未満の推定でだけ効く。
+  5. 発火の時刻は `useStageSource` の effect で `performance.now()` を取る。スケジューラの tick と同じコミットで state が更新されるので、舞台は「synced ＋ dropAtMs」を 1 回の描画で受け取る。
+- 変更ファイル: `src/app/useStageSource.ts`、`src/typesetting/LyricStage.tsx`、`src/typesetting/motion.ts`（`dropHeadMs`、`DROP_MAX_WAIT_MS`、`entranceDurationMs`、負の経過時間の恒等）、`src/typesetting/idleComposition.ts`（`captionText` を切り出し）、`src/textures/textureShader.ts`（`iDrop`、`dropDip`、`DROP_DIP_MS`）、`src/textures/TextureBackground.tsx`、`src/textures/grain.ts` / `paper.ts` / `scan.ts` / `void.ts`。テスト: `src/app/__tests__/useStageSource.test.tsx`（+5）、`src/typesetting/__tests__/motion.test.ts`（+4）、`src/textures/__tests__/TextureBackground.test.tsx`（+4）、`src/typesetting/__tests__/LyricStage.test.tsx`（+5）。Swift・ネイティブの変更はなし。
+- 検証: **未検証**。本セッションの実行環境では `npm test -- --watchman=false` と `npm run typecheck`（および `jest` / `tsc` の直接実行）がすべて承認待ちで実行できなかった。コードは目視で型と挙動を確認したが、人が次を実行して結果を本ファイルに追記してほしい。
+
+  ```bash
+  npm test -- --watchman=false
+  npm run typecheck
+  ```
+
+  落ちた場合に疑う箇所: (a) `LyricStage.test.tsx` のドロップ系テストは `glyphTransform` を spy して入力の `elapsedMs` / `anticipationMs` を見る。Reanimated の `useDerivedValue` が再レンダーで再評価されない前提で、新規マウントされる層（退場 idle、caption trace、key 替えの idle）の初回評価だけに依存させている。(b) `TextureBackground` の `iDrop` は `dropFireMs` を deps に入れた derived value で、単一レンダーで検証している。
+- 実機で確認すること（段階 3 分）:
+  1. 実曲で「曲が分かった」ことが文字の動きだけで伝わること（idle が次の拍頭で散り、背景が一瞬沈み、最初の行が落ちて着地する）。ラベルが出ないこと。
+  2. 同じ曲の再認識（針の上げ直し、自動再認識）でドロップが再発火しないこと。認識が外れた直後の再認識でも連続発火しないこと。別の曲に替えたときは発火すること。
+  3. 認識がイントロ中（最初の行が先）のとき、caption が trace で現れ、散ったあとの idle が上がり直し、最初の行が来たら `drop` で入ること。
+  4. 全体が 1〜2 秒に収まること。遅い曲（60 BPM 付近）で間延びしないこと。
+  5. 暗転が OLED で不快でないこと（500ms、1 回だけ）。暗転中に落ちてくる最初の行が読めること。
+  6. Expo Go のフィクスチャ開始でもドロップが見えること（判断 1）。
+- 次にやること: 人による `npm test` / `npm run typecheck` の実行と結果の追記。通れば段階 4（小節頭推定）へ。push はしていない（ローカル commit のみ）。
+
+## 追記（2026-11-08）: ノリノリ化・段階 4（小節頭の推定）の実装
+
+ブランチ `feat/groove-stage4`（`feat/groove-stage3` の上に作成）。計画書の段階 4 の 2 項目を実装した。テスト先行で `src/beat/__tests__/beatEngine.test.ts` に失敗するテストを先に書いてから実装したが、本セッションの実行環境ではテスト・typecheck のコマンド実行が承認制約で走らせられなかった（下記「検証」を参照）。
+
+- 小節頭の推定（`src/beat/beatEngine.ts`）: 設計書 §3（2026-11-07 改定）のとおり、拍エンジンが 4 拍周期で `low` のオンセット強度を位相（拍番号 mod 4 のスロット）ごとに累積し、最も強いスロットを小節頭とする。
+  1. 累積するのは、エンジンがロックしたオンセットごとの `low` 側のオンセット強度（`max(0, low − 直近 100ms の low 平均)`。テンポ推定用の合成強度 `strength` から `low` の項だけを切り出した）。位相の引き込み（phase pull）で拍番号が確定した後に、その拍のスロットへ加える。
+  2. ヒストグラムは拍ごとに `exp(−1/32)` で忘れる（約 8 小節の記憶）。スロットの「際立ち」は `(最大 − 2 位) / 最大` で 0..1。
+  3. 信頼の決め方: 際立ちが `0.4` 以上で小節頭として採用（ロック）し、採用中は `0.2` を下回るまで保つ（ヒステリシス）。採用には「ロック後に 2 小節分（8 拍）経過」と「そのスロットにオンセットが 2 回以上」を要求し、1 発の大きな音で決めない。テンポの再推定で周期が 10% 以上動いたらヒストグラムを捨てる（拍番号の意味が変わるため）。
+  4. `barConfidence` は採用中の際立ち（0.4〜1）、採用なしのとき 0。採用なしの間は従来どおりロック時点から 4 拍ごとの `bar` に落ちる。
+  5. `bar` の数え直し: 採用中は `floor((拍番号 − 小節頭スロット) / 4)` を基にするが、**採用・解除・小節頭の切り替えで `bar` を跳ばせない**。切り替え時点の `bar` を保ったまま原点をずらし、次の増分が新しい小節頭に乗る（その 1 小節だけ 4 拍より短い／長い）。`bar` は常に非減少で、1 フレームに 1 しか増えない。
+  6. 無音中はオンセットを処理しないので推定は更新されず（一様に減衰するだけで際立ちは不変）、`reset` と時計の跳びでは全部忘れる。
+- `BeatState` に `barConfidence: number` を追加（`src/beat/types.ts`。設計書 §3 の出力定義と一致）。`bar` の doc コメントに「推定した小節頭から数える／跳ばない」を明記。`QUIET_BEAT`（`useStageSource`）とテストの `BeatState` リテラル（`lineScheduler.test.ts`、`LyricStage.test.tsx`）に `barConfidence: 0` を足した。
+- 消費側（`breathe`、idle の揺れ）: 変更なし。`bar` の消費者はすべて同じ経路（エンジン → `useStageSource`（無音で凍結）→ `useBeatSharedValues.bar` と React の `beat.bar`）を参照しているので、エンジンの `bar` が小節頭に揃えば `motion.ts` の `breathe`（`bar % 2`）、`LyricStage` のエポック（`floor(bar/8)`、`bar % 8`）、`Ornaments` の `numeral`（`bar % 100`）はそのまま推定小節に乗る。位相がずれた（小節頭が切り替わった）ときも、`bar` が跳ばず非減少なので、エポックの巻き戻し、負の数字、差し替えの二重発火は起きない（切り替え直後の 1 小節が伸び縮みするだけ）。`barConfidence` は舞台へは渡していない（計画の範囲外。段階 5 以降で必要なら shared value に足す）。
+- 判断（仕様の隙間への最小解釈、報告用）:
+  1. 「位相ごとの累積」を「オンセットごとにそのスロットへ `low` 強度を加える」と解釈した（毎サンプルを拍位置で重み付けする形は採らなかった）。
+  2. ロック閾値 0.4 は保守的。合成の 3/4 風入力（アクセントが 3 拍ごと）では、最初の数回転でスロットの際立ちが一時的に 0.26 近くまで上がることを手計算で確かめ、それを超えるよう置いた。実曲でキックが 1・3 拍目に等しく入る曲は原理的に区別できないので採用されず、従来の 4 拍カウントのまま（設計書の「信頼が低い間は小節頭なし」どおり）。
+  3. `bar` を切り替えで跳ばせない方針は計画に明記がないが、消費側の「破綻しない」確認を実装側で保証する最小の手として採った。
+  4. テンポ再ロック時のヒストグラム破棄（10% 以上の周期変化）は計画に無い小さな追加。
+- 追加したテスト（`src/beat/__tests__/beatEngine.test.ts`、`describe('bar head estimation …')`。合成列は `syntheticClicks.ts` に `generateAccentedClicks` / `accentTimes` / `weakTimes` を追加）:
+  1. 100 BPM・4/4 でアクセントが 0〜3 拍目のそれぞれ（`test.each`）: 16〜20 秒で `bar` がアクセントの拍でだけ 1 増え、弱い拍では増えない。`barConfidence ≥ 0.4` で、窓の間ずっと 0 より大きい。`bar` の増分は常に 0 か 1。
+  2. 120 BPM の強さ一定のクリック: 全フレームで `barConfidence === 0`、`bar` は 4 拍ごと（従来カウント）。
+  3. 12 秒までの入力: ロック前と 2 小節経過前は `barConfidence === 0`。
+  4. 100 BPM・3/4 風（3 拍ごとのアクセント）24 秒: 全フレームで `barConfidence === 0`、`bar` は非減少・1 ずつ、12〜24 秒で 4〜6 小節。
+  5. 推定後に 2 秒の無音: `barConfidence` が保たれ、`bar` が跳ばない。
+  6. 既存の `reset` と 1 時間ギャップのテストに `barConfidence === 0` を追加。既存の ±3 BPM 追従テストはそのまま。
+- 変更ファイル: `src/beat/beatEngine.ts`、`src/beat/types.ts`、`src/beat/__tests__/beatEngine.test.ts`、`src/beat/__tests__/syntheticClicks.ts`、`src/app/useStageSource.ts`（`QUIET_BEAT` のみ）、`src/sync/__tests__/lineScheduler.test.ts`、`src/typesetting/__tests__/LyricStage.test.tsx`。Swift・ネイティブ・舞台側（`motion.ts`、`LyricStage.tsx`、`Ornaments.tsx`、`idleComposition.ts`）の変更はなし。
+- 検証: **未検証**。本セッションの実行環境では `npm test -- --watchman=false` と `npm run typecheck` を実行できなかった。人が次を実行して結果を本ファイルに追記してほしい。
+
+  ```bash
+  npm test -- --watchman=false
+  npm run typecheck
+  ```
+
+  落ちた場合に疑う箇所: (a) アクセント付きクリックで弱い拍がオンセット検出の閾値（直近 2 秒の平均 + 2σ）を割ってしまう場合は `generateAccentedClicks` の `weakPeak`（既定 0.4）を 0.45 程度に上げる（推定自体は弱い拍が検出されなくても成り立つが、テスト 2 の「強さ一定」は全拍検出が前提）。(b) テスト 4（3/4 風）で `barConfidence` が一時的に 0 でなくなる場合は、手計算（最大 0.26）より際立ちが大きく出ているので `BAR_LOCK_MARGIN` を上げるか、`BAR_MIN_BEATS` を 12 にする。(c) テスト 1 の 16 秒からの検査窓が早すぎる場合（ロックは約 12.6 秒、再整列後の最初の増分は遅くとも約 15.6 秒の見込み）は `FROM_MS` を 17 秒に。
+- 実機で確認すること（段階 4 分）:
+  1. 4/4 の実曲（特に 1 拍目のキックが他より強い曲）で、`breathe` と idle の揺れ（1 小節に 1 文字の差し替え、偶数・奇数小節の呼吸の向き）が小節に合って感じること。
+  2. 小節頭が外れる曲・3 拍子の曲・キックが 1 と 3 に等しく入る曲で、違和感が従来（4 拍カウント）より悪化しないこと（推定が採用されず従来どおりになるはず）。
+  3. 小節頭が途中で切り替わる瞬間に、idle の構成が全部上がり直したり（エポックの巻き戻し）、数字の装飾が逆行したりしないこと。
+  4. 段階 1〜3 の実機項目（無音での静止、fps 55 以上）が退行していないこと（拍エンジンはオンセットごとに 4 要素の配列を触るだけで、毎フレームの追加コストはほぼ無い）。
+- 次にやること: 人による `npm test` / `npm run typecheck` の実行と結果の追記。通れば段階 5（盛り上がり検出＋グロー＋パレット連続変化）。push はしていない（ローカル commit もこのセッションでは行っていない）。
+
+## 追記（2026-11-08）: テスト安定化（段階 3 のドロップ系テストのフレーク）
+
+ブランチ `feat/groove-stage4` 上で、`src/typesetting/__tests__/LyricStage.test.tsx` の `describe('the recognition drop')` が実行ごとに通ったり落ちたりする（`entrance` が `drop` のはずが `rise`、idle の `elapsedMs` が `-(300+420)` のはずが `0`、など）問題を調べ、テスト側を決定的にした。本番コード（`LyricStage.tsx`、`motion.ts`）とドロップの仕様（設計書 §7、段階 3 の記録）は変えていない。
+
+- 原因（テストの実時間依存。本番コードの競合ではない）:
+  1. Reanimated の jest ランタイムは、UI スレッドの仕事を実タイマーで回す。`react-native-worklets` の jest モックは `runOnUI` / `scheduleOnUI` を `setTimeout(…, 0)` で実行し、`useDerivedValue` の mapper の起動・停止（`startMapper` / `stopMapper`）と、`useFrameCallback` の登録とフレームループ（`requestAnimationFrame` も `setTimeout(…, 0)` のモック）がすべてこの経路を通る。
+  2. 一方、`useDerivedValue` はマウント時だけ同期的に 1 回評価する（`initialUpdaterRun`）。段階 3 のテストはこの同期評価を `glyphTransform` の spy で捕まえる前提で書いたが、mapper が起動した時点でも同じ worklet がもう 1 回評価される（jest では `mapperRun()` が即時に走る）。その起動タイマーが「いつ」発火するかは実時間次第で、`render` / `rerender` の中の `act` が実 `setImmediate` で譲る間に 1ms 経っていれば発火し、いなければ次の譲りまで持ち越される。
+  3. その結果、(a) 最初の idle 描画で積まれた idle 層の mapper 起動が `spy.mockClear()` の後に発火すると、すでに舞台を去った idle グリフの入力（`entrance: 'rise'`、`elapsedMs: 0`）が「新しい行」や「上がり直す idle」の入力に混ざる（報告された 2 つの症状はこれ）。(b) 逆に、`fires once` では行の変更でグリフ部品（`key` はグリフ番号）が再マウントされず mapper の再起動だけが積まれるので、発火が遅れると行の入力が 1 件も記録されない。(c) フレームループが回り始めると舞台時計 `time` が実時間で進み、`elapsedMs` が `-300` からずれる。
+- 対処（`LyricStage.test.tsx` のみ）:
+  1. ファイル全体を `jest.useFakeTimers()`（`beforeEach`）／`jest.useRealTimers()`（`afterEach`）で回す。既存の `FixtureControl.test.tsx` と同じ流儀。これで Reanimated の UI 側の仕事はテストが明示的にタイマーを進めるまで積まれたままになり、前のテストから実タイマーが漏れることもない。
+  2. ドロップの `describe` に `flushUI()`（`jest.advanceTimersByTime(0)` を `act` で包む）を足し、各 `render` / `rerender` の直後に呼ぶ。0ms タイマーだけを 1 回ぶん流すので、積まれていた mapper の起動・再起動が「その描画の `nowMonotonicMs` のまま」評価され、フレームループ（tick 中に積まれた 0ms タイマーは +1ms 後になる）は動かない。idle 描画の直後にも流すことで、idle 層の評価が次の描画の spy に混ざらない。
+  3. 実時間待ち（`setTimeout` 600ms / 1000ms）を `jest.advanceTimersByTime(600)` / `(1000)` に置き換えた（`settle()` と、段階 2 の退場テスト）。
+- 変更ファイル: `src/typesetting/__tests__/LyricStage.test.tsx` と本ファイル。段階 4 の未コミットの変更（拍エンジンほか）には触れていない。
+- 後回しにした指摘（本番コード、今回は触らない）: `LyricStage` と `TextureBackground` の `useFrameCallback` に毎描画で新しい関数を渡しているため、再描画のたびに UI スレッドでフレームコールバックの登録し直しが起きる。動作には影響しないが、`useCallback` で固定すれば無駄が減る。
+- 検証: **未検証**。この環境ではテスト・typecheck を実行できない。人が次を実行し、`LyricStage.test.tsx` を数回続けて回して結果を本ファイルに追記してほしい。
+
+  ```bash
+  npx jest src/typesetting/__tests__/LyricStage.test.tsx --watchman=false
+  npm test -- --watchman=false
+  npm run typecheck
+  ```
+
+  落ちた場合に疑う箇所: (a) `flushUI()` の後で `line.length` が 0 なら、mapper の起動タイマーが 0ms ではなく 1ms で積まれている（`advanceTimersByTime(1)` に変える）。(b) `fires once` で `exit-idle-glyph` が残るなら、`settle()` の 1000ms 中に退場の削除タイマー（800ms）が `act` の外で発火している（`act(async …)` の中で進めていることを確認）。
+- 次にやること: 上の検証が通れば段階 4 の検証に戻る。
+
+## 追記（2026-11-08）: ノリノリ化・段階 5（盛り上がり検出＋強いグロー＋パレットの連続変化）の実装
+
+ブランチ `feat/groove-stage5`（`feat/groove-stage4` の上に作成）。計画書の段階 5 の 3 項目をすべて実装した。テスト先行で進めた（各項目のテストを先に書いてから実装）が、本セッションの実行環境ではテスト・typecheck・git のコマンド実行が承認制約で行えなかった（下記「検証」を参照）。
+
+- 盛り上がり検出（新規 `src/beat/energyProfile.ts`、置き場は拍エンジン側にした。純関数群＋それを組み合わせる小さなトラッカー `createEnergyProfile`）:
+  1. レベルは `(energy + low) / 2`（`energy` は拍エンジンの 400ms 追従値、`low` は耳フレームの生値）。耳の 20ms フレームを 100ms に間引いて溜め、**8 小節**（`PROFILE_WINDOW_BARS = 8`、計画の 8〜16 の短い側。周期が無い間は 120 BPM 相当、窓は 8〜32 秒にクランプ）の移動平均を取る。
+  2. 曲全体の累積分布は 64 ビンのヒストグラム。移動平均の値が「70 パーセンタイル（上位 30% の境）」を超えた分を、「95 パーセンタイル − 70 パーセンタイル」（下限 0.08）で割って 0..1 の強さにする。`active` は強さ > 0。
+  3. **判定中の区間はヒストグラムに入れない**（移動平均の値は窓 1 本ぶん遅れて分布に加わる）。曲の最初のサビは「曲のこれまで」に占める割合が大きく、同時に数えると自分自身で上位 30% から外れてしまうため。
+  4. ガード: `confidence ≥ 0.5`、無音明け 8 秒以降（`SURGE_SILENCE_HOLDOFF_MS`）、分布に 16 秒以上の履歴があること（`SURGE_MIN_HISTORY_MS`。履歴は窓 1 本遅れで溜まるので、実際に判定が始まるのは 120 BPM で曲開始から約 32 秒）。無音フレームは移動平均にも分布にも入れない（針を上げた無音がその後の全部を「大きい」にしないため）。1 秒以上の時刻の跳びと `reset()` で全部忘れる。
+  5. 歌詞側との OR と平滑: `useStageSource` の耳購読で毎フレーム `profile.push` し、`max(音響の強さ, 現在行が accent なら 1)` を立ち上がり 600ms / 立ち下がり 1500ms の 1 次追従（`smoothSurge`）に掛けて `beatValues.surge`（新設の shared value、0..1）に書く。現在行の `accent` は描画中に ref へ写し、購読側が読む。聴取を止めたら 0 に戻し、別の `trackId` の認識（ドロップと同じ条件）でプロファイルを捨てる（同じ曲の再錨では保つ）。
+  6. `ruleBasedDirector`: `accent` の条件を反復 ≥ 3 から **≥ 2** に（`MIN_ACCENT_REPEATS`）。フェーズ 3 の Claude 側プロンプトは触っていない。
+- 強いグロー（新規 `src/typesetting/GlowLayer.tsx`、`src/typesetting/surgeColors.ts`）: 現在行の強調文字（最大 3、`GLOW_MAX_GLYPHS`）だけ、本体の `GlyphLayer` の下に `<Blur>` 付きの複製を置く。量は `pulse（拍頭からの指数減衰）× surge × (confidence < 0.5 なら 0.25)` で、半径は `8px × 量`（`GLOW_RADIUS_MAX_PX = 8`、設計書 §5 の 10px 以下）、不透明度は `0.9 × 量`。surge が 0 の通常区間では半径も不透明度も 0（弱い定常グローは置かない）。拍頭ごとの一過性の減衰のみで、常時光らない。複製は本体と同じ `glyphTransform` を評価するので入場・着地の途中でも文字から離れない。退場レイヤー・前後行・idle・reducedMotion では出さない。
+- パレットの連続変化: `SongDirection.palette` に `accentHigh?: string` を追加（`src/direction/types.ts`）、`validateDirection` で「未指定可、指定なら #RRGGBB」を検証し、指定があれば結果に保つ。`DEFAULT_PALETTE` には `accentHigh: '#FF4D5E'`（既定の赤 `#D7263D` より明るく彩度の高い赤）を入れた（ルールベースとフィクスチャでも変化が見えるように）。補間は worklet で: `accent → accentHigh`（無ければ accent のまま）を surge で、`ink → accentHigh` を `surge × 0.15`（`INK_TINT_MAX`、`src/direction/surge.ts`）で。`LyricStage` が `inkNow` / `accentNow` を `useDerivedValue` で 1 回だけ導出し、全 `GlyphLayer` と caption とグローに渡す（`GlyphLayer` は `inkValue` / `accentValue` の任意 prop を受け、無ければ従来の固定文字列。surge が 0 のときは palette の文字列そのものを返すので既存の見た目と完全一致）。`TextureBackground` は `surge` prop を受け、`iInk` / `iAccent` uniform を同じ式（RGB の線形混合 `mixRgb`）で動かす。**`iBackground` は動かさない**（黒基調と平均輝度は不変）。現状 4 シェーダとも `iInk` / `iAccent` を読まないので、段階 5 の時点で背景の見た目は変わらない（段階 6 でシェーダ内部を触るときの受け皿）。色の変化が見えるのは文字（ink と accent）だけ。
+- 設計書のアンチゴールの確認: 全面フラッシュは無い（グローは強調文字 ≤ 3 の局所的な一過性の減衰）。音量→大きさの直結は無い（surge は移動平均と分布からの「盛り上がり」で、大きさには結んでいない）。グローの輝度変化は surge 区間の拍頭に限られ、通常区間では 0。パレットの変化は 600ms / 1500ms の追従に乗せ、背景は不変。
+- 判断（仕様の隙間への最小解釈、報告用）:
+  1. 移動平均の窓は 8 小節（計画の 8〜16 の最短）。長くすると最初のサビに間に合わず、短くすると A メロ内の起伏を拾うため。実機所見で `PROFILE_WINDOW_BARS` を上げる余地を残した。
+  2. 「上位 30%」の判定対象区間を分布に入れない（窓 1 本の遅延）のは計画に無い。最初のサビが自分自身で基準を押し上げて外れる問題への最小の手。
+  3. 「曲の冒頭で誤検出しない」は「分布に 16 秒以上の履歴」で実装した。計画は秒数を定めていない。
+  4. 歌詞側の `accent` 行は音響のガード（confidence・無音明け）を通さない。設計書 §4 のガードは「音響だけの判定」に掛かる文言で、グロー自体は量の式で confidence により 0.25 倍される。
+  5. `accentHigh` を `DEFAULT_PALETTE` に入れた。設計書は「省略可」としており、省略時の挙動（accent 固定、ink だけ accent へ 15%）はテストで保証している。不要なら 1 行消せば戻る。
+  6. 別 `trackId` でプロファイルを捨てる判断は、前の曲の分布を持ち越さないことを優先した。認識前に溜まった同じ曲の履歴（通常 10〜20 秒）は失うが、歌詞側の `accent` の OR で最初のサビは拾える見込み。
+  7. グローの複製は `GlyphLayer` 内ではなく別レイヤーにした（既存の「グリフ群内の `skText` の枚数」を見るテストと、強調文字以外に描画命令を足さない方針のため）。
+- 変更ファイル: 新規 `src/beat/energyProfile.ts`、`src/direction/surge.ts`、`src/typesetting/surgeColors.ts`、`src/typesetting/GlowLayer.tsx`。変更 `src/app/useStageSource.ts`、`src/direction/types.ts`、`src/direction/validateDirection.ts`、`src/direction/ruleBasedDirector.ts`、`src/typesetting/useBeatSharedValues.ts`（`surge`）、`src/typesetting/GlyphLayer.tsx`、`src/typesetting/LyricStage.tsx`、`src/textures/textureShader.ts`（`mixRgb`、`Rgb01`）、`src/textures/TextureBackground.tsx`。テスト: 新規 `src/beat/__tests__/energyProfile.test.ts`（+13）、`src/typesetting/__tests__/surgeColors.test.ts`（+6）。追加 `src/direction/__tests__/validateDirection.test.ts`（+3）、`src/direction/__tests__/ruleBasedDirector.test.ts`（+1）、`src/typesetting/__tests__/GlyphLayer.test.tsx`（+1、`surge` を束に追加）、`src/typesetting/__tests__/LyricStage.test.tsx`（+6、`surge` を束に追加）、`src/textures/__tests__/TextureBackground.test.tsx`（+4）、`src/app/__tests__/useStageSource.test.tsx`（+2）。Swift・ネイティブ・シェーダ本体（`grain.ts` 等）の変更はなし。
+- 検証: **未検証**。本セッションの実行環境では `npm test -- --watchman=false` と `npm run typecheck` を実行できなかった。人が次を実行して結果を本ファイルに追記してほしい。
+
+  ```bash
+  npm test -- --watchman=false
+  npm run typecheck
+  ```
+
+  落ちた場合に疑う箇所: (a) `energyProfile.test.ts` の数値は、0.3 の定常区間が 64 ビンの 19 番（上端 0.3125）に入ることと、100ms の間引きの位相（t=0 から 100ms ごと）を前提に手計算した。「窓の長さでの遅れ」で `early.strength` が 0 なら間引きの位相が 1 つずれている（`T + 200` の検査点を `T + 100` に）。`toBeCloseTo(1, 5)` が僅かに外れるなら p95 が 0.3125 より上に出て分母が 0.08 を超えている（`SURGE_MIN_SPREAD` の比較を `toBeGreaterThan(0.95)` に緩める）。(b) `LyricStage.test.tsx` のグローのテストは `skBlurImageFilter` というホスト要素名（Skia の `Blur` が `createElement("skBlurImageFilter")` する）に依存する。見つからなければ `queryAll` の条件を `n.type` の実際の値に合わせる。(c) 同テストの「ink と accent が動く」は、`useDerivedValue` がマウント時に同期評価される前提（段階 3 と同じ）。(d) `useStageSource.test.tsx` の surge テストはスケジューラの実タイマー（50ms）に依存するので、`waitFor` の後に `hear` を呼ぶ順を守る。値の閾値（> 0.9、< 0.1）は 600ms / 1500ms の時定数での手計算（0.997、0.018）。(e) typecheck で `Blur` の `blur` に `SharedValue<number>` を渡している箇所（`GlowLayer.tsx`）が落ちるなら、`AnimatedProp<Radius>` は `{ value: Radius }` なので `useDerivedValue<number | Vector>` に型を広げる。
+- 実機で確認すること（段階 5 分）:
+  1. サビ相当（反復行、または曲の中で音量の大きい区間）で強調文字が拍頭に光り、A メロに戻ると消えること。通常区間で光らないこと。
+  2. グローの光り方が「点滅」に見えないこと（拍頭ごとの減衰で、1 回の振幅が文字 3 つ以内に収まる）。
+  3. サビで文字の赤が明るく（`accentHigh`）、ink がわずかに暖かくなり、戻ること。背景の明るさが変わらないこと。
+  4. グローを足しても fps 55 以上（Blur は強調文字だけ。太い行＋グローで描画が最も多くなるのでそこを測る）。10 分放置で発熱と焼き付きの懸念が増えないこと（ドリフトは無変更、背景不変、定常グローなし）。
+  5. 音響だけの検出（`accent` 行の無い曲）が、曲開始から 30〜40 秒以降のサビで立ち、イントロや静かな曲で立たないこと。立つのが遅すぎる／早すぎるなら `PROFILE_WINDOW_BARS`（8）と `SURGE_MIN_HISTORY_MS`（16 秒）を調整する。
+  6. 針を上げて戻したあと 8 秒はグローが出ないこと。
+- 次にやること: 人による `npm test` / `npm run typecheck` の実行と結果の追記。通れば段階 5 の実機所見（グローと色の品）を見てから段階 6（テクスチャのクロスフェード。段階 5 で用意した `iInk` / `iAccent` の補間値をシェーダ内部で使う）へ。push はしていない（ローカル commit もこのセッションでは行っていない）。
+- 検証結果（2026-11-08、呼び出し側で実行）: `npm test -- --watchman=false` は 44 スイート・395 件全通過。`npm run typecheck` は当初1件エラー（`TextureBackground.test.tsx` の `renderWith` ヘルパーが `accentHigh` 必須と推論され、未指定パレットを渡すテストと矛盾）→ ヘルパーの引数を `Palette` 型で注釈して解消し、再実行で通過。テストの意図（accentHigh 未指定時のフォールバック確認）は不変。
+
+## 追記（2026-11-08）: ノリノリ化・段階 6（テクスチャのクロスフェード）の実装
+
+ブランチ `feat/groove-stage6`（`feat/groove-stage5` の上に作成）。計画書の段階 6（最終段階）の 2 項目を実装した。テスト先行で進めた（シェーダ文字列の構造テストを先に書いてから本体を書き換え）が、本セッションの実行環境ではテスト・typecheck・git のコマンド実行が承認制約で行えなかった（下記「検証」を参照）。シェーダの実描画（SkSL のコンパイルと見た目）は jest の Skia モック（`jest/setupSkia.js` の `RuntimeEffect.Make` は常に成功を返す）では確かめられないので、すべて実機確認に回す。
+
+- プレリュード（`src/textures/textureShader.ts`）: ブレンド用の共通関数 2 つを足した。`float energyBlend()` は `smoothstep(0.35, 0.85, clamp(iEnergy, 0, 1))` で、`iEnergy` が 0.35 以下なら 0（「穏やかな表情」そのまま）、0.85 以上なら 1（「賑やかな表情」）、間はなめらかに混ぜる。`float3 blendTextures(calm, lively, t)` は 2 つの表情の線形混合（`t` はクランプ）。範囲は TS の定数 `TEXTURE_BLEND_RANGE = { low: 0.35, high: 0.85 }` からテンプレートで埋め込み、同じ式の TS 版 `energyBlend(energy)` をテストと調整用に export した。uniform 宣言（`iResolution` 〜 `iAccent` の 12 個）と `dropDip`、`vignette`、`hash21` / `vnoise` / `fbm3` は無変更。
+- 各シェーダの main を「穏やか（calm）」「賑やか（lively）」の 2 サブ関数に分け、`energyBlend()` で混ぜた。拍の持ち上げ（`iPulse * iConfidence * 0.06`）、`vignette`、`dropDip` の共通の尾は main に残した（混合のあとに掛かる順序は変えていない）。各表情は **同じ平均輝度** を持つように組んだ（線形混合なので、両端の平均が同じならクロスフェードの途中でも平均は動かない）:
+  1. `grain`: calm は従来の 1 画素 1 ハッシュの粒。lively は粒が 24×1 px の横筋（セルごとに 1 ハッシュ）に 65% 寄った「走査線に寄りかけた粒」。どちらも `hash − 0.5` のゼロ平均ノイズを `iBackground` に足すので平均は不変。振幅（`0.04 + 0.06 * iHigh`）も同じ。ハッシュ 1〜2 回で軽いので両表情を常に評価。
+  2. `paper`: calm は従来（fbm3 の繊維＋vnoise のムラ）。lively は「紙が張った」表情: 繊維の縦スケールを詰め（`mix(0.07, 0.055, iLow)`、従来は `mix(0.045, 0.03, iLow)`）、fbm3 の平均 0.4375（= 0.5·(0.5+0.25+0.125)、vnoise の平均 0.5 から）を中心に 1.6 倍のコントラスト、ムラはその平均 0.5 の定数に置き換え。平均の係数は両表情とも `0.95 + 0.4375·0.08 + 0.5·0.03 = 1.0` で一致。**評価は早期分岐**（下記「判断」1）。
+  3. `scan`: calm は従来の 2 px 走査線。lively は線が 12×2 px のセルごとに 0.5〜1.5 の重みの「破線」になり、`iTime` で横に 8 px/s で這う（テープが走る感じ）。重みの平均は 1 なので線の平均の深さ＝平均輝度は不変。拍によるずれ（`scanDark`、1 パルスで 1 行）は両表情で共有。
+  4. `void`: calm は従来の広い中心の持ち上げ。lively は持ち上げが半径 0.45 の小さな溜まりに集まり（面積が約 1/2.4 になる分、ピークを 2.4 倍: `0.048 + 0.12 * iLow * iConfidence`）、加えて画面全体がごく薄く傾く（`dot(uv − 0.5, (cos a, sin a)) × 0.03`、`a = iTime × 0.08`、1 周 約 80 秒）。傾きは画面上でゼロ平均。溜まりの平均は近似（smoothstep の形の差があるので厳密ではない。差は 0.01 未満の見積り）。
+- 「点滅」の定義（アンチゴール、1 秒 2 回以上かつ振幅 20% 超）との照合: 新しい時間変化は scan の這い（セル境界が 1 画素を 1.5 秒に 1 回通過、段差は線の深さの最大半分＝背景の 6.5% 以下）と void の傾きの回転（周期 80 秒）だけ。grain の毎フレーム更新は従来どおり（粒の振幅は無変更）。クロスフェード自体は `iEnergy`（拍エンジンの 400ms 追従値）に乗るので「切り替わり」の瞬間は無い。
+- 色の扱い: 段階 5 の補間の範囲のまま。4 シェーダとも引き続き `iBackground` だけから塗り、`iInk` / `iAccent` は読まない（下記「判断」3）。`iBackground` は不変で、どの表情も黒基調。
+- 既存契約: uniform の宣言と `TextureBackground` 側の渡し方（`iDrop`、`iInk` / `iAccent` の補間を含む）は無変更。`TextureBackground.tsx` は触っていない。reducedMotion では `iTime = 0` なので scan の破線と void の傾きは静止する（クロスフェードは `iEnergy` に追従する。これは従来の `vignette` と同じ扱い）。
+- 判断（計画・設計書の隙間への最小解釈、報告用）:
+  1. **paper の評価方法は「早期分岐で片方だけ評価」にした**（計画の「割る場合は」の側）。当たり: 画面は 390×844 pt @3x ≒ 296 万画素。現状の paper は 1 画素あたり vnoise 4 回（= `hash21` 16 回）。lively は fbm3 だけで vnoise 3 回。両表情を常時評価すると 7 回（**1.75 倍**）で、paper が今ぎりぎり 55〜60 fps なら割る可能性が高いと見た。一方、分岐の条件 `t` は uniform だけから決まるので、全画素で同じ側を通り、GPU の分岐発散は起きない。よって `paperFaces()` で `t <= 0` なら calm のみ、`t >= 1` なら lively のみ、間だけ両方評価する形にした。静かな曲（`iEnergy ≤ 0.35`）は従来と同じコスト・同じ見た目、大音量（`≥ 0.85`）は従来の 0.75 倍、クロスフェード中だけ 1.75 倍。実機で fps が割れる場合の退避先は「判断」の末尾に書いた。grain / scan / void は 1 画素あたりハッシュ 0〜2 回なので分岐せず常に混ぜる。
+  2. **クロスフェードの範囲 0.35〜0.85 は仮置き**。`iEnergy` は耳の RMS を dBFS −72〜−12 で 0..1 に線形化して平方根を取った値（`EarAnalyzer.swift`）を拍エンジンで 400ms 追従させたもので、再生中の音楽は 0.5〜0.9 あたりに来ると見積もった（実測はない）。計画の「静かな曲では従来と見分けがつかない」を下端 0.35 で担保し、上端は曲の山で lively に達する程度に置いた。実機で `TEXTURE_BLEND_RANGE` の 2 値だけを動かせば調整できる（シェーダ文字列はテンプレートで追従し、テストも定数から読む）。
+  3. **背景には `iInk` / `iAccent` を使わなかった**。段階 5 の報告で「段階 6 の受け皿」と書いたが、計画の段階 6 は「色の扱いは段階 5 の補間の範囲に留め、背景の平均輝度は変えない」で、設計書 §6 も ink / accent の混合は「文字側」の話として読める（背景の黒基調と平均輝度の不変が優先）。背景に ink / accent を混ぜると平均輝度が上がる方向にしか動かせないため、今回は見送り、uniform の宣言だけ従来どおり残した。必要なら別途計画して足す。
+  4. 各表情の「平均輝度が同じ」は式の上での担保（ゼロ平均ノイズ、平均を中心にしたコントラスト、重みの平均 1、ゼロ平均の傾き）で、void の溜まりだけ近似。単体テストでは式の構造しか見られないので、実機で輝度計（またはスクリーンショットの平均）での確認項目にした。
+  5. 分析 7.3 の例「粒が走査線に変わる」は、質感の種類が変わったように見えない程度（grain の lively は粒 35%＋筋 65% の混合で、scan の線にはしない）に留めた。設計書 §6 の「4 種は維持」の趣旨。
+  6. 退避先（実機で paper が fps 55 を割った場合）: (a) lively の fbm3 を 2 オクターブに落とす（平均は 0.375 に変わるので定数を直す）、(b) `TEXTURE_BLEND_RANGE` の幅を狭めて両方評価の時間を短くする（ただし変化が速くなる）、(c) lively を calm と同じ fbm3 サンプルの再整形だけにする（評価 1 回。繊維の太さは変えられなくなる）。順に試す。
+- 変更ファイル: `src/textures/textureShader.ts`（`TEXTURE_BLEND_RANGE`、`energyBlend`、プレリュードに `energyBlend()` / `blendTextures()`）、`src/textures/grain.ts`、`src/textures/paper.ts`、`src/textures/scan.ts`、`src/textures/void.ts`（各 2 サブ関数＋main）。テスト: `src/textures/__tests__/TextureBackground.test.tsx`（+8: プレリュードのブレンド関数と範囲、TS 版 `energyBlend` の両端とクランプ、各シェーダに calm / lively があり main の前に宣言され `blendTextures` / `energyBlend` を通ること、各シェーダが使う `i〜` uniform がすべてプレリュードで宣言されていること（宣言と使用の整合）、`iEnergy` の読み取りがクランプ経由（＋void の従来の 1 箇所）だけであること、paper の早期分岐の構造と fbm3 / vnoise が分岐の外に無いこと、共通の尾（拍の持ち上げ→vignette→dropDip）が混合の後に残ること、`iEnergy` 0 / 1 を渡しても uniform がそのまま通ること）。`TextureBackground.tsx`、Swift、ネイティブ、計画書の変更はなし。
+- 検証: **未検証**。本セッションの実行環境では `npm test -- --watchman=false` と `npm run typecheck` を実行できなかった。人が次を実行して結果を本ファイルに追記してほしい。
+
+  ```bash
+  npm test -- --watchman=false
+  npm run typecheck
+  ```
+
+  落ちた場合に疑う箇所: (a) 「uniform の宣言と使用の整合」のテストは `//` 行コメントを剥がしてから `\bi[A-Z]\w*\b` を拾う。シェーダ本体のコメントに `iXxx` 風の語（宣言に無いもの）を書くと落ちるので、落ちたらその語をコメントから消す。(b) `toContain` を `Set` に対して使っている（jest は iterable を `Array.from` して探す）。型で弾かれるなら `[...declared]` に直す。(c) `matchAll` のスプレッドは `tsconfig` の `target`/`lib` が ES2020 以上である前提。落ちるなら `Array.from(...)` に。(d) 「`iEnergy` 0 / 1 を渡しても uniform がそのまま通る」は `useDerivedValue` がマウント時に同期評価される前提（段階 3・5 と同じ）。(e) 既存テスト「every texture gates its pulse response with iConfidence」は `iPulse * iConfidence` の文字列を各本体に求める。各 main の尾に残してあるので通るはず。
+- 実機で確認すること（段階 6 分。シェーダの実描画は単体テストでは一切保証できない）:
+  1. **4 シェーダがコンパイルされる**（起動時に `compileTextureEffect` が投げないこと。投げる場合は SkSL の文法: 関数の前方宣言順、`float3 paperFaces` の早期 `return`、`mod` / `smoothstep` / `dot` の型）。
+  2. 曲のエネルギーの高低で質感がなめらかに変わり、「切り替わった」と分かる瞬間が無いこと。静かな曲・イントロでは従来と見分けがつかないこと（`iEnergy ≤ 0.35` で calm のみ）。達しない／常に lively なら `TEXTURE_BLEND_RANGE` を実測の `iEnergy` に合わせて動かす（`useBeatSharedValues.energy` をログに出せば読める）。
+  3. 4 種すべてで fps 55 以上。**特に paper を、クロスフェードの最中（`iEnergy` が 0.35〜0.85 の間、両表情を評価している時間）で測る**。割れたら「判断」6 の退避先を順に。
+  4. 背景の平均輝度が表情の両端で変わらないこと（同じ曲の静かな所と山でスクリーンショットを撮り、平均を比べる。void の溜まりは近似なので特に）。黒基調が保たれること。
+  5. scan の破線の這い（8 px/s）と void の傾き（80 秒で 1 周）が「点滅」や「動いている背景」に見えないこと。気になるなら係数（`8.0`、`0.08`、`0.03`）を下げる。
+  6. grain の lively（横筋）が「走査線に変わった」ではなく「粒が筋に寄った」程度に見えること。強すぎれば `mix(g, streak, 0.65)` の 0.65 を下げる。
+  7. 10 分放置で発熱の懸念が増えないこと（paper は lively 側の方が軽い。クロスフェード中だけ重い）。焼き付きはドリフト無変更・背景の平均不変なので増えない見込み。
+  8. 認識のドロップ（`iDrop`）と段階 5 の surge（文字の色）が従来どおり働くこと（uniform 契約は無変更だが、シェーダを書き換えたので回帰確認）。
+- 次にやること: 人による `npm test` / `npm run typecheck` の実行と結果の追記。通れば EAS Development Build を更新し、段階 5・6 の実機所見（グローと色の品、テクスチャの変化と fps）をまとめて見る。これでノリ改善の第 2 階梯（段階 1〜6）は実装が揃うので、実機所見を受けた調整のあと、フェーズ 3（Claude API による演出ディレクター）の計画へ。push はしていない（ローカル commit もこのセッションでは行っていない）。
+- 検証結果（2026-11-08、呼び出し側で実行）: `npm test -- --watchman=false` は 44 スイート・403 件全通過、`npm run typecheck` も通過。シェーダの実描画・コンパイル可否は単体テストでは保証できないため、次回ビルドの実機確認で担保する（進捗の実機確認項目参照）。

@@ -71,6 +71,17 @@ describe('directSongByRules', () => {
     expect(d.lines[4]?.emphasis).toEqual([]);
   });
 
+  test('a line sung twice is chorus-like: accented and set heavy; a line sung once is not', () => {
+    const texts = ['夜の底で灯りを数える', '帰ろう', '風が街を通り過ぎる', '帰ろう'];
+    const d = directSongByRules(texts, 'a');
+    expect(d.lines[1]?.accent).toBe(true);
+    expect(d.lines[3]?.accent).toBe(true);
+    expect(d.lines[1]?.font).toBe('gothic-heavy');
+    expect(d.lines[0]?.accent).toBe(false);
+    expect(d.lines[2]?.accent).toBe(false);
+    expect(validateSongDirection(d, texts)).not.toBeNull();
+  });
+
   test('never repeats scatter entrance or shake hold back to back', () => {
     for (const seed of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']) {
       const { lines } = directSongByRules(LINES, seed);

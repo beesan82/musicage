@@ -342,6 +342,136 @@ describe('useStageSource', () => {
     expect(scheduled.landsAtMs).toBe(head);
   });
 
+  describe('the recognition drop (idle → synced, once per song)', () => {
+    const other: TimestampedLyricResult = {
+      ...result,
+      track: { ...track, trackId: 'shazam-2', title: '別の歌' },
+    };
+    const rerenderWith = (
+      hook: Awaited<ReturnType<typeof setup>>,
+      next: LyricResult | null,
+      playback = playbackOff,
+    ) => hook.rerender({ status: 'listening', playback, result: next });
+
+    test('fires when an idle source becomes synced: dropAtMs is the fire time', async () => {
+      const hook = await setup({ result: null });
+      expect(hook.result.current.source.kind).toBe('idle');
+
+      clockMs = 10_500;
+      await rerenderWith(hook, result);
+      expect(syncedOf(hook.result.current).dropAtMs).toBe(10_500);
+    });
+
+    test('does not fire again on a re-anchor of the same trackId', async () => {
+      const hook = await setup({ result: null });
+      clockMs = 10_500;
+      await rerenderWith(hook, result);
+
+      clockMs = 20_000;
+      await rerenderWith(hook, { ...result, anchor: { offsetMs: 0, anchoredAtMonotonicMs: clockMs } });
+      expect(syncedOf(hook.result.current).dropAtMs).toBe(10_500);
+    });
+
+    test('fires again for a different trackId', async () => {
+      const hook = await setup({ result: null });
+      clockMs = 10_500;
+      await rerenderWith(hook, result);
+
+      clockMs = 20_000;
+      await rerenderWith(hook, other);
+      expect(syncedOf(hook.result.current).dropAtMs).toBe(20_000);
+    });
+
+    test('does not fire on synced → idle, nor when the same song is recognized again after it', async () => {
+      const hook = await setup({ result: null });
+      clockMs = 10_500;
+      await rerenderWith(hook, result);
+
+      clockMs = 20_000;
+      await rerenderWith(hook, { kind: 'not_recognized' });
+      expect(hook.result.current.source.kind).toBe('idle');
+
+      clockMs = 30_000;
+      await rerenderWith(hook, { ...result, anchor: { offsetMs: 0, anchoredAtMonotonicMs: clockMs } });
+      expect(syncedOf(hook.result.current).dropAtMs).toBe(10_500);
+    });
+
+    test('the fixture starting fires a drop; stopping it does not', async () => {
+      const hook = await setup({ result: null });
+      clockMs = 10_500;
+      const playing: FixturePlayback = {
+        ...playbackOff,
+        active: true,
+        anchor: { offsetMs: 0, anchoredAtMonotonicMs: clockMs },
+      };
+      await rerenderWith(hook, null, playing);
+      expect(syncedOf(hook.result.current).dropAtMs).toBe(10_500);
+
+      clockMs = 20_000;
+      await rerenderWith(hook, null, playbackOff);
+      expect(hook.result.current.source.kind).toBe('idle');
+    });
+  });
+
+  describe('the surge written to beatValues.surge', () => {
+    // A song whose second and fourth lines recur: the rule-based director
+    // marks them accent (chorus-like). The acoustic side stays at 0 here (the
+    // song is far too short for its distribution to count), so the surge is
+    // the accent line alone, smoothed.
+    const chorusSong: TimestampedLyricResult = {
+      ...result,
+      lines: [
+        { startMs: 0, text: '夜の底で' },
+        { startMs: 4_000, text: 'ララ' },
+        { startMs: 8_000, text: '走れ！' },
+        { startMs: 16_000, text: 'ララ' },
+      ],
+      anchor: { offsetMs: 1_000, anchoredAtMonotonicMs: 10_000 },
+    };
+    /** Audible frames every 20 ms on the mocked clock over [fromMs, toMs]. */
+    const hear = (fromMs: number, toMs: number) =>
+      act(async () => {
+        for (let t = fromMs; t <= toMs; t += 20) {
+          clockMs = t;
+          emitter.emit(frame(t, 0.1));
+        }
+      });
+
+    test('rises towards 1 while an accent line is on stage and eases back after it', async () => {
+      clockMs = 10_500; // position 1_500 → line 0 (not accent)
+      const hook = await setup({ result: chorusSong });
+      expect(syncedOf(hook.result.current).scheduled.index).toBe(0);
+      expect(syncedOf(hook.result.current).direction.lines[1]?.accent).toBe(true);
+      expect(syncedOf(hook.result.current).direction.lines[2]?.accent).toBe(false);
+      const values = hook.result.current.beatValues;
+
+      await hear(10_500, 12_500);
+      expect(values.surge.value).toBe(0);
+
+      clockMs = 13_100; // position 4_100 → line 1 (accent)
+      await waitFor(() => expect(syncedOf(hook.result.current).scheduled.index).toBe(1));
+      await hear(13_100, 16_100);
+      expect(values.surge.value).toBeGreaterThan(0.9);
+
+      clockMs = 17_100; // position 8_100 → line 2 (not accent)
+      await waitFor(() => expect(syncedOf(hook.result.current).scheduled.index).toBe(2));
+      await hear(17_100, 22_100);
+      expect(values.surge.value).toBeLessThan(0.1);
+    });
+
+    test('leaving listening clears the surge', async () => {
+      clockMs = 13_100; // line 1 (accent) from the start
+      const hook = await setup({ result: chorusSong });
+      await waitFor(() => expect(syncedOf(hook.result.current).scheduled.index).toBe(1));
+      await hear(13_100, 16_100);
+      const values = hook.result.current.beatValues;
+      expect(values.surge.value).toBeGreaterThan(0.9);
+
+      await hook.rerender({ status: 'idle', playback: playbackOff, result: chorusSong });
+      expect(values.surge.value).toBe(0);
+    });
+  });
+
   test('leaving listening resets to the quiet beat', async () => {
     const hook = await setup({ result: null });
     for (let i = 0; i < 45; i += 1) {

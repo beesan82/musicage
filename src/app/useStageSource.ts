@@ -3,6 +3,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { EarStream } from '../audio/earStream';
 import type { ListeningStatus } from '../audio/types';
 import { createBeatEngine } from '../beat/beatEngine';
+import { createEnergyProfile, smoothSurge } from '../beat/energyProfile';
+import type { EnergyProfile } from '../beat/energyProfile';
 import { SILENCE_RMS } from '../beat/types';
 import type { BeatEngine, BeatState } from '../beat/types';
 import { FIXTURE_LRC, FIXTURE_TRACK } from '../dev/fixture/fixtureSong';
@@ -32,6 +34,7 @@ export const QUIET_BEAT: BeatState = {
   phase: 0,
   pulse: 0,
   bar: 0,
+  barConfidence: 0,
   nextBeatAtMs: null,
   energy: 0,
   silence: true,
@@ -79,6 +82,14 @@ export function useStageSource({
 }: StageSourceInput): StageInputs {
   const engineRef = useRef<BeatEngine | null>(null);
   engineRef.current ??= createBeatEngine();
+  // The surge (design spec §4): the acoustic profile of the song so far, OR'd
+  // with the accent line on stage, smoothed, written to `beatValues.surge`
+  // on every ear frame. The accent flag is set in render and read by the ear
+  // subscription; the smoother's state lives with the subscription.
+  const profileRef = useRef<EnergyProfile | null>(null);
+  profileRef.current ??= createEnergyProfile();
+  const accentLineRef = useRef(false);
+  const surgeRef = useRef({ value: 0, atMs: Number.NaN });
   const beatValues = useBeatSharedValues();
   const [beat, setBeat] = useState<BeatState>(QUIET_BEAT);
   const beatRef = useRef(beat);
@@ -97,14 +108,18 @@ export function useStageSource({
 
   useEffect(() => {
     const engine = engineRef.current!;
+    const profile = profileRef.current!;
     if (status !== 'listening') {
       engine.reset();
+      profile.reset();
+      surgeRef.current = { value: 0, atMs: Number.NaN };
       silentSinceRef.current = null;
       frozenBarRef.current = 0;
       beatValues.write(
         { timestampMs: performance.now(), rms: 0, low: 0, mid: 0, high: 0 },
         QUIET_BEAT,
       );
+      beatValues.surge.value = 0;
       setBeat(QUIET_BEAT);
       return undefined;
     }
@@ -128,6 +143,23 @@ export function useStageSource({
       // Every frame reaches the shared values before the throttled publish:
       // worklets derive the continuous beat from them without re-rendering.
       beatValues.write(frame, next);
+      // The surge: the acoustic detection (guarded inside the profile by the
+      // beat confidence, the silence hold-off and the song's history) OR the
+      // accent line, on a fast-in / slow-out follower.
+      const acoustic = profile.push({
+        timestampMs: frame.timestampMs,
+        energy: next.energy,
+        low: frame.low,
+        confidence: next.confidence,
+        silence: next.silence,
+        periodMs: next.bpm === null ? null : 60_000 / next.bpm,
+      });
+      const target = Math.max(acoustic.strength, accentLineRef.current ? 1 : 0);
+      const surge = surgeRef.current;
+      const dtMs = Number.isNaN(surge.atMs) ? 0 : frame.timestampMs - surge.atMs;
+      surge.value = smoothSurge(surge.value, target, dtMs);
+      surge.atMs = frame.timestampMs;
+      beatValues.surge.value = surge.value;
       const newPulseHead = next.pulse > previous.pulse;
       previous = next;
       if (
@@ -144,6 +176,7 @@ export function useStageSource({
   const timed = result?.kind === 'timestamped' ? result : null;
   const timedLines = timed?.lines ?? null;
   const timedAnchor = timed?.anchor ?? null;
+  const timedTrackId = timed?.track.trackId ?? null;
   const named = result !== null && result.kind !== 'not_recognized' ? result.track : null;
   const title = named?.title ?? null;
   const artist = named?.artist ?? null;
@@ -206,6 +239,28 @@ export function useStageSource({
     return () => clearInterval(id);
   }, [active, fixtureAnchor, paused, timedLines, timedAnchor]);
 
+  // The recognition drop (design spec §7): fires once when a song is confirmed,
+  // i.e. when the synced track is a new trackId. A re-anchor of the same
+  // trackId (re-recognition of the same song, or the same song coming back
+  // after a miss) does not fire; neither does synced → idle. The fixture
+  // starting counts as a confirmation so the drop can be seen in Expo Go;
+  // the fixture stopping does not.
+  const [dropAtMs, setDropAtMs] = useState<number | null>(null);
+  const lastRecognizedRef = useRef<string | null>(null);
+  const fixtureWasActiveRef = useRef(false);
+  useEffect(() => {
+    const fixtureStarted = active && !fixtureWasActiveRef.current;
+    fixtureWasActiveRef.current = active;
+    const newSong = timedTrackId !== null && timedTrackId !== lastRecognizedRef.current;
+    if (timedTrackId !== null) lastRecognizedRef.current = timedTrackId;
+    if (fixtureStarted || (newSong && !active)) {
+      setDropAtMs(performance.now());
+      // A new song starts its energy distribution from nothing (a re-anchor
+      // of the same song keeps it).
+      profileRef.current?.reset();
+    }
+  }, [active, timedTrackId]);
+
   // A re-anchored result keeps its lines and track, so neither is rebuilt.
   const recognizedTrack = useMemo<IdleTrack>(
     () => (title === null || artist === null ? null : { title, artist }),
@@ -231,6 +286,7 @@ export function useStageSource({
         direction: fixtureDirection,
         scheduled: schedule.line,
         track: FIXTURE_TRACK,
+        dropAtMs,
       };
     }
     if (schedule !== null && timedLines !== null && recognizedDirection !== null) {
@@ -240,10 +296,17 @@ export function useStageSource({
         direction: recognizedDirection,
         scheduled: schedule.line,
         track: recognizedTrack,
+        dropAtMs,
       };
     }
     return { kind: 'idle', direction: recognizedDirection, track: recognizedTrack };
-  }, [active, fixtureDirection, recognizedDirection, recognizedTrack, schedule, timedLines]);
+  }, [active, dropAtMs, fixtureDirection, recognizedDirection, recognizedTrack, schedule, timedLines]);
+
+  // The line on stage is chorus-like (`accent`, spec §4): the surge's lyric side.
+  accentLineRef.current =
+    source.kind === 'synced' &&
+    !source.scheduled.isEmpty &&
+    (source.direction.lines[source.scheduled.index]?.accent ?? false);
 
   return { source, beat, beatValues, nowMonotonicMs, pastOutro: schedule?.pastOutro ?? false };
 }

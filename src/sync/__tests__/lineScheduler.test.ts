@@ -18,6 +18,7 @@ const noBeat: BeatState = {
   phase: 0,
   pulse: 0,
   bar: 0,
+  barConfidence: 0,
   nextBeatAtMs: null,
   energy: 0,
   silence: false,

@@ -24,6 +24,11 @@ export interface IdleComposition {
 /** Bars per epoch: at 120 BPM an epoch is about 16 seconds. */
 export const IDLE_EPOCH_BARS = 8;
 
+/** The caption's text for a recognized track: artist, an em dash, title. */
+export function captionText(track: NonNullable<IdleTrack>): string {
+  return `${track.artist} — ${track.title}`;
+}
+
 const MARGIN = 24;
 const COLUMNS = 3;
 const ROWS = 5;
@@ -126,7 +131,7 @@ export function composeIdle(
   return {
     glyphs: placed,
     caption: track && {
-      text: `${track.artist} — ${track.title}`,
+      text: captionText(track),
       x: MARGIN,
       y: viewport.height - viewport.insetBottom - MARGIN,
       sizePx: viewport.width * SIZE_RATIO.xs,

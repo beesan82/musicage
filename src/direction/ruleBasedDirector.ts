@@ -14,6 +14,8 @@ const HOLD_POOL: readonly Hold[] = ['still', 'pulse', 'drift', 'shake', 'breathe
 
 const MAX_FONTS = 2;
 const MAX_XL_LINES = 3;
+/** How many times a line must recur to count as chorus-like (`accent`). */
+export const MIN_ACCENT_REPEATS = 2;
 // The brief says 0.5, but its own example line (4 kanji in 10 chars) must come out mincho.
 const KANJI_MINCHO_RATIO = 0.4;
 const HAN = /\p{Script=Han}/u;
@@ -88,7 +90,9 @@ export function directSongByRules(lines: readonly string[], seed: string): SongD
     }
 
     const chars = [...text];
-    const repeated = (counts.get(text) ?? 0) >= 3;
+    // A line sung twice or more is "chorus-like" (design spec §4, 2026-11-07):
+    // it takes the accent and joins the surge passages.
+    const repeated = (counts.get(text) ?? 0) >= MIN_ACCENT_REPEATS;
     const exclaim = /[！!]/.test(text);
 
     let wanted: FontKey;

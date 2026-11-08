@@ -37,6 +37,7 @@ const beat: BeatSharedValues = {
   low: shared(0),
   mid: shared(0),
   high: shared(0),
+  surge: shared(0),
   write: () => {},
 };
 
@@ -245,6 +246,46 @@ describe('the emphasis colour migration', () => {
     expect(colors[0]).toBe(palette.accent);
     expect(colors[2]).toBe(palette.accent);
     expect(colors[1]).toBe(palette.ink);
+  });
+});
+
+describe('the surge-interpolated ink and accent', () => {
+  const palette = { background: '#000000', ink: '#EEEEEE', accent: '#FF0000' };
+
+  test('shared ink and accent values replace the palette strings when given', async () => {
+    const dir: LineDirection = {
+      ...direction,
+      entrance: 'fade',
+      hold: 'still',
+      emphasis: [0],
+      accent: true,
+    };
+    const layout = layoutLine('夜の底', dir, vp, measure);
+    const inkValue = makeMutable('#112233');
+    const accentValue = makeMutable('#445566');
+    const view = await render(
+      <GlyphLayer
+        glyphs={layout.glyphs}
+        fontFor={(sizePx) => Skia.Font(undefined as never, sizePx)}
+        time={shared(100)}
+        lineStartedAtMs={0}
+        lineEndsAtMs={null}
+        entrance="fade"
+        hold="still"
+        palette={palette}
+        inkValue={inkValue}
+        accentValue={accentValue}
+        accent
+        beat={beat}
+        reducedMotion={false}
+        seed={7}
+        feel={1}
+      />,
+    );
+    const colors = view
+      .getAllByTestId(/^glyph-/)
+      .map((g) => textsIn(g as unknown as Node)[0]!.props.color.value as string);
+    expect(colors).toEqual(['#445566', '#112233', '#112233']);
   });
 });
 
