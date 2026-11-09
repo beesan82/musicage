@@ -7,7 +7,6 @@ import type { BeatState } from '../../beat/types';
 import { lightHexFor, rgbaOf } from '../../direction/palettes';
 import { directSongByRules } from '../../direction/ruleBasedDirector';
 import { INK_TINT_MAX } from '../../direction/surge';
-import { DEFAULT_IDLE_GLYPHS } from '../../direction/types';
 import type { SongDirection } from '../../direction/types';
 import { unsyncedNote } from '../../recognition/recognitionCopy';
 import type { LyricLine, UnsyncedKind } from '../../recognition/types';
@@ -16,7 +15,8 @@ import * as textureBackground from '../../textures/TextureBackground';
 import { dropDip, hexToRgb01 } from '../../textures/textureShader';
 import { METER_BASE_HEIGHT, METER_RULE_COUNT, METER_RULE_WIDTH } from '../bandMeter';
 import * as fonts from '../fonts';
-import { composeIdle } from '../idleComposition';
+import * as idleComposition from '../idleComposition';
+import { composeClock } from '../idleComposition';
 import { layoutLine, printArea, SIZE_RATIO } from '../layout';
 import { anchoredTime, LyricStage } from '../LyricStage';
 import type { LyricStageProps } from '../LyricStage';
@@ -96,6 +96,20 @@ const STAGE_AREA = printArea(STAGE_VIEWPORT, -390 * 0.045 * 0.88);
 const NUMERAL_METRICS = { ascent: -390 * 0.06 * 0.88, descent: 390 * 0.06 * 0.12 };
 const stageLayout = (text: string, line: SongDirection['lines'][number]) =>
   layoutLine(text, line, STAGE_VIEWPORT, jestMeasure, lineArea(STAGE_AREA, line, NUMERAL_METRICS));
+// The idle clock's wall time in the tests that read it: a Sunday, half a
+// second into 09:05:07 (local time), so the next tick is 500 ms (+ slack) away.
+const CLOCK_NOW = new Date(2026, 10, 8, 9, 5, 7, 500);
+/** The character drawn by the glyph with this testID. */
+const charOf = (view: { getByTestId: (id: string) => unknown }, testID: string) =>
+  textsIn(view.getByTestId(testID) as Node)[0]?.props.text as string;
+/** A row of the clock read from its glyph testIDs (date 0+, time 100+, seconds 200+). */
+const clockRow = (view: { getAllByTestId: (id: RegExp) => unknown[] }, from: number) =>
+  (view.getAllByTestId(/^glyph-/) as Node[])
+    .map((g) => ({ index: Number(String(g.props.testID).replace('glyph-', '')), text: textsIn(g)[0]?.props.text }))
+    .filter(({ index }) => index >= from && index < from + 100)
+    .sort((a, b) => a.index - b.index)
+    .map(({ text }) => text)
+    .join('');
 
 // Reanimated's jest runtime hands its UI-thread work (starting and stopping
 // the mappers behind useDerivedValue, the useFrameCallback loop that advances
@@ -152,40 +166,113 @@ test('lays out the trimmed line text so emphasis indices line up, skipping space
   ]);
 });
 
-test('renders idle glyphs when the scheduled line is empty', async () => {
+test('renders the idle clock when the scheduled line is empty', async () => {
+  jest.setSystemTime(CLOCK_NOW);
   const source = synced(['夜の底で', ''], 1);
-  const { getAllByTestId, getByTestId } = await renderStage({
+  const view = await renderStage({
     source: { ...source, track: { title: 'Song', artist: 'Band' } },
     beat,
     nowMonotonicMs: 100,
   });
-  const glyphs = getAllByTestId(/^glyph-/);
-  expect(glyphs.length).toBeGreaterThanOrEqual(5);
-  expect(glyphs.length).toBeLessThanOrEqual(9);
-  expect(getByTestId('idle-caption').props.text).toBe('Band — Song');
+  expect(clockRow(view, 100)).toBe('09:05');
+  expect(clockRow(view, 200)).toBe(':07');
+  expect(clockRow(view, 0)).toBe('11月8日（日）');
+  expect(view.getByTestId('idle-caption').props.text).toBe('Band — Song');
 });
 
-test('renders idle glyphs before any line is scheduled', async () => {
-  const { getAllByTestId } = await renderStage({ source: synced(TEXTS, -1), beat, nowMonotonicMs: 100 });
-  expect(getAllByTestId(/^glyph-/).length).toBeGreaterThanOrEqual(5);
+test('renders the idle clock before any line is scheduled', async () => {
+  jest.setSystemTime(CLOCK_NOW);
+  const view = await renderStage({ source: synced(TEXTS, -1), beat, nowMonotonicMs: 100 });
+  expect(clockRow(view, 100)).toBe('09:05');
 });
 
-test('recomposes idle glyphs when the bar changes', async () => {
+describe('the idle clock keeps wall time', () => {
   const idle = { kind: 'idle', direction: null, track: null } as const;
-  const charsAt = async (bar: number) => {
-    const { getAllByTestId, unmount } = await renderStage({
-      source: idle,
-      beat: { ...beat, bar },
-      nowMonotonicMs: 0,
-    });
-    const chars = getAllByTestId(/^glyph-/).map((g) => textsIn(g as unknown as Node)[0]?.props.text);
-    await unmount();
-    return chars.join('');
+  const at = (extra: Partial<LyricStageProps> = {}) => (
+    <LyricStage beatValues={beatValues} source={idle} beat={beat} nowMonotonicMs={0} {...extra} />
+  );
+  // Advances in steps of at most a second, one act each. Inside a single act
+  // every tick's setClockNow is batched into one render, so a long synchronous
+  // advance would show only the last second and compose the clock once.
+  const advance = async (ms: number) => {
+    let left = ms;
+    do {
+      const step = Math.min(left, 1000);
+      await act(async () => {
+        jest.advanceTimersByTime(step);
+      });
+      left -= step;
+    } while (left > 0);
   };
-  const arrangements: string[] = [];
-  for (const bar of [1, 2, 3, 4]) arrangements.push(await charsAt(bar));
-  expect(arrangements[1]).toBe(await charsAt(2));
-  expect(new Set(arrangements).size).toBeGreaterThan(1);
+
+  // 52 one-second acts, each running a second of the stage's frame loop and a
+  // re-render: more than the default 5 s of real time.
+  test('ticks on each second boundary, in place: the same glyph keys, only the digits change', async () => {
+    jest.setSystemTime(CLOCK_NOW);
+    const view = await render(inProvider(at()));
+    const keys = (view.getAllByTestId(/^glyph-/) as unknown as Node[]).map((g) => g.props.testID);
+    expect(charOf(view, 'glyph-202')).toBe('7');
+    // 09:05:07.500: the next tick is 500 ms (plus slack) away.
+    await advance(400);
+    expect(charOf(view, 'glyph-202')).toBe('7');
+    await advance(200);
+    expect(charOf(view, 'glyph-202')).toBe('8');
+    // The colons never blink.
+    expect(charOf(view, 'glyph-102')).toBe(':');
+    expect(charOf(view, 'glyph-200')).toBe(':');
+    // Into the next minute.
+    await advance(52_000);
+    expect(clockRow(view, 100)).toBe('09:06');
+    expect(clockRow(view, 200)).toBe(':00');
+    expect((view.getAllByTestId(/^glyph-/) as unknown as Node[]).map((g) => g.props.testID)).toEqual(keys);
+  }, 30_000);
+
+  test('does not follow the bar, and keeps going through silence', async () => {
+    jest.setSystemTime(CLOCK_NOW);
+    const view = await render(inProvider(at()));
+    await view.rerender(inProvider(at({ beat: { ...beat, bar: 9, silence: true } })));
+    expect(clockRow(view, 200)).toBe(':07');
+    await advance(2_000);
+    expect(clockRow(view, 200)).toBe(':09');
+  });
+
+  test('recomposes at most once a second, and not at all while a line is on stage', async () => {
+    jest.setSystemTime(CLOCK_NOW);
+    const spy = jest.spyOn(idleComposition, 'composeClock');
+    const view = await render(inProvider(at()));
+    // Settle one step first: the mount's own flush can recompose once more
+    // after the clear, which is not a tick and must not count as one.
+    await advance(1_000);
+    spy.mockClear();
+    await advance(5_000);
+    expect(spy.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(5);
+
+    await view.rerender(
+      inProvider(<LyricStage beatValues={beatValues} source={synced(TEXTS, 0)} beat={beat} nowMonotonicMs={0} />),
+    );
+    spy.mockClear();
+    await advance(5_000);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  test('the seconds ticking does not replay the entrance', async () => {
+    jest.setSystemTime(CLOCK_NOW);
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    const view = await render(inProvider(at()));
+    await advance(0);
+    const entrance = new Set(
+      spy.mock.calls.map(([input]) => (input as motion.MotionInput).timeMs - (input as motion.MotionInput).elapsedMs),
+    );
+    spy.mockClear();
+    await advance(3_000);
+    // Whatever the frames evaluated, every glyph is still timed from the same start.
+    for (const [input] of spy.mock.calls) {
+      const { timeMs, elapsedMs } = input as motion.MotionInput;
+      expect(entrance).toContain(timeMs - elapsedMs);
+    }
+    expect(view.getAllByTestId(/^glyph-/).length).toBeGreaterThan(8);
+  });
 });
 
 describe("the lamp's focus (focusTarget)", () => {
@@ -215,35 +302,27 @@ describe("the lamp's focus (focusTarget)", () => {
     expect(second.y).toBeCloseTo(centreOf(1).y, 5);
   });
 
-  test("in idle the focus is the centre of the epoch's accent anchor (spec §3e)", async () => {
+  test("in idle the focus is the centre of the clock's HH:MM", async () => {
+    jest.setSystemTime(CLOCK_NOW);
     const spy = jest.spyOn(textureBackground, 'TextureBackground');
     await renderStage({ source: { kind: 'idle', direction: null, track: null }, beat, nowMonotonicMs: 0 });
-    // beat.bar 2: epoch 0, bar 2 of it. The jest font: advance sizePx, ascent −0.88, descent 0.12.
-    const { glyphs } = composeIdle(0, 2, DEFAULT_IDLE_GLYPHS, VIEWPORT, null, jestMeasure);
-    const anchor = glyphs.find((g) => g.face === 'primary' && g.accent === true)!;
+    // The jest font (every face): advance sizePx, ascent −0.88, descent 0.12.
+    const { focus: expected } = composeClock(CLOCK_NOW, VIEWPORT, null, jestMeasure, jestMeasure);
     const focus = focusOf(spy);
-    expect(focus.x).toBeCloseTo((anchor.x + anchor.sizePx / 2) / VIEWPORT.width, 5);
-    expect(focus.y).toBeCloseTo((anchor.y - anchor.sizePx * 0.38) / VIEWPORT.height, 5);
+    expect(focus.x).toBeCloseTo(expected!.x / VIEWPORT.width, 5);
+    expect(focus.y).toBeCloseTo(expected!.y / VIEWPORT.height, 5);
     expect(focus).not.toEqual(IDLE_FOCUS);
   });
 
-  test('the lamp moves to the next accent anchor when the epoch changes', async () => {
+  test('the lamp holds still while the clock ticks', async () => {
+    jest.setSystemTime(CLOCK_NOW);
     const spy = jest.spyOn(textureBackground, 'TextureBackground');
-    const idleAt = (bar: number) => (
-      <LyricStage
-        beatValues={beatValues}
-        source={{ kind: 'idle', direction: null, track: null }}
-        beat={{ ...beat, bar }}
-        nowMonotonicMs={0}
-      />
-    );
-    const view = await render(inProvider(idleAt(2)));
-    const seen = [focusOf(spy)];
-    for (const bar of [10, 18, 26, 34]) {
-      await view.rerender(inProvider(idleAt(bar)));
-      seen.push(focusOf(spy));
-    }
-    expect(new Set(seen.map((f) => `${f.x.toFixed(4)},${f.y.toFixed(4)}`)).size).toBeGreaterThan(1);
+    await renderStage({ source: { kind: 'idle', direction: null, track: null }, beat, nowMonotonicMs: 0 });
+    const first = { ...focusOf(spy) };
+    await act(async () => {
+      jest.advanceTimersByTime(61_000);
+    });
+    expect(focusOf(spy)).toEqual(first);
   });
 
   test('without typefaces (no anchor yet) the focus rests a little above the centre', async () => {
@@ -1060,8 +1139,7 @@ describe('the surge: beat-head glow and the palette change', () => {
   });
 });
 
-describe('the idle print: faces, accent and the caption rule (visual overhaul spec §3e)', () => {
-  const XL = 390 * SIZE_RATIO.xl;
+describe('the idle clock: faces, accent and the caption rule', () => {
   const XS = 390 * SIZE_RATIO.xs;
   const track = { title: '架空の歌', artist: '架空の人' };
 
@@ -1091,36 +1169,39 @@ describe('the idle print: faces, accent and the caption rule (visual overhaul sp
   async function facesOnStage(songDirection: SongDirection | null) {
     tagFonts();
     const view = await renderStage({ source: { kind: 'idle', direction: songDirection, track }, beat, nowMonotonicMs: 0 });
-    const glyphTexts = (view.getAllByTestId(/^glyph-/) as unknown as Node[]).flatMap(textsIn);
-    const anchors = glyphTexts.filter((t) => t.props.font.getSize() === XL).map((t) => t.props.font.face as string);
-    const rest = glyphTexts.filter((t) => t.props.font.getSize() !== XL).map((t) => t.props.font.face as string);
+    const faceOf = (g: Node) => textsIn(g).map((t) => t.props.font.face as string);
+    const glyphs = view.getAllByTestId(/^glyph-/) as unknown as Node[];
+    const isTime = (g: Node) => /^glyph-1\d\d$/.test(g.props.testID);
+    const time = glyphs.filter(isTime).flatMap(faceOf);
+    const rest = glyphs.filter((g) => !isTime(g)).flatMap(faceOf);
     const caption = view.getByTestId('idle-caption').props.font.face as string;
     const all = textsIn(view.container as unknown as Node).map((t) => t.props.font.face as string);
-    return { anchors: new Set(anchors), rest: new Set([...rest, caption]), all: new Set(all), view };
+    return { time: new Set(time), rest: new Set([...rest, caption]), all: new Set(all), view };
   }
 
-  test('before a song is recognised: anchors in mincho-old, the rest and the caption in gothic', async () => {
-    const { anchors, rest, all } = await facesOnStage(null);
-    expect(anchors).toEqual(new Set(['mincho-old:regular']));
+  test('the time in mincho-old; the seconds, the date and the caption in gothic', async () => {
+    const { time, rest, all } = await facesOnStage(null);
+    expect(time).toEqual(new Set(['mincho-old:regular']));
     expect(rest).toEqual(new Set(['gothic:regular']));
     expect(all.size).toBe(2);
   });
 
-  test("a recognised song: anchors in its most used face, the rest in its other face", async () => {
-    const { anchors, rest, all } = await facesOnStage(songWith(['brush', 'gothic-round', 'brush']));
-    expect(anchors).toEqual(new Set(['brush:regular']));
-    expect(rest).toEqual(new Set(['gothic-round:regular']));
-    expect(all.size).toBe(2);
+  test("a recognised song does not change the clock's faces (the song's faces are the nameplate's)", async () => {
+    for (const faces of [
+      ['brush', 'gothic-round', 'brush'],
+      ['gothic', 'mincho', 'gothic'],
+    ] as fonts.FontKey[][]) {
+      const { time, rest, all, view } = await facesOnStage(songWith(faces));
+      expect(time).toEqual(new Set(['mincho-old:regular']));
+      expect(rest).toEqual(new Set(['gothic:regular']));
+      expect(all.size).toBe(2);
+      await view.unmount();
+      jest.restoreAllMocks();
+    }
   });
 
-  test('a gothic primary sets the anchors bold, the rest regular', async () => {
-    const { anchors, rest, all } = await facesOnStage(songWith(['gothic', 'mincho', 'gothic']));
-    expect(anchors).toEqual(new Set(['gothic:bold']));
-    expect(rest).toEqual(new Set(['mincho:regular']));
-    expect(all.size).toBe(2);
-  });
-
-  test('one anchor is in the accent, and so is the swapped glyph; the rest in the ink', async () => {
+  test('only the weekday kanji is in the accent; the rest in the ink', async () => {
+    jest.setSystemTime(CLOCK_NOW);
     const view = await renderStage({ source: { kind: 'idle', direction: null, track }, beat, nowMonotonicMs: 0 });
     const accentNow = view.getByTestId('idle-caption-rule').props.color.value as string;
     const fills = (view.getAllByTestId(/^glyph-/) as unknown as Node[]).map((g) => ({
@@ -1128,16 +1209,13 @@ describe('the idle print: faces, accent and the caption rule (visual overhaul sp
       fill: textsIn(g).find((t) => t.props.style !== 'stroke')!,
     }));
     const accents = fills.filter(({ fill }) => fill.props.color.value === accentNow);
-    // beat.bar 2: two swaps into the epoch, so one swapped glyph (index ≥ 1000).
-    const swapped = fills.filter(({ testID }) => Number(testID.replace('glyph-', '')) >= 1000);
-    expect(swapped).toHaveLength(1);
-    expect(accents.map(({ testID }) => testID)).toContain(swapped[0]!.testID);
-    expect(accents.filter(({ fill }) => fill.props.font.getSize() === XL).length).toBeGreaterThanOrEqual(1);
-    expect(accents.length).toBeLessThanOrEqual(2);
-    expect(fills.length - accents.length).toBeGreaterThanOrEqual(3);
+    // 11月8日（日）: the weekday is the date row's glyph 6.
+    expect(accents.map(({ testID }) => testID)).toEqual(['glyph-6']);
+    expect(accents[0]!.fill.props.text).toBe('日');
+    expect(fills.length).toBe(8 + 8);
   });
 
-  test('the caption: secondary face xs at 0.6, under a 12×2 accent rule, where it was', async () => {
+  test('the caption: gothic xs at 0.6, under a 12×2 accent rule, where it was', async () => {
     const view = await renderStage({ source: { kind: 'idle', direction: null, track }, beat, nowMonotonicMs: 0 });
     const caption = view.getByTestId('idle-caption');
     expect(caption.props).toMatchObject({ x: 24, y: STAGE_AREA.captionBaseline, opacity: 0.6 });

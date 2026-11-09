@@ -1,6 +1,6 @@
 import { Canvas, Group, Paint, Rect, Shadow, Text } from '@shopify/react-native-skia';
 import type { SkFont } from '@shopify/react-native-skia';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 import type { LayoutChangeEvent } from 'react-native';
 import { useDerivedValue, useFrameCallback, useSharedValue } from 'react-native-reanimated';
@@ -9,7 +9,7 @@ import { useSafeAreaFrame, useSafeAreaInsets } from 'react-native-safe-area-cont
 import type { BeatState } from '../beat/types';
 import { lightHexFor, rgbaOf } from '../direction/palettes';
 import { surgeHighHex } from '../direction/surge';
-import { DEFAULT_IDLE_GLYPHS, DEFAULT_PALETTE } from '../direction/types';
+import { DEFAULT_PALETTE } from '../direction/types';
 import type { LineDirection, SongDirection } from '../direction/types';
 import { unsyncedNote } from '../recognition/recognitionCopy';
 import type { LyricLine, UnsyncedKind } from '../recognition/types';
@@ -23,8 +23,8 @@ import type { FontKey, FontWeight } from './fonts';
 import { GlowLayer } from './GlowLayer';
 import { GlyphLayer } from './GlyphLayer';
 import type { GlyphBody } from './GlyphLayer';
-import { captionText, composeIdle, IDLE_EPOCH_BARS, idleFaces } from './idleComposition';
-import type { IdleComposition, IdleFaces, IdleTrack } from './idleComposition';
+import { captionText, CLOCK_TEXT_FACE, CLOCK_TIME_FACE, composeClock, idleFaces } from './idleComposition';
+import type { IdleComposition, IdleTrack } from './idleComposition';
 import { layoutLine, printArea, SIZE_RATIO } from './layout';
 import type { GlyphMeasure, LineLayout, PlacedGlyph, PrintArea, Viewport } from './layout';
 import { dropHeadMs, entranceDurationMs, exitDurationMs, TEMPO_FEEL_FACTOR } from './motion';
@@ -279,7 +279,7 @@ function contextLine(
   };
 }
 
-/** The idle glyphs split by face role, one GlyphLayer each (spec §3e). */
+/** The idle clock's glyphs split by face role, one GlyphLayer each: the time, then the seconds and the date. */
 function splitByFace(glyphs: readonly PlacedGlyph[]): { primary: PlacedGlyph[]; secondary: PlacedGlyph[] } {
   return {
     primary: glyphs.filter((g) => g.face === 'primary'),
@@ -318,6 +318,8 @@ const TITLE_INDEX = -3;
 const DROP_LINE_DONE = 'drop:done';
 /** Slack after an exit's computed end before its layer is removed. */
 const EXIT_SLACK_MS = 80;
+/** The idle clock ticks this long after each second boundary, so a timer firing early still lands in the new second. */
+const CLOCK_TICK_SLACK_MS = 15;
 
 /**
  * One recognition drop (design spec §7), keyed by its fire time. The stage
@@ -331,8 +333,6 @@ interface Drop {
   headMs: number;
   idleRiseAtMs: number;
   idleGlyphs: PlacedGlyph[] | null;
-  /** The faces those idle glyphs were set in, so they keep them while they scatter. */
-  idleFaces: IdleFaces;
   /** The scene key of the line that drops in; null until one is shown, DROP_LINE_DONE after it. */
   lineKey: string | null;
 }
@@ -351,7 +351,7 @@ interface DropPlay {
  * glyphs (or the idle composition) on a second Canvas stacked above it.
  *
  * Layout runs on the JS thread only when the source, viewport or typefaces
- * change (idle also when the bar changes); all motion is derived on the UI
+ * change (the idle clock also once a second); all motion is derived on the UI
  * thread from the `time` shared value and the beat shared values.
  */
 export function LyricStage({
@@ -407,9 +407,10 @@ export function LyricStage({
   const songDirection = source.direction;
   const lineIndex = scheduled?.index ?? -1;
   const lineIsEmpty = scheduled?.isEmpty ?? true;
-  // The faces the idle composition and the nameplate are set in (spec §3e):
-  // from the song's line directions, or mincho-old over gothic before a song
-  // is recognised (and for a song without lines, which has no directions).
+  // The faces the nameplate is set in (spec §3e): from the song's line
+  // directions, or mincho-old over gothic before a song is recognised (and for
+  // a song without lines, which has no directions). The idle clock does not
+  // use them; it is always CLOCK_TIME_FACE over CLOCK_TEXT_FACE.
   const faces = useMemo(() => idleFaces(songDirection), [songDirection]);
 
   // The print area (visual overhaul spec §3d), shared with the idle
@@ -511,7 +512,6 @@ export function LyricStage({
   // The idle composition shown in the previous render (null while a line is on
   // stage): the glyphs a drop firing now sends scattering.
   const idleShownRef = useRef<IdleComposition | null>(null);
-  const idleFacesShownRef = useRef<IdleFaces>(faces);
   if (dropAtMs !== null && !reducedMotion && dropRef.current?.fireAtMs !== dropAtMs) {
     const periodMs = beatValues.periodMs.value;
     const headMs = dropHeadMs(
@@ -526,7 +526,6 @@ export function LyricStage({
       headMs,
       idleRiseAtMs: headMs + exitDurationMs('scatter', idleGlyphs?.length ?? 0, periodMs),
       idleGlyphs,
-      idleFaces: idleFacesShownRef.current,
       lineKey: null,
     };
   }
@@ -612,47 +611,54 @@ export function LyricStage({
   }, [exiting, beatValues]);
 
   const showIdle = fonts !== null && scene === null;
-  const idleGlyphs = songDirection?.idleGlyphs ?? DEFAULT_IDLE_GLYPHS;
   const trackTitle = source.track?.title ?? null;
   const trackArtist = source.track?.artist ?? null;
   captionCountRef.current =
     trackTitle !== null && trackArtist !== null
       ? [...captionText({ title: trackTitle, artist: trackArtist })].filter((c) => c.trim() !== '').length
       : 0;
-  // The idle composition is fixed inside an 8-bar epoch; one glyph swaps per
-  // bar. `beat.bar` reaches the stage frozen through silence, so a quiet room
-  // holds the composition still.
-  const epoch = Math.floor(beat.bar / IDLE_EPOCH_BARS);
-  const barInEpoch = beat.bar % IDLE_EPOCH_BARS;
+  // The idle clock's time: a wall clock, so it keeps going through silence.
+  // Ticks only while idle is shown, on each second boundary, and re-renders
+  // only when the second has actually changed (an early timer is a no-op), so
+  // the stage re-renders at most once a second for it. A layout effect, so
+  // the time is current before the first idle frame is painted.
+  const [clockNow, setClockNow] = useState(() => new Date());
+  useLayoutEffect(() => {
+    if (!showIdle) return undefined;
+    let id: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      const now = new Date();
+      setClockNow((previous) =>
+        Math.floor(previous.getTime() / 1000) === Math.floor(now.getTime() / 1000) ? previous : now,
+      );
+      id = setTimeout(tick, 1000 - now.getMilliseconds() + CLOCK_TICK_SLACK_MS);
+    };
+    tick();
+    return () => clearTimeout(id);
+  }, [showIdle]);
   const idle = useMemo(() => {
     if (!showIdle || fonts === null) return null;
     const track =
       trackTitle !== null && trackArtist !== null ? { title: trackTitle, artist: trackArtist } : null;
-    return composeIdle(epoch, barInEpoch, idleGlyphs, viewport, track, measureWith(fonts, 'gothic', 'regular'));
-  }, [barInEpoch, epoch, fonts, idleGlyphs, showIdle, trackArtist, trackTitle, viewport]);
-  // Stage-clock times at which the current bar / epoch first appeared, so the
-  // idle layers can time their `rise` entrances: the whole composition rises
-  // at an epoch change, and the one swapped glyph rises at its bar change.
-  // (The stage clock tracks performance.now(); see the anchor logic above.)
-  const barRef = useRef(beat.bar);
-  const barStartedAtRef = useRef(nowMonotonicMs);
-  if (barRef.current !== beat.bar) {
-    barRef.current = beat.bar;
-    barStartedAtRef.current = performance.now();
+    return composeClock(
+      clockNow,
+      viewport,
+      track,
+      measureWith(fonts, CLOCK_TEXT_FACE, 'regular'),
+      measureWith(fonts, CLOCK_TIME_FACE, 'regular'),
+    );
+  }, [clockNow, fonts, showIdle, trackArtist, trackTitle, viewport]);
+  // When idle last came on, on the stage clock (which tracks performance.now();
+  // see the anchor logic above): the clock rises in from here. The seconds
+  // ticking never move it, so the entrance plays once per appearance.
+  const idleOnRef = useRef(showIdle);
+  const idleStartedAtRef = useRef(nowMonotonicMs);
+  if (idleOnRef.current !== showIdle) {
+    idleOnRef.current = showIdle;
+    if (showIdle) idleStartedAtRef.current = performance.now();
   }
-  const epochRef = useRef(epoch);
-  const epochStartedAtRef = useRef(nowMonotonicMs);
-  if (epochRef.current !== epoch) {
-    epochRef.current = epoch;
-    epochStartedAtRef.current = performance.now();
-  }
-  const idleSwapped = idle?.glyphs.find((g) => g.index >= 1000) ?? null;
-  const idleBase = useMemo(
-    () => (idle === null ? null : splitByFace(idle.glyphs.filter((g) => g.index < 1000))),
-    [idle],
-  );
+  const idleBase = useMemo(() => (idle === null ? null : splitByFace(idle.glyphs)), [idle]);
   idleShownRef.current = idle;
-  idleFacesShownRef.current = faces;
   // After a drop the idle layers are remounted (key) so their rise replays,
   // timed to begin once the previous idle glyphs have scattered.
   const idleKey = drop?.fireAtMs ?? 0;
@@ -665,26 +671,31 @@ export function LyricStage({
   const captionTrace = useMemo(
     () =>
       caption !== null && captionTraceFromMs !== null && fonts !== null
-        ? captionGlyphs(caption, measureWith(fonts, faces.secondary, 'regular'))
+        ? captionGlyphs(caption, measureWith(fonts, CLOCK_TEXT_FACE, 'regular'))
         : null,
-    [caption, captionTraceFromMs, faces.secondary, fonts],
+    [caption, captionTraceFromMs, fonts],
   );
 
-  // The lamp's centre (visual overhaul spec §3c.3, §3e): the line on stage's
-  // bounds, in uv; in idle the centre of the epoch's accent anchor (so the
-  // lamp slides to another row each epoch); failing both, a little above the
-  // centre. Written only when it moves (a new line, a new epoch, a new
-  // viewport); the background slides the lamp there on the UI thread.
+  // The lamp's centre (visual overhaul spec §3c.3): the line on stage's
+  // bounds, in uv; in idle the clock's own focus (the centre of its HH:MM), or
+  // failing that a primary accent glyph's centre; failing all, a little above
+  // the centre. Written only when it moves (a new line, idle coming on, a new
+  // viewport; the clock's focus does not move with the seconds); the
+  // background slides the lamp there on the UI thread.
   const focusTarget = useSharedValue<Uv>(IDLE_FOCUS);
   const sceneBounds = scene?.layout.bounds ?? null;
+  const idleFocus = idle?.focus ?? null;
   const idleAnchor = idle?.glyphs.find((g) => g.face === 'primary' && g.accent === true) ?? null;
   let focusX = IDLE_FOCUS.x;
   let focusY = IDLE_FOCUS.y;
   if (sceneBounds !== null) {
     focusX = (sceneBounds.x + sceneBounds.width / 2) / width;
     focusY = (sceneBounds.y + sceneBounds.height / 2) / height;
+  } else if (idleFocus !== null) {
+    focusX = idleFocus.x / width;
+    focusY = idleFocus.y / height;
   } else if (idleAnchor !== null && fonts !== null) {
-    const { advance, ascent, descent } = measureWith(fonts, faces.primary, faces.anchorWeight)(
+    const { advance, ascent, descent } = measureWith(fonts, CLOCK_TIME_FACE, 'regular')(
       idleAnchor.char,
       idleAnchor.sizePx,
     );
@@ -736,24 +747,15 @@ export function LyricStage({
   } as const;
   // Stable font getters keep the memoised GlyphLayers from re-rendering on every beat update.
   const gothic = useCallback((sizePx: number) => fonts!('gothic', 'regular', sizePx), [fonts]);
-  // The idle faces (spec §3e): anchors in the primary, the rest in the
-  // secondary. Idle glyphs scattering at a drop keep the faces they were in.
-  const idlePrimary = useCallback(
-    (sizePx: number) => fonts!(faces.primary, faces.anchorWeight, sizePx),
-    [fonts, faces.primary, faces.anchorWeight],
-  );
-  const idleSecondary = useCallback(
+  // The idle clock's faces: the time in CLOCK_TIME_FACE, the seconds, the
+  // date and the caption in CLOCK_TEXT_FACE, whatever the song (so a clock
+  // scattering at a drop is in the faces it was set in, too).
+  const idlePrimary = useCallback((sizePx: number) => fonts!(CLOCK_TIME_FACE, 'regular', sizePx), [fonts]);
+  const idleSecondary = useCallback((sizePx: number) => fonts!(CLOCK_TEXT_FACE, 'regular', sizePx), [fonts]);
+  // The nameplate's artist is in the song's secondary face.
+  const plateSecondary = useCallback(
     (sizePx: number) => fonts!(faces.secondary, 'regular', sizePx),
     [fonts, faces.secondary],
-  );
-  const exitFaces = drop?.idleFaces ?? faces;
-  const exitIdlePrimary = useCallback(
-    (sizePx: number) => fonts!(exitFaces.primary, exitFaces.anchorWeight, sizePx),
-    [fonts, exitFaces.primary, exitFaces.anchorWeight],
-  );
-  const exitIdleSecondary = useCallback(
-    (sizePx: number) => fonts!(exitFaces.secondary, 'regular', sizePx),
-    [fonts, exitFaces.secondary],
   );
   const lineFace = scene?.direction.font ?? 'gothic';
   const lineWeight = scene?.direction.weight ?? 'regular';
@@ -821,13 +823,13 @@ export function LyricStage({
                   key={`exit-idle-${role}`}
                   {...shared}
                   glyphs={idleExitByFace[role]}
-                  fontFor={role === 'primary' ? exitIdlePrimary : exitIdleSecondary}
+                  fontFor={role === 'primary' ? idlePrimary : idleSecondary}
                   lineStartedAtMs={drop.headMs}
                   entrance="scatter"
                   hold="still"
                   accent={false}
                   exiting
-                  seed={epoch + 1}
+                  seed={1}
                   testIDPrefix="exit-idle-glyph"
                 />
               ))
@@ -947,7 +949,7 @@ export function LyricStage({
                     {...shared}
                     body={null}
                     glyphs={nameplate.artist.glyphs}
-                    fontFor={idleSecondary}
+                    fontFor={plateSecondary}
                     lineStartedAtMs={lineStartedAtMs}
                     lineLandsAtMs={lineLandsAtMs}
                     entrance="fade"
@@ -979,9 +981,12 @@ export function LyricStage({
           ) : null}
           {idle !== null && idleBase !== null ? (
             <>
-              {/* The idle print (spec §3e): one layer per face, under the same
-                  grounding shadow as the line on stage (§3c.2), one offscreen
-                  layer for the whole composition. Not on the caption. */}
+              {/* The idle clock: one layer per face, under the same grounding
+                  shadow as the line on stage (§3c.2), one offscreen layer for
+                  the whole clock. Not on the caption. It rises in once each
+                  time idle comes on (or after a drop's scatter) and then holds
+                  still: a wall clock does not wobble. The glyph keys are
+                  stable, so the ticking seconds swap characters in place. */}
               <Group
                 layer={
                   <Paint>
@@ -996,26 +1001,13 @@ export function LyricStage({
                     {...shared}
                     glyphs={idleBase[role]}
                     fontFor={role === 'primary' ? idlePrimary : idleSecondary}
-                    lineStartedAtMs={Math.max(epochStartedAtRef.current, idleRiseAtMs)}
+                    lineStartedAtMs={Math.max(idleStartedAtRef.current, idleRiseAtMs)}
                     entrance="rise"
-                    hold="breathe"
+                    hold="still"
                     accent={false}
-                    seed={epoch}
+                    seed={0}
                   />
                 ))}
-                {idleSwapped !== null ? (
-                  <GlyphLayer
-                    key={`idle-swap-${idleKey}`}
-                    {...shared}
-                    glyphs={[idleSwapped]}
-                    fontFor={idleSwapped.face === 'primary' ? idlePrimary : idleSecondary}
-                    lineStartedAtMs={Math.max(barStartedAtRef.current, idleRiseAtMs)}
-                    entrance="rise"
-                    hold="breathe"
-                    accent={false}
-                    seed={epoch}
-                  />
-                ) : null}
               </Group>
               {idle.caption !== null ? (
                 <Rect

@@ -42,25 +42,24 @@ export interface PlacedGlyph {
   sizePx: number;
   emphasized: boolean;
   /**
-   * Extra breathe phase for this glyph, in cycles. Only the idle composition
-   * sets it (from the glyph's grid cell, so the breathe wave crosses the
-   * grid); line layouts leave it unset, which motion reads as 0.
+   * Extra breathe phase for this glyph, in cycles. Nothing sets it at present
+   * (the idle poster used it for a wave across its grid); unset reads as 0.
    */
   phaseOffset?: number;
   /**
-   * Which of the idle screen's two faces sets this glyph (visual overhaul spec
-   * §3e): the anchors take the primary face, the companions the secondary.
-   * Only the idle composition sets it; the stage resolves it to a FontKey.
+   * Which of the idle clock's two faces sets this glyph: the time row the
+   * primary, the seconds and the date the secondary. Only the idle
+   * composition sets it; the stage resolves it to a FontKey.
    */
   face?: 'primary' | 'secondary';
   /**
    * Drawn in the accent, statically, instead of the ink. Only the idle
-   * composition sets it (one anchor per epoch and the latest swapped glyph).
+   * composition sets it (the weekday kanji of the clock's date).
    */
   accent?: boolean;
   /**
    * Opacity multiplier on top of the motion's opacity. Only the idle
-   * composition sets it (its m-tier companions); unset reads as 1.
+   * composition sets it (the clock's seconds and date); unset reads as 1.
    */
   alpha?: number;
 }

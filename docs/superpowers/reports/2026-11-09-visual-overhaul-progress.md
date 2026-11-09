@@ -326,3 +326,67 @@
 - `durationMs` の供給元が無い（ShazamKit は長さを返さない）。Apple Music のカタログ照会や検索結果の長さの推定は別件。
 - 以上はすべて **未検証**（テスト・typecheck 未実行、実機未確認）。
 - 検証結果（2026-11-09、呼び出し側で実行）: `npm test -- --watchman=false` は 53 スイート・690 件全通過、`npm run typecheck` も通過。
+
+## 段階 H: idle 時計化（§3e 差し替え、2026-11-09）
+
+### 経緯（所有者判断）
+
+段階 A〜F の実機確認で、所有者が idle 画面（数字と記号のタイポグラフィ・ポスター。PR #6 + 段階 E）を「バグってるようにしか見えない。謎の UI」と却下した。意味のないダミー文字が浮いていることが根本の原因と判断し、**idle は時計にする**と所有者が決めた。視覚改修設計 §3e（idle の刷り物化）はこの範囲で差し替え。設計書 2 つに改定の注記を足した（`2026-10-18-lyric-typography-object-design.md` の「歌詞が無いとき」、`2026-11-09-visual-overhaul-design.md` §3e の冒頭）。
+
+### 実装
+
+- **`composeClock(now, viewport, track, measure, timeMeasure)`（`idleComposition.ts`、`composeIdle` を置き換え）。** `measure` は gothic（秒・日付・caption・版面）、`timeMeasure` は mincho-old（時刻）。戻り値は `IdleComposition`（glyphs + caption）に `focus?: { x, y }`（px、HH:MM の箱の中心）を足したもの。
+  - 時刻行 `HH:MM`（24 時間、ゼロ詰め）: mincho-old、`face: 'primary'`、index 100〜104。
+  - 秒 `:SS`: gothic、時刻の 0.32 倍、alpha 0.55、時刻と同じベースライン、時刻行の直後。`face: 'secondary'`、index 200〜202。
+  - 大きさ: 「HH:MM:SS」の幅が版面幅の 94% になる大きさを、基準 100px での実測から比例で求め、`[CLOCK_MIN_PX 48, CLOCK_MAX_PX 168]` に収める。
+  - 数字は**最も広い数字の幅のセル**に中央揃えで置く（手組みの等幅数字）。プロポーショナルな数字でも、数字が変わったとき隣が動かず、行全体が左右に揺れない。行の中央揃えもこのセル幅の合計で行うので、大きさ・位置は時刻によらず一定。
+  - ベースライン: 版面の上から 38%。ただし時刻の字面の上端が版面の上端より上に出ないよう下げる。
+  - 日付行 `M月D日（曜）`（曜日は漢字 1 字、括弧は全角）: gothic、`viewport.width × 0.066`（s = 0.06 よりやや大きめ）、alpha 0.75、自分の幅で水平中央。ベースラインは時刻のベースライン + 時刻の大きさ × 0.55 + 28px（版面の下端を超えるなら上げる）。**曜日の漢字だけ `accent: true`**。index 0〜（1 日の中では不変）。
+  - caption は従来どおり `captionText(track)`（版面の左端、caption 行、xs。track が無ければ null。時計の位置は track の有無で変わらない）。
+- **`LyricStage`。**
+  - 時刻の state `clockNow`。`showIdle` の間だけ `useLayoutEffect` が秒の境目（+15ms の余裕）ごとに `setTimeout` を張り直し、**秒が実際に変わったときだけ** state を更新する（早く発火したタイマーは同じ Date を返すので React は再レンダーしない）。React の再レンダーは時計のために毎秒 1 回まで。layout effect なので、idle が出た最初のフレームから現在時刻になる。
+  - `composeIdle(epoch, bar, …)` を `composeClock(clockNow, …)` に替え、idle の合成から bar / epoch への依存を外した。無音でも止まらない。
+  - 書体: 時刻は `CLOCK_TIME_FACE`（mincho-old）、秒・日付・caption・caption の trace・散る idle は `CLOCK_TEXT_FACE`（gothic）で固定。曲の主・副書体（`idleFaces`）は銘板だけが使う（銘板のアーティスト用に `plateSecondary` を分けた）。
+  - 灯の焦点: `idle.focus` があればそれ（uv に換算）、無ければ従来の「primary かつ accent のグリフ」の中心（時計では該当なし）、それも無ければ `IDLE_FOCUS`。時計の焦点は秒・分で動かないので、焦点の書き込みは idle に入ったとき（とビューポートの変化）だけ。
+  - 影（`idle-shadow`、face 別 2 層を 1 枚の接地影で包む）、ドロップ時の散り（`idleExit`）、caption と 12×2 の罫、caption の trace、グラデーションの身体は従来どおり。
+
+### 判断
+
+1. **時計の滞留は `still`（ポスターは `breathe`）。** `breathe` はグリフごとに原点まわりで拡縮するので、数字の並びが互いにずれて揺れて見え、「バグに見える」所見を繰り返すおそれがある。壁時計は揺らさない。音への応答は灯・地・テクスチャ（拍・帯域・サビ）が受け持つ。
+2. **登場の `rise` は idle に入るたび 1 回。** 時刻を `idleStartedAtRef`（`showIdle` が偽 → 真になったレンダーの `performance.now()`。初回は `nowMonotonicMs`）から上げる。ドロップ後は従来どおり `max(idle 開始, 散り終わり)`。毎秒の更新はこの値を変えず、グリフの key（index）も変わらないので、`AnimatedGlyph` は再マウントされず、動きの導出の依存も変わらない（entrance は再生されない）。
+3. **毎秒の更新が entrance・ドリフトを壊さない方法。** (a) 時刻は `LyricStage` の中の state で、`nowMonotonicMs` や舞台時計 `time` の錨には触れない（錨の effect は `nowMonotonicMs` にだけ依存）。(b) idle の層の `lineStartedAtMs` は idle の開始時刻の ref で、毎秒変わらない。(c) グリフの index は行ごとの固定帯なので key が安定し、文字だけ差し替わる。(d) 主役の行・退場・ドロップの計算は `scene` / `scheduled` / `dropAtMs` にだけ依存し、時計の state を見ない。(e) 焼き付きドリフトは `MusicageApp` のドリフト View（舞台全体を包む）で、`LyricStage` の再レンダーと独立。
+4. **秒の更新は `setInterval(1000)` ではなく秒の境目に合わせた `setTimeout`。** `setInterval` は位相がずれ、表示が最大 1 秒遅れたり秒が飛んだりする。
+5. **大きさの下限 48px は「実測が壊れたとき」の保険。** 実フォントでは 390pt 幅で fit がおよそ 110〜125px の見込み（ZenOldMincho の数字幅を 0.5〜0.55em と仮定。この環境ではフォントの実測をしていない）。依頼の目安 120〜160px より小さく出る可能性がある。下限を 120 にすると、数字の広い書体・狭い画面で版面からはみ出すので、fit（版面幅の 94%）を優先した。実機で小さすぎれば `TIME_WIDTH` か秒の比率（0.32）を調整する。
+6. **書体は時計と caption で 2 書体（mincho-old + gothic）に固定。** 曲が認識されていても idle 画面の書体は 2 つまで（caption を曲の副書体にすると 3 書体になる）。散る idle も同じ書体なので、`Drop.idleFaces` は不要になり外した。
+7. **日付行の幅は日によって変わる（中央揃え）。** 1 日 1 回なので許容。秒・分では動かない。
+
+### ポスター前提の仕組み: 外したもの・残したもの
+
+- **外した**: `composeIdle` 本体、`COLUMNS` / `ROWS` / `TIERS` / `MIN_COMPANIONS` / `MAX_COMPANIONS` / `ZIGZAG` / `MIN_ROW_PITCH` / `MUTED_ALPHA`、`fnv1a`、`Cell`、`IDLE_EPOCH_BARS`（参照が `LyricStage` だけだった）。`LyricStage` の epoch / barInEpoch、bar と epoch の開始時刻の ref、差し替えグリフ（index ≥ 1000）の専用層 `idle-swap`、`Drop.idleFaces` と `idleFacesShownRef`、散る idle 用の書体ゲッター 2 つ、`DEFAULT_IDLE_GLYPHS` の import。
+- **残した**: `IdleTrack`、`IdleComposition`（`focus` を追加）、`captionText`、`IdleFaces` / `idleFaces` / `UNRECOGNIZED_IDLE_FACES`（銘板とそのテストが使う）、`splitByFace`（face 別 2 層）、`idle-shadow`、`idleKey`（ドロップ後の再マウント）と `idleRiseAtMs`、`idleExit`（散り）、caption の trace、灯の accent 錨のフォールバック。`PlacedGlyph` の `face` / `accent` / `alpha` / `phaseOffset` フィールドと `GlyphLayer` の解釈（時計が `face` / `accent` / `alpha` を使う。`phaseOffset` は今は誰も付けないが、`motion` の入力として残した）。
+- **触っていない**: director 側の `DEFAULT_IDLE_GLYPHS` と `SongDirection.idleGlyphs`（演出 JSON の契約・検証・フィクスチャ）。idle の描画では使わなくなった。
+
+### 変更ファイル
+
+- 変更: `src/typesetting/idleComposition.ts`、`src/typesetting/LyricStage.tsx`、`src/typesetting/layout.ts`（`PlacedGlyph` のコメントだけ）、`docs/superpowers/specs/2026-10-18-lyric-typography-object-design.md`、`docs/superpowers/specs/2026-11-09-visual-overhaul-design.md`、本ファイル。
+- テスト（書いたもの。**未実行**）: `src/typesetting/__tests__/idleComposition.test.ts` を時計用に書き換え（固定の Date で: 文字列とゼロ詰め・24 時間・年末年始、index の帯、秒・分の変化でセルの中心・ベースライン・大きさ・焦点が不変、94% 幅と中央、上限・下限、ベースライン 38% と日付の間隔、日付の中央と大きさ、版面内、焦点 = HH:MM の中心、face / accent / alpha、caption。`idleFaces` のテストは無変更）。`src/typesetting/__tests__/LyricStage.test.tsx`（「空行・未スケジュールで idle」を時計の文字列で確認、「bar で組み替わる」を削除し新 describe「the idle clock keeps wall time」: 秒の境目で同じ key のまま数字だけ変わる・コロンは変わらない・bar と無音に依存しない・合成は 5 秒で 4〜5 回まで・行が出ている間は 0 回・entrance の起点が毎秒の更新で変わらない。焦点のテストを「HH:MM の中心」「時計が進んでも灯は動かない」に置き換え。「the idle print」を「the idle clock」にして、書体は曲によらず mincho-old + gothic、accent は曜日の 1 字だけ、に置き換え。影・caption・罫・ドロップの散りと trace のテストは無変更）。時刻は `jest.setSystemTime` で固定（日曜 2026-11-08 09:05:07.500、ローカル時刻）。
+
+### 描画ノード・レイヤーへの影響
+
+- idle の `skText` は 5〜9 → 16 前後（日付 7〜10 + 時刻 5 + 秒 3）。層は 3 → 2（差し替え層が無くなった）。オフスクリーンは従来どおり `idle-shadow` の 1 枚（範囲は時計の 2 行に縮む）。
+- UI スレッドの導出は増えない（滞留が `still` になり、むしろ毎フレームの計算は軽くなる）。JS は毎秒 1 回の合成と再レンダー。
+
+### 実機で確認すること（段階 H）
+
+- idle が「時計」として一目で読める。時刻の大きさ（見込み 110〜125px）が足りるか、版面からはみ出さないか。ZenOldMincho の数字とコロンの見え方。
+- 秒が毎秒変わるだけで、コロンや他の数字がちらつかない・揺れない。分が変わるとき時刻行が左右に動かない。
+- 日付の曜日 1 字だけが特色で、うるさくない。日付の 0.75・秒の 0.55 が読める。
+- 灯が時刻に当たって止まっている（秒で動かない）。無音でも時計は進み、灯だけが絞られる。
+- 曲の認識（ドロップ）で時計が散って最初の行が落ちる。曲が終わって idle に戻ると時計が rise で出る。空行（間奏）のたびに時計が出入りして、うるさくないか。
+- 長時間の常時表示で焼き付き回避のドリフトが従来どおり効いている。毎秒の再レンダーで fps が落ちない・電池の減りが目立たない。
+- 日付が変わる瞬間（0:00）に日付行が正しく切り替わる。
+
+### 統合検証（相棒、2026-11-09、段階H＋銘板）
+
+- リモートの feat/visual-overhaul に別スレッドの銘板スナップショット（1b336df）が入ったため、ローカルで銘板（4d8dcc8）→段階H（4f1012d）の順に積み直して統合した。リモートの LyricStage.tsx は銘板コミットと blob 一致を確認済みで、今回の push は時計側の差分8ファイルのみ。
+- 統合ツリー全体検証：テスト 686 件全通過、typecheck 通過。
