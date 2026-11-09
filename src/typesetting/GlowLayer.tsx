@@ -95,7 +95,7 @@ function GlowGlyph({
   seed,
   feel,
 }: GlowGlyphProps) {
-  const { bar, confidence, lastOnsetAtMs, nextBeatAtMs, periodMs, low, surge } = beat;
+  const { bar, confidence, lastOnsetAtMs, nextBeatAtMs, periodMs, low, surge, silence } = beat;
   const { rotateDeg } = glyph;
   const anchorMs = lineLandsAtMs ?? lineStartedAtMs;
   const anticipationMs = lineLandsAtMs !== null ? Math.max(0, lineLandsAtMs - lineStartedAtMs) : 0;
@@ -123,6 +123,7 @@ function GlowGlyph({
         phaseOffset: glyph.phaseOffset ?? 0,
         anticipationMs,
         exiting: false,
+        silent: silence.value >= 0.5,
       }),
     [entrance, hold, anchorMs, anticipationMs, order, glyphCount, seed, feel, glyph.phaseOffset],
   );

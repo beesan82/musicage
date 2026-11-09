@@ -521,6 +521,24 @@ describe('context lines beside the line on stage (visual overhaul spec §3c.3)',
     }
   });
 
+  test('a next line of many rows under a horizontal line is pulled up off the reserved band (the same bottom as idle and the nameplate)', async () => {
+    // Fictional: a next line long enough to wrap into several xs rows.
+    const longNext = '朝を数えて'.repeat(24);
+    const lines = ['遠い灯の下で', '窓のむこうに朝を数えている', longNext];
+    const songDirection = withLines({ orientation: 'horizontal' });
+    const view = await renderStage({ source: synced(lines, 1, songDirection), beat, nowMonotonicMs: 100 });
+    const next = boxOf(view.getByTestId('context-next') as unknown as Node);
+    const rule = ruleOf(view, 'next');
+    // The print area's foot: the caption row's top less the margin, above the
+    // controls (BOTTOM_RESERVED over the bottom inset). The idle clock and the
+    // nameplate keep to this same bottom.
+    const controlsTop = STAGE_VIEWPORT.height - STAGE_VIEWPORT.insetBottom - (18 + 48 + 16 + 48);
+    expect(AREA.bottom).toBeLessThan(controlsTop);
+    expect(next.bottom).toBeLessThanOrEqual(AREA.bottom + 1e-6);
+    expect(rule.y + rule.height).toBeLessThanOrEqual(AREA.bottom + 1e-6);
+    expect(next.top).toBeGreaterThanOrEqual(AREA.top - 1e-6);
+  });
+
   test('a context line is the ink leaned toward the lamp, flat, with a 10×2 accent rule', async () => {
     const songDirection = withLines({ orientation: 'horizontal' });
     const view = await renderStage({ source: synced(texts, 1, songDirection), beat, nowMonotonicMs: 100 });
@@ -1429,6 +1447,210 @@ describe('a recognised song without synced lyrics: the nameplate', () => {
     });
     expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
     nowSpy.mockRestore();
+  });
+});
+
+describe('transitions: synced ⇄ nameplate ⇄ idle clock ⇄ lost', () => {
+  // Fictional songs. A has synced lines (xl, rise, still, so no context
+  // lines join the glyph inputs); B has none (the nameplate).
+  const songA = { title: '架空の歌', artist: '架空の人' };
+  const songB = { title: '夜の別歌', artist: '架空の組' };
+  const aDirection: SongDirection = {
+    ...direction,
+    lines: direction.lines.map((line) => ({ ...line, size: 'xl' as const, entrance: 'rise' as const, hold: 'still' as const })),
+  };
+  const bDirection = directSongByRules([], 'b');
+  const gridValues: BeatSharedValues = { ...beatValues, nextBeatAtMs: sv(10_300), periodMs: sv(500), confidence: sv(0.9) };
+  const syncedA = (dropAtMs: number | null): LyricStageProps['source'] => ({
+    kind: 'synced',
+    lines: toLines(TEXTS),
+    direction: aDirection,
+    scheduled: { index: 0, startedAtMs: 10_000, isEmpty: false },
+    track: songA,
+    dropAtMs,
+  });
+  const nameplateB = (dropAtMs: number | null): LyricStageProps['source'] => ({
+    kind: 'unsynced',
+    track: songB,
+    direction: bDirection,
+    reason: 'lyrics_unavailable',
+    dropAtMs,
+  });
+  const idleWith = (track: { title: string; artist: string } | null, dir: SongDirection | null = null): LyricStageProps['source'] => ({
+    kind: 'idle',
+    direction: dir,
+    track,
+  });
+  const stage = (source: LyricStageProps['source'], nowMonotonicMs = 10_000) =>
+    inProvider(<LyricStage beatValues={gridValues} source={source} beat={beat} nowMonotonicMs={nowMonotonicMs} />);
+  const flushUI = () =>
+    act(async () => {
+      jest.advanceTimersByTime(0);
+    });
+  const inputsOf = (spy: jest.SpyInstance) => spy.mock.calls.map(([input]) => input as motion.MotionInput);
+
+  test('a line leaving without a schedule (its song replaced) exits from now, not from the stale stage-clock anchor', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const view = await render(stage(syncedA(null), 10_000));
+    await flushUI();
+    // Five seconds on, song B's result arrives: the stage is idle for a
+    // render, while nowMonotonicMs still marks A's last line change.
+    nowSpy.mockReturnValue(15_000);
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await view.rerender(stage(idleWith(songB, bDirection), 10_000));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    const exits = inputsOf(spy).filter((i) => i.exiting && i.entrance === 'rise');
+    expect(exits.length).toBeGreaterThan(0);
+    // The exit's start is timeMs − elapsedMs.
+    for (const i of exits) expect(i.timeMs - i.elapsedMs).toBe(15_000);
+    nowSpy.mockRestore();
+  });
+
+  test('synced line → (one idle render) → another song’s nameplate: the line exits, the title drops, and no half-risen clock scatters', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const view = await render(stage(syncedA(null)));
+    await flushUI();
+    await view.rerender(stage(idleWith(songB, bDirection)));
+    await flushUI();
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await view.rerender(stage(nameplateB(10_000)));
+    await flushUI();
+
+    // The clock that came on for one render is replaced, not held up and scattered.
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    const title = inputsOf(spy).filter((i) => !i.exiting && i.hold === 'pulse');
+    expect(title.length).toBeGreaterThan(0);
+    for (const i of title) {
+      expect(i.entrance).toBe('drop');
+      expect(i.anticipationMs).toBe(300);
+    }
+    // No clock left on stage under the nameplate.
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+    nowSpy.mockRestore();
+  });
+
+  test('nameplate → (one idle render) → another song’s synced line: the title exits and the line drops', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const view = await render(stage(nameplateB(null)));
+    await flushUI();
+    await view.rerender(stage(idleWith(songA)));
+    await flushUI();
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await view.rerender(stage(syncedA(10_000)));
+    await flushUI();
+
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    // The title (4 glyphs) leaves; the band meter and the note are gone at once.
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    expect(view.queryAllByTestId(/^band-rule-/)).toHaveLength(0);
+    expect(view.queryByTestId('unsynced-note')).toBeNull();
+    const line = inputsOf(spy).filter((i) => !i.exiting);
+    expect(line.length).toBeGreaterThan(0);
+    for (const i of line) expect(i.entrance).toBe('drop');
+    nowSpy.mockRestore();
+  });
+
+  test('nameplate (dropped) → idle in a quiet room → the same nameplate again: it rises, the drop is not replayed', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const view = await render(stage(idleWith(null)));
+    await flushUI();
+    await view.rerender(stage(nameplateB(10_000)));
+    await flushUI();
+    await act(async () => {
+      jest.advanceTimersByTime(2_000);
+    });
+
+    // The quiet spell: idle with the song's caption; the title leaves as an exiting layer.
+    nowSpy.mockReturnValue(20_000);
+    await view.rerender(stage(idleWith(songB, bDirection)));
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    expect(view.getByTestId('idle-caption').props.text).toBe('架空の組 — 夜の別歌');
+    await act(async () => {
+      jest.advanceTimersByTime(2_000);
+    });
+    expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
+
+    // Sound returns: the same song, the same dropAtMs.
+    nowSpy.mockReturnValue(30_000);
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await view.rerender(stage(nameplateB(10_000)));
+    await flushUI();
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    const title = inputsOf(spy).filter((i) => !i.exiting && i.hold === 'pulse');
+    expect(title.length).toBeGreaterThan(0);
+    for (const i of title) {
+      expect(i.entrance).toBe('rise');
+      expect(i.anticipationMs).toBe(0);
+    }
+    nowSpy.mockRestore();
+  });
+
+  test('a settled clock still scatters when a song is recognized (idle → nameplate)', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    // The stage has been idle since it mounted: that clock counts as risen.
+    const view = await render(stage(idleWith(null)));
+    await flushUI();
+    const idleCount = view.getAllByTestId(/^glyph-/).length;
+    await view.rerender(stage(nameplateB(10_000)));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-idle-glyph-/)).toHaveLength(idleCount);
+    nowSpy.mockRestore();
+  });
+
+  test('a clock that came on after a line, and has risen, scatters at the next drop', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const view = await render(stage(syncedA(null)));
+    // The song is lost: the clock comes on at 10_000…
+    await view.rerender(stage(idleWith(null)));
+    await flushUI();
+    const idleCount = view.getAllByTestId(/^glyph-/).length;
+    // …and a new song is recognized a second later.
+    nowSpy.mockReturnValue(11_000);
+    await view.rerender(stage(nameplateB(11_000)));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-idle-glyph-/)).toHaveLength(idleCount);
+    nowSpy.mockRestore();
+  });
+
+  test('nameplate → lost (no track): the title exits and the clock has no caption', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const view = await render(stage(nameplateB(null)));
+    await view.rerender(stage(idleWith(null)));
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    expect(view.queryByTestId('idle-caption')).toBeNull();
+    expect(view.queryByTestId('idle-caption-rule')).toBeNull();
+    expect(view.queryAllByTestId(/^nameplate-artist-glyph-/)).toHaveLength(0);
+    nowSpy.mockRestore();
+  });
+});
+
+describe('silence on stage: the title stands still and the meter lies at its base', () => {
+  test('every glyph motion on stage is told the room is silent while beat.silence is up', async () => {
+    const quietValues: BeatSharedValues = { ...beatValues, silence: sv(1), nextBeatAtMs: sv(10_300), periodMs: sv(500) };
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await render(
+      inProvider(
+        <LyricStage
+          beatValues={quietValues}
+          source={{ kind: 'unsynced', track: { title: '架空の歌', artist: '架空の人' }, direction: directSongByRules([], 'u'), reason: 'instrumental', dropAtMs: null }}
+          beat={beat}
+          nowMonotonicMs={100}
+        />,
+      ),
+    );
+    const title = spy.mock.calls.map(([i]) => i as motion.MotionInput).filter((i) => i.hold === 'pulse');
+    expect(title.length).toBeGreaterThan(0);
+    for (const i of title) expect(i.silent).toBe(true);
+  });
+
+  test('with sound the flag is down', async () => {
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await renderStage({ source: synced(TEXTS, 0), beat, nowMonotonicMs: 100 });
+    const inputs = spy.mock.calls.map(([i]) => i as motion.MotionInput);
+    expect(inputs.length).toBeGreaterThan(0);
+    for (const i of inputs) expect(i.silent).toBe(false);
   });
 });
 

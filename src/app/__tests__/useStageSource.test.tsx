@@ -402,6 +402,45 @@ describe('useStageSource', () => {
       expect(unsyncedOf(hook.result.current).reason).toBe('plain');
     });
 
+    test('a room quiet for SILENCE_REARM_MS hands the nameplate to idle with the track; sound brings it back without a new drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plain });
+      expect(unsyncedOf(hook.result.current).dropAtMs).toBe(10_500);
+      /** Frames every 50 ms on the mocked clock (10_000 + t), from `fromMs` for `forMs`. */
+      const emitFor = async (fromMs: number, forMs: number, level: number) => {
+        for (let t = fromMs; t <= fromMs + forMs; t += 50) {
+          clockMs = 10_000 + t;
+          await act(async () => emitter.emit(frame(clockMs, level)));
+        }
+      };
+
+      // 3.5 s of silence: the nameplate stays (its meter lies at the base and
+      // its title stands still on the stage side).
+      await emitFor(1_000, 3_500, 0);
+      expect(unsyncedOf(hook.result.current).reason).toBe('plain');
+
+      // Past SILENCE_REARM_MS: idle, still captioned with the song.
+      await emitFor(4_550, 600, 0);
+      expect(hook.result.current.source).toEqual({
+        kind: 'idle',
+        direction: expect.objectContaining({ lines: [] }),
+        track: { title: track.title, artist: track.artist },
+      });
+
+      // Sound returns: the same song's nameplate, with the drop it already had.
+      await emitFor(5_200, 200, 0.3);
+      const back = unsyncedOf(hook.result.current);
+      expect(back.reason).toBe('plain');
+      expect(back.dropAtMs).toBe(10_500);
+    });
+
+    test('leaving listening never hides the nameplate (the quiet rule needs the ear)', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plain });
+      await hook.rerender({ status: 'idle', playback: playbackOff, result: plain });
+      expect(unsyncedOf(hook.result.current).reason).toBe('plain');
+    });
+
     test('the band values keep flowing to the shared values while the nameplate is on stage', async () => {
       const hook = await setup({ result: plain });
       expect(hook.result.current.source.kind).toBe('unsynced');

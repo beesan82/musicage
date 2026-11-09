@@ -161,6 +161,40 @@ describe('hold pulse on the continuous pulse', () => {
   });
 });
 
+describe('a silent room: the beat-driven holds stand still', () => {
+  // The engine keeps its grid (nextBeatAtMs, periodMs) through silence, so
+  // without the flag the anticipation would go on pulling the glyphs back
+  // before every predicted head: a title that keeps breathing with the
+  // needle lifted.
+  test('pulse: no anticipation pull-back and no lift, even on a live grid', () => {
+    expect(at({ hold: 'pulse', ...withPhase(0.925) }).scale).toBeCloseTo(0.98, 10);
+    expect(at({ hold: 'pulse', ...withPhase(0.925), silent: true })).toEqual(identity);
+    expect(at({ hold: 'pulse', ...withOnset(), silent: true })).toEqual(identity);
+  });
+
+  test('pulse stays at identity over a whole beat of silence', () => {
+    for (let phase = 0; phase < 1; phase += 0.05) {
+      expect(at({ hold: 'pulse', ...withPhase(phase), silent: true }).scale).toBe(1);
+    }
+  });
+
+  test('breathe and shake rest too; drift is not beat-driven and keeps going', () => {
+    expect(at({ hold: 'breathe', ...withPhase(0.25), silent: true })).toEqual(identity);
+    expect(at({ hold: 'shake', ...withOnset(), periodMs: 500, silent: true })).toEqual(identity);
+    const drift = at({ hold: 'drift', elapsedMs: 900, silent: true });
+    expect(drift.dx !== 0 || drift.dy !== 0).toBe(true);
+  });
+
+  test('unset or false is the old behaviour', () => {
+    expect(at({ hold: 'pulse', ...withPhase(0.925), silent: false }).scale).toBeCloseTo(0.98, 10);
+  });
+
+  test('the entrance and the exit are not affected', () => {
+    expect(at({ entrance: 'rise', elapsedMs: 0, silent: true }).dy).toBe(24);
+    expect(at({ entrance: 'rise', exiting: true, elapsedMs: 160, silent: true }).opacity).toBeCloseTo(0.5, 10);
+  });
+});
+
 test('hold does not apply before the entrance is done', () => {
   const early = at({ entrance: 'fade', elapsedMs: 100, hold: 'pulse', ...withOnset(100) });
   expect(early.scale).toBe(1);

@@ -390,3 +390,80 @@
 
 - リモートの feat/visual-overhaul に別スレッドの銘板スナップショット（1b336df）が入ったため、ローカルで銘板（4d8dcc8）→段階H（4f1012d）の順に積み直して統合した。リモートの LyricStage.tsx は銘板コミットと blob 一致を確認済みで、今回の push は時計側の差分8ファイルのみ。
 - 統合ツリー全体検証：テスト 686 件全通過、typecheck 通過。
+
+## 改善サイクル（2026-11-09 夜、ブランチ `fix/nameplate-polish`）
+
+所有者の指示「クロードを使って改善を回して」による 1 サイクル。土台は `feat/visual-overhaul` の先端 06d5044（大改修 A〜F＋銘板＋段階 H・時計）。実機所見はまだ無く、コードを読んでの堅牢化が中心。設計判断は設計書 §7 に「（2026-11-09 夜 改定）」として足した。
+
+### 着手前の現状判定（コードを読んだ結果）
+
+| 項目 | 判定 | 根拠 |
+|---|---|---|
+| 1a 長い曲名・アーティスト名 | **直す** | 曲名は `layoutLine` が xs まで下げ、xs では列（行）数に上限が無い。縦組みは左へ、横組みは上下へ版面からはみ出しうる（xs で約 160 字超、横組みは曲名の領域の高さを超えた時点で、アーティストと罫に重なる）。アーティストは s → xs の 1 段だけで、xs でも幅を超えれば右へはみ出す。字面の高さは先頭 1 字の計量だけで測っていた（かなとラテン混在で罫・メーターとの間隔がずれうる）。 |
+| 1b メーターの輝度規律 | **直す（一部は満たしていた）** | 色（`inkNow`）と不透明度（0.7 の定数）は固定で、高さは `clamp01` で上限が効いていた。ただし帯域値が NaN だと `clamp01` が NaN を返し、追従器（`followToward`）が NaN に固着して罫が消える。±Infinity も追従器を壊す。フレーム落ち（長い dt）で一気に目標へ跳ぶ。1 フレームの変化量を時定数と結びつけて検証するテストが無かった。 |
+| 1c 無音時の基線・曲名の静止 | **直す** | メーターは帯域の包絡だけを見ており、無音判定（`silence`）を見ていない。環境雑音で帯域値が残ると基線に落ちない。曲名の `pulse` 滞留は、拍パルスこそ減衰して 0 になるが、拍エンジンは無音中も拍の格子（`nextBeatAtMs` / `periodMs`）を保つため、予測拍頭の前の引き戻し（anticipation、最大 2%）が拍ごとに続き、「呼吸」が止まらなかった。 |
+| 1d 遷移 | **直す（3 件）** | (i) 予定なしに去る行（曲の差し替え・見失い）の退場は `nowMonotonicMs`（最後の行替えの時刻。数秒前のことがある）から計っていたため、退場が描かれる前に終わっていた（銘板の曲名だけは `performance.now()` で正しかった）。(ii) 同期あり／銘板 → 新しい曲 では、結果の確定までの 1 レンダーだけ idle（時計）が出て、次のレンダーのドロップがそれを「散らす idle」として拍頭まで不透明度 1 で保持していた（曲と曲の間に時計が最大 1 秒ちらつく）。(iii) ドロップで入った曲名（行）が idle を挟んで同じ key で戻ると、再びドロップの対象になっていた。あわせて、銘板には無音で idle に譲る規則が無かった（同期歌詞の行は 4 秒で idle に落ちる）。 |
+| 2 前後行と予約帯 | **既に満たしている（閉じる）** | 前後行は段階 C で `contextLine` が版面（`printArea`）にクランプするようになり、段階 D で主役の行と同じ `lineArea(printArea(...))` を受け取る。下端のクランプが上端より優先（`top = min(max(top, area.top), area.bottom − blockHeight)`）なので、何行に折り返しても caption 行と操作列の帯に入らない。idle の時計（`composeClock` → `printArea`）と銘板（`LyricStage` の `area` = `printArea`）も同じ関数・同じ定数（`TOP_RESERVED` / `BOTTOM_RESERVED` / `CAPTION_GAP`、`layout.ts`）を使う。既存テスト「context lines stay inside the print area」と §3d の全オーナメント × 縦横のテストが根拠。今回は回帰の歯止めとして、横組みの主役の行の下に何行にも折り返す次の行を置くテストを 1 件足しただけで、コードは変えていない。 |
+| 3a 歌詞なしの再取得 | **直す** | `useEarRecognition` は「同じ trackId の timestamped」だけ LRCLIB を省いていた。歌詞なし・テキストのみ・インストゥルメンタルの曲は、自動再認識（音が戻るたびに発火）のたびに `/api/get` → 404 → `/api/search` の 2 リクエストを繰り返していた。同期ありの曲も、別の曲を挟んで戻ると再取得していた。 |
+| 3b 長さの違う同名候補 | **検索は満たしていた／完全一致は直す** | `/api/search` の候補選び（`pickSearchCandidate`）は長さが分かれば 3 秒以内だけを数え、テスト済みだった。一方 `/api/get` の完全一致は長さを見ずに採っていたので、同じ名前・アルバムの別の長さの記録をそのまま使う経路が残っていた（今は ShazamKit が長さを返さないので実害は無いが、`durationMs` が配線済みのため）。 |
+
+### 判断
+
+1. **長い曲名は s で止めて「…」で切る。** 曲名は xl → l → m → s、2 列（2 行）まで（主役の行と同じ段の下げ方）。s で 2 列に入らない、または曲名の領域（版面の上端〜アーティストの罫の 24px 上）からはみ出すときは、入る最長の先頭（末尾の空白は落とす）に「…」を付ける（二分探索）。xs まで下げないのは、xs が caption・注記の大きさで、曲名が注記と同じ格になってしまうため。縦組み／横組みは切る前の曲名全体で決める（切った結果ラテンだけが残っても縦のまま）。縦組みの「…」は `ROTATED_IN_VERTICAL` で 90° 回るので縦の三点になる。`Nameplate.title.text` に実際に刷る文字列を持たせた（舞台の key は元の曲名のまま）。
+2. **アーティストは 1 行、s → xs → 「…」。** 2 行にはしない（銘板の縦の帯の配分を変えないため）。字面の上下は行の全文字の計量の最小 ascent・最大 descent で取る。
+3. **メーターの式を純関数に出した。** `meterTarget(band, silence)`（無音なら 0、非数は 0、+∞ は 1、他は 0..1 にクランプ）と `meterFollow(current, target, dt)`（τ 120ms の一次遅れ、dt は 0〜`METER_MAX_DT_MS` = 50ms に打ち切り、非数の現在値は 0 から）。`BandMeter` のフレームコールバックはこれを呼ぶだけ。1 フレーム（60fps）の最大移動量 `METER_FRAME_STEP_PX` = 33 × (1 − e^(−16.7/120)) ≈ 4.28px を定数として公開し、テストで τ と結びつけた。毎フレーム 0 と 1 を交互に入れる入力では、定常の揺れが約 2.3px（中央付近を漂う）。
+4. **無音中は拍駆動の滞留を止める（主役の行すべて）。** `MotionInput.silent?`（任意。未設定は従来どおり）を足し、`GlyphLayer` と `GlowLayer` が `beat.silence.value >= 0.5` を渡す。`pulse`・`shake`・`breathe` は恒等に、`drift`（拍ではなく時間で動く）は対象外。同期歌詞の行にも効く（無音 4 秒で idle に落ちるまでの間、行が拍頭の前に縮み続けない）。`silence` は拍エンジンの 500ms の保持の後に立つので、無音に入って約 0.5 秒で静止する。引き戻しの最中（拍の最後の 15%）に立つと最大 2% の縮みが 1 フレームで戻る（無音の判定が拍頭の直前に重なったときだけ。気になれば段階 G で減衰を足す）。
+5. **銘板は無音 4 秒で idle に譲る。** `useStageSource` に `roomQuiet`（無音が `SILENCE_REARM_MS` 続いた）を state で持たせ、耳の購読が端でだけ切り替える（毎フレームの再レンダーは無い）。銘板の条件に `!roomQuiet` を足した。音が戻れば同じ曲の銘板が `rise` で戻り、ドロップは再発火しない（`namedTrackId` は変わらない）。マイクを止めたときは `roomQuiet` を下ろす（同期歌詞の行と同じく、耳が無ければ無音の規則は働かない）。同期歌詞の行の無音規則（スケジューラの tick 内）には触れていない。
+6. **退場は予定が無ければ「今」から。** `exiting.startedAtMs = scheduled?.startedAtMs ?? performance.now()`（曲名だけの特例をやめて一般化）。
+7. **1 レンダーだけの idle は散らさない。** ドロップの発火時、直前の idle が「上がりきっている」（idle が他の表示の後に出た時刻、または前のドロップの `idleRiseAtMs` から `ENTRANCE_DURATION_MS.rise` = 420ms 以上たっている）ときだけ散らす。起動時から出ている idle は上がりきったものとみなす（`idleCameOnAtRef` の初期値 −∞）。上がりきる前の idle は散らさずに差し替える（実際には曲と曲の間の数 ms しか出ていない）。
+8. **ドロップの対象は 1 回きり。** 舞台が対象の行・曲名から idle に移ったら `drop.lineKey` を `DROP_LINE_DONE` にする（従来は別の行に移ったときだけ）。
+9. **LRCLIB の答えのキャッシュ（`src/recognition/lyricsCache.ts`）。** `trackId` → 記録 または null（無い）。`useEarRecognition` のフックごとに 1 つ（= アプリの起動中だけ）、メモリのみ、最大 64 曲（最も前に使ったものから忘れる）。取得失敗・中断は覚えない（次の認識で再取得し、`lyrics_failed` の再試行の意味を保つ）。ヒットしたら `resolveLyrics` を今回の照合の錨で回し、`resolving_lyrics` を経ずに idle の結果にする。空の trackId は覚えない。
+10. **完全一致にも長さの規則。** 曲の長さが分かり、`/api/get` の記録の `duration` が 3 秒より離れていれば、検索に回す（検索は従来の規則で長さの近いものだけを採る。無ければ歌詞なし）。記録に長さが無ければ採る（反する情報が無い）。長さは比べるだけで送らない（製品の決まりの「LRCLIB に送るのは曲名・アーティスト・アルバム名だけ」を保つ）。
+
+### 変更ファイル
+
+- 変更: `src/typesetting/nameplate.ts`（曲名・アーティストの収め方、`NAMEPLATE_TITLE_MIN_SIZE` / `NAMEPLATE_ELLIPSIS`、`title.text` / `artist.text`）、`src/typesetting/bandMeter.ts`（`meterTarget` / `meterFollow` / `METER_MAX_DT_MS` / `METER_FRAME_STEP_PX`、`clamp01` の非数対策）、`src/typesetting/BandMeter.tsx`（無音で目標 0、`meterFollow`）、`src/typesetting/motion.ts`（`MotionInput.silent?`）、`src/typesetting/GlyphLayer.tsx`・`src/typesetting/GlowLayer.tsx`（`silent` を渡す）、`src/typesetting/LyricStage.tsx`（退場の開始、1 レンダーの idle を散らさない、ドロップ対象の 1 回きり）、`src/app/useStageSource.ts`（`roomQuiet`）、`src/recognition/useEarRecognition.ts`（キャッシュ）、`src/recognition/lrclibClient.ts`（完全一致の長さ照合、`knownDurationMs`）、`docs/superpowers/specs/2026-10-18-lyric-typography-object-design.md`（改定履歴と §7）、本ファイル。
+- 新規: `src/recognition/lyricsCache.ts`。
+- テスト（書いたもの。**未実行**。実行は呼び出し側）:
+  - 新規 `src/recognition/__tests__/lyricsCache.test.ts`（記録・null・未問い合わせの区別、上書き、上限と LRU、既定 64、空の trackId、インスタンスごとに独立）。
+  - `src/typesetting/__tests__/nameplate.test.ts`: 新 describe「fitting a long title」（短い曲名は xl のまま、縦 34 字は s で全文、縦 60 字は 33 字＋「…」で s・2 列、横 120 字も同様、かな＋ラテン混在は縦で領域内、縦横それぞれ 1〜120 字の全長で s 以上・2 列以内・領域内・アーティストが右端を越えない、iPhone SE 相当の画面でも同じ）、アーティストの「…」切り（末尾の空白を残さない）、混在アーティストの最深 descent。既存「artist too wide drops to xs」は 40 字の例が新規則では切られるため、xs で収まる 16 字の例に差し替え、40 字の例は「切られる」テストに移した。
+  - `src/typesetting/__tests__/bandMeter.test.ts`: 極端・非数の値でも基線〜上限、`meterTarget`（クランプ・無音で 0）、`meterFollow`（不透明度の上限、1 フレームの移動量 = `METER_FRAME_STEP_PX` で全行程の 15% 未満、ストロボ入力の揺れ 3px 未満、1 秒のフレーム落ちでも 50ms 分だけ、非数からの回復、無音で約 0.6 秒以内に基線 0.5px 以内）。
+  - `src/typesetting/__tests__/motion.test.ts`: 新 describe「a silent room」（pulse の引き戻しも持ち上げも無い、1 拍のどこでも恒等、breathe・shake も恒等で drift は動く、false は従来どおり、登場・退場は影響なし）。
+  - `src/typesetting/__tests__/LyricStage.test.tsx`: 新 describe「transitions: synced ⇄ nameplate ⇄ idle clock ⇄ lost」（予定なしの退場が「今」から、同期あり → 1 レンダーの idle → 別の曲の銘板で時計を散らさず曲名がドロップ、銘板 → 別の曲の同期行で曲名が退場し行がドロップ、ドロップ済みの銘板 → 無音の idle → 同じ銘板が rise で戻る、起動時からの時計は散る、行の後に出て上がりきった時計は散る、銘板 → 見失いで caption なし）、新 describe「silence on stage」（`silence` 1 で曲名の滞留に `silent: true`、音があれば false）、前後行の describe に「何行にも折り返す次の行が予約帯に入らない」。
+  - `src/app/__tests__/useStageSource.test.tsx`: 銘板が無音 3.5 秒では残り、4 秒超で track つきの idle、音が戻ると同じ dropAtMs の銘板に戻る／マイクを止めても銘板は消えない。
+  - `src/recognition/__tests__/useEarRecognition.test.tsx`: 新 describe「the session cache」（歌詞なしの曲を 3 回認識しても LRCLIB は 1 回、インストゥルメンタル・テキストのみも覚える、同期ありの曲が別の曲を挟んで戻ると記憶から錨を付け直す、失敗・中断は覚えない、新しいマウントでは再取得）。
+  - `src/recognition/__tests__/lrclibClient.test.ts`: 完全一致の長さ照合（離れていれば検索、検索にも無ければ null、範囲内は検索しない、長さの無い記録は採る、長さ不明なら従来どおり、URL に duration を入れない）、検索で長さの離れた同名の同期記録より範囲内のテキストのみの記録を採る。
+- 既存テストで前提が変わったもの: `nameplate.test.ts` の「artist too wide」（上記）。他の既存テストは変えていない（ドロップのテストは起動時からの idle なので散る判定は変わらない）。実在の歌詞・曲名は使っていない。
+
+### 検証で落ちた 1 件の判定と修正（改善サイクル 2026-11-09 夜）
+
+呼び出し側の実行で 740/741、typecheck 通過。落ちたのは `LyricStage.test.tsx` の「nameplate (dropped) → idle in a quiet room → the same nameplate again: it rises, the drop is not replayed」。同じ銘板へ戻した直後に `exit-idle-glyph-*` が 16 件（最初のドロップの時点の時計「23:48」と日付）残っていた。
+
+- **判定: 本番コードの誤り（テストは正しい）。** 時間を進めれば消える「退場の途中」ではなく、ドロップの演出の再生だった。`dropAtMs` が 10_000 → null（無音の idle）→ 10_000 と戻ると、ドロップの演出を始める effect（依存は `dropAtMs`）が再び走る。`dropRef` は同じ fireAtMs なので計算し直されず、最初の発火時に捕まえた idle のグリフ（20 秒前の時計）で `setDropPlay({ idleExit, captionTracing: true })` をやり直していた。判断 8 で曲名のドロップ入場は 1 回きりにしたが、演出の側（散る idle・caption の描き込み）は 1 回きりになっていなかった。
+- **実機での見え方:** 再生された散りは `lineStartedAtMs = drop.headMs`（約 20 秒前）から計るので、退場はとうに終わった扱いで不透明度 0 になり、目にはほぼ見えない。それでも古い時計の 16 グリフが 1 拍ほど描画ノードとして載り、タイマーも張り直される。また、無音の idle に移った時点で演出のタイマーが片付けられていれば（idle への移行が散りの最中なら）、`dropPlay` が残ったままになる経路もあった。状態として誤りなので本番側で直した。
+- **修正（`src/typesetting/LyricStage.tsx`、ドロップの演出の effect）:** 演出を始める前に `drop.lineKey === DROP_LINE_DONE`（舞台が対象の行・曲名から一度離れた＝ドロップは済んだ）なら再生せず、その fireAtMs の `dropPlay` が残っていれば null にして終える。初回の発火では `lineKey` は null か対象の key なので従来どおり再生する（StrictMode の effect の二重実行でも、`lineKey` はレンダーで決まるので判定は変わらない）。
+- **テスト:** 変更なし（アサーションも弱めていない）。設計書 §7 の「遷移」に「戻ったときはドロップの演出も再生しない」を 1 文足した。修正後のテストは**未実行**（実行は呼び出し側）。
+
+### 描画ノード・レイヤーへの影響
+
+- 描画ノード・オフスクリーンのレイヤーは増えない。UI スレッドの導出も増えない（メーターのフレームコールバックが `silence` を 1 つ多く読み、グリフの動きの導出が `silence` を 1 つ多く読むだけ）。
+- React の再レンダーは、無音が 4 秒続いたとき・音が戻ったときに 1 回ずつ増えるだけ（`roomQuiet` の端）。
+
+### 実機で確認すること（改善サイクル 2026-11-09 夜）
+
+- 長い曲名（日本語 35 字以上、英語 30 字以上）の歌詞なしの曲で、曲名が s で 2 列（2 行）に収まり「…」で終わる。ワードマーク・アーティスト・メーター・操作列に掛からない。縦組みの「…」が縦の三点に見える。実フォントのラテン（プロポーショナル）で、横組みの切り方が不自然でないか（語の途中で切れる。気になれば語境界で切る規則を検討）。
+- 長いアーティスト名が 1 行に収まり、xs でも入らなければ「…」で終わる。
+- メーターがどの曲でも「光って」見えない。キックの立ち上がりで罫が跳ねず、約 0.1 秒で伸びる。アプリをバックグラウンドから戻した直後に罫が一気に伸びない。
+- 針を上げると、約 0.5 秒で曲名の拍の縮みが止まり、約 1 秒でメーターが基線に落ち、約 4 秒で時計（曲名の caption つき）に替わる。針を戻すと銘板が下から上がって戻り、ドロップ（時計が散る演出）は起きない。自動再認識が走っても画面が変わらない。
+- 同期歌詞の曲でも、無音に入ると行の拍の縮みが止まる（4 秒で時計に落ちるまでの間）。曲の途中の静かな箇所（ブレイク）で行が「止まって」見えることが気にならないか。
+- 歌詞ありの曲 → 歌詞なしの曲（またはその逆）に替わるとき、前の行（曲名）が退場し、曲と曲の間に時計がちらつかない。新しい曲名・行が拍頭に落ちる。
+- 曲が見失われたとき（認識なし）、前の行・曲名が一瞬で消えずに退場し、その下から時計が上がる。
+- 歌詞なしの曲を何度か再認識させても、2 回目以降は歌詞の取得待ちの状態をほとんど経ずにすぐ戻る（LRCLIB に行かない）。機内モードで一度失敗した曲は、通信が戻った後の再認識で取り直せる。
+
+### 据え置き・申し送り
+
+- 横組みの曲名の切り方は文字単位（`layoutLine` の折り返しと同じ）。語境界で切る・折り返すかは実機の見え方で決める。
+- 無音の判定が拍の引き戻しの途中で立つと、最大 2% の縮みが 1 フレームで戻る（判断 4）。
+- クロームの予約帯の数値（`layout.ts` の `TOP_RESERVED` / `BOTTOM_RESERVED`）は `MusicageApp` のスタイルの数値（paddingTop 12、paddingBottom 18、ボタン 48、gap 16）の写しで、同じ定数を import しているわけではない。今回は項目 2 の範囲外として触れていない（ずれればテスト「a next line of many rows…」の `controlsTop` の式と合わせて直す）。
+- 以上すべて **未検証**（テスト・typecheck 未実行、実機未確認）。
+- 検証結果（改善サイクル、2026-11-09 夜、呼び出し側で実行）: 初回は LyricStage の遷移テスト1件が失敗（ドロップ演出の再生という本番バグと判定され LyricStage.tsx を修正、テストは不変）。修正後の再実行で `npm test -- --watchman=false` は 54 スイート・741 件全通過、`npm run typecheck` も通過。

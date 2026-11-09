@@ -167,8 +167,8 @@ export function pickSearchCandidate(
     .filter((c) => c.rank > 0);
   if (usable.length === 0) return null;
 
-  const duration = track.durationMs ?? null;
-  if (duration !== null && Number.isFinite(duration) && duration > 0) {
+  const duration = knownDurationMs(track);
+  if (duration !== null) {
     const inRange = usable
       .filter((c) => c.candidate.durationMs !== null)
       .map((c) => ({ ...c, distance: Math.abs((c.candidate.durationMs as number) - duration) }))
@@ -249,9 +249,32 @@ export async function searchLrclib(
   return pickSearchCandidate(track, candidates);
 }
 
+/** The track's known length in ms, or null when the recognizer reported none. */
+function knownDurationMs(track: Track): number | null {
+  const duration = track.durationMs ?? null;
+  return duration !== null && Number.isFinite(duration) && duration > 0 ? duration : null;
+}
+
+/**
+ * True when both lengths are known and differ by more than the tolerance: the
+ * exact lookup matched the names (and album) of another recording.
+ */
+function lengthDisagrees(track: Track, payload: unknown): boolean {
+  const known = knownDurationMs(track);
+  if (known === null || !isRecord(payload)) return false;
+  const duration = payload.duration;
+  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) return false;
+  return Math.abs(duration * 1_000 - known) > SEARCH_DURATION_TOLERANCE_MS;
+}
+
 /**
  * The track's lyrics record: the exact /api/get match, else the best
  * /api/search hit (see pickSearchCandidate), else null (lyrics unavailable).
+ * With the track's length known, an exact match whose own length is more than
+ * SEARCH_DURATION_TOLERANCE_MS away is another recording filed under the same
+ * names: it is passed over for the search, which applies the same rule. (An
+ * exact match that reports no length is taken: nothing contradicts it.) The
+ * length is only compared here; it is never sent.
  */
 export async function lookupLrclib(
   track: Track,
@@ -268,6 +291,10 @@ export async function lookupLrclib(
 
   if (!record) {
     throw new LrclibRequestError('malformed');
+  }
+
+  if (lengthDisagrees(track, payload)) {
+    return searchLrclib(track, fetchImpl, signal);
   }
 
   return record;

@@ -109,6 +109,12 @@ export function useStageSource({
   // performance.now() when the computed beat last turned silent; null while
   // there is sound (or the ear is not listening).
   const silentSinceRef = useRef<number | null>(null);
+  // The room has been silent for SILENCE_REARM_MS (the needle was lifted).
+  // State, flipped only on its edges by the ear subscription: the nameplate
+  // gives way to idle while it holds (a synced line does the same through the
+  // scheduler's own tick).
+  const [roomQuiet, setRoomQuiet] = useState(false);
+  const roomQuietRef = useRef(false);
 
   useEffect(() => {
     const engine = engineRef.current!;
@@ -119,6 +125,8 @@ export function useStageSource({
       surgeRef.current = { value: 0, atMs: Number.NaN };
       silentSinceRef.current = null;
       frozenBarRef.current = 0;
+      roomQuietRef.current = false;
+      setRoomQuiet(false);
       beatValues.write(
         { timestampMs: performance.now(), rms: 0, low: 0, mid: 0, high: 0 },
         QUIET_BEAT,
@@ -143,6 +151,12 @@ export function useStageSource({
         frozenBarRef.current = raw.bar;
       } else {
         silentSinceRef.current ??= performance.now();
+      }
+      const silentSince = silentSinceRef.current;
+      const quiet = silentSince !== null && performance.now() - silentSince >= SILENCE_REARM_MS;
+      if (quiet !== roomQuietRef.current) {
+        roomQuietRef.current = quiet;
+        setRoomQuiet(quiet);
       }
       const next = raw.silence ? { ...raw, bar: frozenBarRef.current } : raw;
       // Every frame reaches the shared values before the throttled publish:
@@ -332,10 +346,14 @@ export function useStageSource({
     // The nameplate waits for the drop effect to have seen the track (see
     // confirmedTrackId), and never shows under the fixture: while the fixture
     // is active but its first tick is pending the stage stays idle, as it
-    // does before a recognized song's first line.
+    // does before a recognized song's first line. In a room quiet for
+    // SILENCE_REARM_MS it gives way to idle (with the track's caption), as a
+    // synced line does, and comes back when sound does: the song is still the
+    // one recognized, so there is no new drop.
     if (
       unsyncedKind !== null &&
       !active &&
+      !roomQuiet &&
       confirmedTrackId === namedTrackId &&
       recognizedTrack !== null &&
       recognizedDirection !== null
@@ -358,6 +376,7 @@ export function useStageSource({
     namedTrackId,
     recognizedDirection,
     recognizedTrack,
+    roomQuiet,
     timedLines,
     unsyncedKind,
   ]);

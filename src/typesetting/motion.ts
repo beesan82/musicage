@@ -45,6 +45,14 @@ export interface MotionInput {
    * the exit began and the transform is the exit derived from `entrance`.
    */
   exiting: boolean;
+  /**
+   * True while the beat calls the room silent (the stage's `silence` flag).
+   * There is no beat to ride then, so the beat-driven holds (pulse, shake,
+   * breathe) stand still: the grid the engine keeps through silence would
+   * otherwise go on pulling the glyphs back before each predicted head.
+   * Unset reads as false. `drift` is not beat-driven and is unaffected.
+   */
+  silent?: boolean;
 }
 
 /** Per-song amplitude coefficient for `tempoFeel` (groove analysis 3.4). */
@@ -361,7 +369,9 @@ export function glyphTransform(input: MotionInput): GlyphTransform {
     const damp = input.confidence < 0.5 ? 0.25 : 1;
     const phase = derivePhase(input.timeMs, input.nextBeatAtMs, input.periodMs);
     const hold = input.hold;
-    if (hold === 'pulse') {
+    if (input.silent === true && hold !== 'drift') {
+      // A silent room: the beat-driven holds rest at identity.
+    } else if (hold === 'pulse') {
       // The character wave: the pulse reaches each glyph a fraction of a beat
       // after the previous one, travelling across the line over one beat. It
       // is decoration on the beat, never a claim about which word is sung.

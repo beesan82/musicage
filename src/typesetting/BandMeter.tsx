@@ -3,16 +3,16 @@ import { memo, useCallback, useEffect } from 'react';
 import { useDerivedValue, useFrameCallback, useSharedValue } from 'react-native-reanimated';
 import type { FrameInfo, SharedValue } from 'react-native-reanimated';
 
-import { followToward } from '../textures/surfaceModel';
 import {
   METER_OPACITY,
   METER_RULE_COUNT,
   METER_RULE_WIDTH,
-  METER_TAU_MS,
   meterBandAt,
+  meterFollow,
   meterRuleHeight,
   meterRuleX,
   meterShape,
+  meterTarget,
 } from './bandMeter';
 import type { BeatSharedValues } from './useBeatSharedValues';
 
@@ -34,7 +34,8 @@ export interface BandMeterProps {
 /**
  * The band meter (see bandMeter.ts): METER_RULE_COUNT thin rules whose heights
  * follow the low / mid / high envelopes across the row. One frame callback
- * runs the three followers on the UI thread; each rule derives its rectangle
+ * runs the three followers on the UI thread (meterFollow, heading for
+ * meterTarget: 0 while the room is silent); each rule derives its rectangle
  * from them. Nothing here re-renders per frame. Under reduced motion the
  * followers stand still at 0 and the row is the printed base scale.
  */
@@ -50,17 +51,18 @@ export const BandMeter = memo(function BandMeter({
   const lowNow = useSharedValue(0);
   const midNow = useSharedValue(0);
   const highNow = useSharedValue(0);
-  const { low, mid, high } = beat;
+  const { low, mid, high, silence } = beat;
 
   const onFrame = useCallback(
     (info: FrameInfo) => {
       'worklet';
       const dt = info.timeSincePreviousFrame ?? 0;
-      lowNow.value = followToward(lowNow.value, low.value, dt, METER_TAU_MS);
-      midNow.value = followToward(midNow.value, mid.value, dt, METER_TAU_MS);
-      highNow.value = followToward(highNow.value, high.value, dt, METER_TAU_MS);
+      const quiet = silence.value;
+      lowNow.value = meterFollow(lowNow.value, meterTarget(low.value, quiet), dt);
+      midNow.value = meterFollow(midNow.value, meterTarget(mid.value, quiet), dt);
+      highNow.value = meterFollow(highNow.value, meterTarget(high.value, quiet), dt);
     },
-    [high, highNow, low, lowNow, mid, midNow],
+    [high, highNow, low, lowNow, mid, midNow, silence],
   );
   const frame = useFrameCallback(onFrame, !reducedMotion);
   useEffect(() => {

@@ -6,7 +6,10 @@
 // blocks. It is a mark on the print, not a flashing light: the rules are a few
 // pixels wide, the row a few dozen high, and the reading follows the already
 // smoothed band envelopes through a first-order follower with the beat
-// pulse's own time constant, so nothing jumps.
+// pulse's own time constant, so nothing jumps. The brightness never moves at
+// all (one ink, one opacity); the height is capped, and so is how far a rule
+// can travel in one frame (METER_FRAME_STEP_PX). In silence the row lies at
+// its base.
 
 /** Rules across the row. */
 export const METER_RULE_COUNT = 24;
@@ -25,10 +28,49 @@ export const METER_OPACITY = 0.7;
 export const METER_TAU_MS = 120;
 /** The least a rule's shape scales its band reading, so the row is not a flat block. */
 export const METER_SHAPE_MIN = 0.72;
+/**
+ * The longest step the follower takes in one frame, ms. A frame that comes
+ * late (a hitch, the app returning from the background) counts as this long,
+ * so the rules never jump to a new height in one frame.
+ */
+export const METER_MAX_DT_MS = 50;
+/**
+ * The most a rule can move in one frame at 60 fps, px: the follower's step
+ * over a full-travel change. A strobing band reading (full, nothing, full …
+ * every frame) moves a rule far less, about a fifth of this (see the tests).
+ */
+export const METER_FRAME_STEP_PX =
+  (METER_MAX_HEIGHT - METER_BASE_HEIGHT) * (1 - Math.exp(-(1000 / 60) / METER_TAU_MS));
 
 function clamp01(v: number): number {
   'worklet';
+  // NaN and ±Infinity included: a broken reading is no reading, never a stuck rule.
+  if (!Number.isFinite(v)) return v === Infinity ? 1 : 0;
   return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/**
+ * What the follower heads for: the band envelope clamped to 0..1, and 0 while
+ * the room is silent (`silence` is the stage's 0 / 1 flag), so in a quiet room
+ * the row falls back to its printed base whatever noise floor the bands read.
+ */
+export function meterTarget(band: number, silence: number): number {
+  'worklet';
+  if (silence >= 0.5) return 0;
+  return clamp01(band);
+}
+
+/**
+ * One frame of the follower from `current` toward `target` (both 0..1): a
+ * first-order step with METER_TAU_MS, the frame's time capped at
+ * METER_MAX_DT_MS. A reading that is not a number restarts from 0.
+ */
+export function meterFollow(current: number, target: number, dtMs: number): number {
+  'worklet';
+  const from = clamp01(current);
+  const dt = dtMs > METER_MAX_DT_MS ? METER_MAX_DT_MS : dtMs > 0 ? dtMs : 0;
+  if (dt <= 0) return from;
+  return from + (clamp01(target) - from) * (1 - Math.exp(-dt / METER_TAU_MS));
 }
 
 /**

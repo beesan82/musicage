@@ -252,7 +252,7 @@ function AnimatedGlyph({
   seed,
   feel,
 }: AnimatedGlyphProps) {
-  const { bar, confidence, lastOnsetAtMs, nextBeatAtMs, periodMs, low } = beat;
+  const { bar, confidence, lastOnsetAtMs, nextBeatAtMs, periodMs, low, silence } = beat;
   const { emphasized, rotateDeg } = glyph;
   const phaseOffset = glyph.phaseOffset ?? 0;
   // An idle glyph may be marked accent (drawn in the accent outright, with no
@@ -287,6 +287,7 @@ function AnimatedGlyph({
         phaseOffset,
         anticipationMs,
         exiting,
+        silent: silence.value >= 0.5,
       }),
     [
       entrance,

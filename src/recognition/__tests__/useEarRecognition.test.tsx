@@ -121,6 +121,92 @@ describe('useEarRecognition', () => {
     });
   });
 
+  describe('the session cache of LRCLIB answers (by trackId, memory only)', () => {
+    const recognizeAs = async (result: { current: { recognize(): void; state: { phase: string } } }, r: EarRecognition) => {
+      await act(async () => result.current.recognize());
+      await emitRecognition(r);
+      await waitFor(() => expect(result.current.state.phase).toBe('idle'));
+    };
+
+    test('a song LRCLIB has no lyrics for is not looked up again when it is recognized again', async () => {
+      lookup.mockResolvedValue(null);
+      const { result } = await setup();
+      await recognizeAs(result, rec());
+      expect(result.current.state.result).toMatchObject({ kind: 'lyrics_unavailable', track: { trackId: 't1' } });
+
+      await recognizeAs(result, rec({ matchedAtMonotonicMs: 50_000, currentOffsetMs: 40_000 }));
+      await recognizeAs(result, rec({ matchedAtMonotonicMs: 90_000, currentOffsetMs: 80_000 }));
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect(result.current.state).toEqual({
+        phase: 'idle',
+        result: { kind: 'lyrics_unavailable', track: { trackId: 't1', title: 'Song', artist: 'Artist', album: null, artworkUrl: null } },
+        message: null,
+        retryable: false,
+      });
+    });
+
+    test('an instrumental record and a plain-text record are remembered too', async () => {
+      lookup.mockResolvedValueOnce({ recordId: 2, instrumental: true, syncedLyrics: null, plainLyrics: null });
+      lookup.mockResolvedValueOnce({ recordId: 3, instrumental: false, syncedLyrics: null, plainLyrics: '架空の詞' });
+      const { result } = await setup();
+      await recognizeAs(result, rec({ trackId: 'inst' }));
+      await recognizeAs(result, rec({ trackId: 'plain' }));
+      await recognizeAs(result, rec({ trackId: 'inst' }));
+      expect(result.current.state.result).toMatchObject({ kind: 'instrumental' });
+      await recognizeAs(result, rec({ trackId: 'plain' }));
+      expect(result.current.state.result).toMatchObject({ kind: 'plain', text: '架空の詞' });
+      expect(lookup).toHaveBeenCalledTimes(2);
+    });
+
+    test('a synced song coming back after another song is re-anchored from memory', async () => {
+      const { result } = await setup();
+      await recognizeAs(result, rec({ trackId: 'a' }));
+      lookup.mockResolvedValueOnce(null);
+      await recognizeAs(result, rec({ trackId: 'b', title: 'Other' }));
+      await recognizeAs(result, rec({ trackId: 'a', matchedAtMonotonicMs: 70_000, currentOffsetMs: 3_000 }));
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(result.current.state.result).toEqual({
+        kind: 'timestamped',
+        track: { trackId: 'a', title: 'Song', artist: 'Artist', album: null, artworkUrl: null },
+        lines: [{ startMs: 12_000, text: 'first line' }],
+        anchor: { offsetMs: 3_000, anchoredAtMonotonicMs: 70_000 },
+      });
+    });
+
+    test('a failed lookup is not an answer: the next recognition asks LRCLIB again', async () => {
+      lookup.mockRejectedValueOnce(new LrclibRequestError('network'));
+      const { result } = await setup();
+      await recognizeAs(result, rec());
+      expect(result.current.state.message).toBe(RECOGNITION_COPY.lyrics_failed);
+      await recognizeAs(result, rec());
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(result.current.state.result).toMatchObject({ kind: 'timestamped' });
+    });
+
+    test('a lookup cancelled midway is not an answer either', async () => {
+      let resolveLookup: (value: unknown) => void = () => {};
+      lookup.mockImplementationOnce(() => new Promise((resolve) => (resolveLookup = resolve)));
+      const { result } = await setup();
+      await act(async () => result.current.recognize());
+      await emitRecognition(rec());
+      await act(async () => result.current.cancel());
+      await act(async () => resolveLookup(null));
+      await recognizeAs(result, rec());
+      expect(lookup).toHaveBeenCalledTimes(2);
+      expect(result.current.state.result).toMatchObject({ kind: 'timestamped' });
+    });
+
+    test('memory only: a new session (a fresh mount) asks again', async () => {
+      lookup.mockResolvedValue(null);
+      const first = await setup();
+      await recognizeAs(first.result, rec());
+      await first.unmount();
+      const second = await setup();
+      await recognizeAs(second.result, rec());
+      expect(lookup).toHaveBeenCalledTimes(2);
+    });
+  });
+
   test('match_timeout keeps the previous result, sets the copy and makes retry possible', async () => {
     const { result } = await setup();
     await act(async () => result.current.recognize());

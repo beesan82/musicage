@@ -27,7 +27,7 @@ import { captionText, CLOCK_TEXT_FACE, CLOCK_TIME_FACE, composeClock, idleFaces 
 import type { IdleComposition, IdleTrack } from './idleComposition';
 import { layoutLine, printArea, SIZE_RATIO } from './layout';
 import type { GlyphMeasure, LineLayout, PlacedGlyph, PrintArea, Viewport } from './layout';
-import { dropHeadMs, entranceDurationMs, exitDurationMs, TEMPO_FEEL_FACTOR } from './motion';
+import { dropHeadMs, ENTRANCE_DURATION_MS, entranceDurationMs, exitDurationMs, TEMPO_FEEL_FACTOR } from './motion';
 import { composeNameplate } from './nameplate';
 import type { Nameplate } from './nameplate';
 import { lineArea, Ornament } from './Ornaments';
@@ -510,8 +510,11 @@ export function LyricStage({
   const dropAtMs = source.kind === 'synced' || source.kind === 'unsynced' ? (source.dropAtMs ?? null) : null;
   const dropRef = useRef<Drop | null>(null);
   // The idle composition shown in the previous render (null while a line is on
-  // stage): the glyphs a drop firing now sends scattering.
+  // stage): the glyphs a drop firing now sends scattering. With it, when idle
+  // last came on after something else was on stage (−∞ for the idle the stage
+  // mounted with, which counts as long risen).
   const idleShownRef = useRef<IdleComposition | null>(null);
+  const idleCameOnAtRef = useRef(Number.NEGATIVE_INFINITY);
   if (dropAtMs !== null && !reducedMotion && dropRef.current?.fireAtMs !== dropAtMs) {
     const periodMs = beatValues.periodMs.value;
     const headMs = dropHeadMs(
@@ -520,7 +523,16 @@ export function LyricStage({
       periodMs,
       beatValues.confidence.value,
     );
-    const idleGlyphs = idleShownRef.current?.glyphs ?? null;
+    // Only an idle that had finished rising scatters. One that came on a
+    // moment ago (the render between the previous song's line or nameplate
+    // and the new song's, while the new result is confirmed) has hardly been
+    // seen: scattering it would hold it at full opacity until the head, a
+    // clock flashing up between two songs. It is simply replaced. (An idle
+    // that rose after a previous drop rose from that drop's idleRiseAtMs.)
+    const idleShown = idleShownRef.current;
+    const idleRiseFromMs = Math.max(idleCameOnAtRef.current, dropRef.current?.idleRiseAtMs ?? 0);
+    const idleSettled = idleShown !== null && dropAtMs - idleRiseFromMs >= ENTRANCE_DURATION_MS.rise;
+    const idleGlyphs = idleSettled ? idleShown.glyphs : null;
     dropRef.current = {
       fireAtMs: dropAtMs,
       headMs,
@@ -531,11 +543,16 @@ export function LyricStage({
   }
   const drop = dropRef.current;
   // The first line shown after the fire (a lyric line, or a nameplate's title)
-  // is the one that drops in; once the stage has moved past it, no later line
-  // takes the drop.
-  if (drop !== null && lineScene !== null) {
-    if (drop.lineKey === null) drop.lineKey = lineScene.key;
-    else if (drop.lineKey !== lineScene.key) drop.lineKey = DROP_LINE_DONE;
+  // is the one that drops in; once the stage has moved past it (to another
+  // line, or to idle), no later line takes the drop, not even the same line
+  // coming back (a nameplate returning after a quiet spell rises as usual).
+  if (drop !== null) {
+    if (lineScene !== null) {
+      if (drop.lineKey === null) drop.lineKey = lineScene.key;
+      else if (drop.lineKey !== lineScene.key) drop.lineKey = DROP_LINE_DONE;
+    } else if (drop.lineKey !== null) {
+      drop.lineKey = DROP_LINE_DONE;
+    }
   }
   const isDropLine = drop !== null && lineScene !== null && drop.lineKey === lineScene.key;
   const scene = useMemo<LineScene | null>(
@@ -554,6 +571,15 @@ export function LyricStage({
     const current = dropRef.current;
     if (current === null || current.fireAtMs !== dropAtMs) return undefined;
     const { fireAtMs, headMs, idleGlyphs } = current;
+    // The same fire coming back after the stage moved past its line (a
+    // nameplate returning from a quiet spell): the drop has played. Its idle
+    // glyphs are the ones on stage at the fire, long scattered; whatever of
+    // its play the timers did not get to remove (they were cleared when the
+    // fire went away) is removed now, not replayed.
+    if (current.lineKey === DROP_LINE_DONE) {
+      setDropPlay((play) => (play !== null && play.fireAtMs === fireAtMs ? null : play));
+      return undefined;
+    }
     setDropPlay({ fireAtMs, idleExit: idleGlyphs, captionTracing: true });
     const wait = headMs - fireAtMs;
     const periodMs = beatValues.periodMs.value;
@@ -590,12 +616,14 @@ export function LyricStage({
       setExiting(null);
       return;
     }
-    // The exit starts when the next line did; a nameplate leaving for idle
-    // (its song was lost) has no next line, so it starts now.
-    const startedAtMs =
-      scheduled?.startedAtMs ?? (prev.index === TITLE_INDEX ? performance.now() : nowMonotonicMs);
+    // The exit starts when the next line did. Without a schedule (a nameplate
+    // or a line leaving because its song was lost, replaced by another song,
+    // or quiet) there is no next line, so it starts now: the stage clock's
+    // anchor (nowMonotonicMs) is the last line change, possibly long ago, and
+    // an exit timed from it would be over before it was drawn.
+    const startedAtMs = scheduled?.startedAtMs ?? performance.now();
     setExiting({ scene: prev, startedAtMs });
-  }, [scene, beatValues, scheduled, nowMonotonicMs, reducedMotion]);
+  }, [scene, beatValues, scheduled, reducedMotion]);
   useEffect(() => {
     if (exiting === null) return undefined;
     const duration = exitDurationMs(
@@ -655,7 +683,10 @@ export function LyricStage({
   const idleStartedAtRef = useRef(nowMonotonicMs);
   if (idleOnRef.current !== showIdle) {
     idleOnRef.current = showIdle;
-    if (showIdle) idleStartedAtRef.current = performance.now();
+    if (showIdle) {
+      idleStartedAtRef.current = performance.now();
+      idleCameOnAtRef.current = idleStartedAtRef.current;
+    }
   }
   const idleBase = useMemo(() => (idle === null ? null : splitByFace(idle.glyphs)), [idle]);
   idleShownRef.current = idle;
@@ -663,6 +694,7 @@ export function LyricStage({
   // timed to begin once the previous idle glyphs have scattered.
   const idleKey = drop?.fireAtMs ?? 0;
   const idleRiseAtMs = drop?.idleRiseAtMs ?? 0;
+  const idleRiseFromMs = Math.max(idleStartedAtRef.current, idleRiseAtMs);
   const idleExit = dropPlay?.idleExit ?? null;
   const idleExitByFace = useMemo(() => (idleExit === null ? null : splitByFace(idleExit)), [idleExit]);
   // While the caption traces in it is drawn glyph by glyph from the head.
@@ -1001,7 +1033,7 @@ export function LyricStage({
                     {...shared}
                     glyphs={idleBase[role]}
                     fontFor={role === 'primary' ? idlePrimary : idleSecondary}
-                    lineStartedAtMs={Math.max(idleStartedAtRef.current, idleRiseAtMs)}
+                    lineStartedAtMs={idleRiseFromMs}
                     entrance="rise"
                     hold="still"
                     accent={false}

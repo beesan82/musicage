@@ -1,4 +1,4 @@
-import type { LineDirection } from '../direction/types';
+import type { LineDirection, Size } from '../direction/types';
 import type { FontKey, FontWeight } from './fonts';
 import type { IdleFaces } from './idleComposition';
 import { layoutLine, SIZE_RATIO } from './layout';
@@ -21,6 +21,19 @@ import { METER_MAX_HEIGHT } from './bandMeter';
 //   METER_GAP
 //   the meter (METER_MAX_HEIGHT tall, standing on area.bottom)
 // and on the caption baseline, the note (gothic xs, like the idle caption).
+//
+// Fitting a long name (design spec §7, 2026-11-09 evening):
+// - The title steps down xl → l → m → s, at most two columns (rows), as any
+//   line does (layoutLine). It never goes below s: a title that would need xs,
+//   or would not keep to its area at s, is cut to the longest head that does,
+//   ending in NAMEPLATE_ELLIPSIS.
+// - The artist is one row: s, else xs, else cut at xs with the ellipsis.
+// Nothing is ever printed outside the print area.
+
+/** The smallest size a nameplate's title is set in; below it the title is cut instead. */
+export const NAMEPLATE_TITLE_MIN_SIZE: Size = 's';
+/** Ends a name cut to fit. Upright in a horizontal title, turned with the column in a vertical one. */
+export const NAMEPLATE_ELLIPSIS = '…';
 
 /** Between the title's area and the artist's accent rule. */
 const ARTIST_GAP = 24;
@@ -37,9 +50,11 @@ export interface NameplateTrack {
 }
 
 export interface Nameplate {
-  /** The title as the line on stage. */
-  title: { direction: LineDirection; layout: LineLayout };
+  /** The title as the line on stage; `text` is what is printed (the title, or its head cut to fit). */
+  title: { text: string; direction: LineDirection; layout: LineLayout };
   artist: {
+    /** What is printed: the artist, or its head cut to fit. */
+    text: string;
     glyphs: PlacedGlyph[];
     sizePx: number;
     rule: { x: number; y: number; width: number; height: number };
@@ -89,6 +104,51 @@ function rowWidth(text: string, sizePx: number, measure: GlyphMeasure): number {
   return [...text].reduce((w, char) => w + measure(char, sizePx).advance, 0);
 }
 
+const EPSILON = 1e-6;
+
+/** `text` cut after its first `count` characters (trailing spaces dropped) and ended with the ellipsis. */
+function cut(chars: readonly string[], count: number): string {
+  return chars.slice(0, count).join('').trimEnd() + NAMEPLATE_ELLIPSIS;
+}
+
+/**
+ * The longest `cut` of `chars` for which `fits` holds, by bisection (a longer
+ * head never fits where a shorter one does not); null if not even one character does.
+ */
+function longestCut<T>(chars: readonly string[], attempt: (text: string) => T, fits: (value: T) => boolean) {
+  let best: { text: string; value: T } | null = null;
+  let lo = 1;
+  let hi = chars.length - 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const text = cut(chars, mid);
+    const value = attempt(text);
+    if (fits(value)) {
+      best = { text, value };
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+/** One row of `text` no wider than `width`: the text itself, or its longest head that fits with the ellipsis. */
+function fitRow(text: string, sizePx: number, measure: GlyphMeasure, width: number): string {
+  if (rowWidth(text, sizePx, measure) <= width + EPSILON) return text;
+  const best = longestCut([...text], (t) => rowWidth(t, sizePx, measure), (w) => w <= width + EPSILON);
+  return best?.text ?? NAMEPLATE_ELLIPSIS;
+}
+
+function within(bounds: LineLayout['bounds'], area: PrintArea): boolean {
+  return (
+    bounds.x >= area.left - EPSILON &&
+    bounds.x + bounds.width <= area.right + EPSILON &&
+    bounds.y >= area.top - EPSILON &&
+    bounds.y + bounds.height <= area.bottom + EPSILON
+  );
+}
+
 /**
  * Lays the nameplate out in `area` (the print area). Returns null when the
  * title is blank: there is nothing to print, and the stage shows idle instead.
@@ -109,12 +169,24 @@ export function composeNameplate(
   const meterTop = area.bottom - METER_MAX_HEIGHT;
   const meter = { x: area.left, width: area.right - area.left, baseline: area.bottom, maxHeight: METER_MAX_HEIGHT };
 
-  // The artist line above it, in s; a name too wide for the area drops to xs.
+  // The artist line above it, in s; a name too wide for the area drops to xs,
+  // and one too wide even then is cut to fit.
+  const areaWidth = area.right - area.left;
   let artistPx = viewport.width * SIZE_RATIO.s;
-  if (artist !== '' && rowWidth(artist, artistPx, secondary) > area.right - area.left) {
+  let artistText = artist;
+  if (artist !== '' && rowWidth(artist, artistPx, secondary) > areaWidth + EPSILON) {
     artistPx = viewport.width * SIZE_RATIO.xs;
+    artistText = fitRow(artist, artistPx, secondary, areaWidth);
   }
-  const { ascent, descent } = secondary(artist === '' ? '0' : [...artist][0]!, artistPx);
+  // The row's extent over all its characters: a name mixing kana and Latin
+  // letters keeps clear of the rule above and the meter below whichever comes first.
+  let ascent = 0;
+  let descent = 0;
+  for (const char of artistText === '' ? ['0'] : [...artistText]) {
+    const m = secondary(char, artistPx);
+    ascent = Math.min(ascent, m.ascent);
+    descent = Math.max(descent, m.descent);
+  }
   const artistBaseline = meterTop - METER_GAP - descent;
   const rule = {
     x: area.left,
@@ -122,13 +194,29 @@ export function composeNameplate(
     width: NAMEPLATE_RULE_WIDTH,
     height: NAMEPLATE_RULE_HEIGHT,
   };
-  const artistGlyphs = artist === '' ? [] : rowGlyphs(artist, area.left, artistBaseline, artistPx, secondary);
+  const artistGlyphs = artistText === '' ? [] : rowGlyphs(artistText, area.left, artistBaseline, artistPx, secondary);
 
   // The title in what is left above, centred in it either way (layoutLine
-  // centres a horizontal line itself; a vertical one is shifted here).
+  // centres a horizontal line itself; a vertical one is shifted here). The
+  // orientation is the whole title's, so a cut title keeps it.
   const titleArea: PrintArea = { ...area, bottom: rule.y - ARTIST_GAP };
   const direction = titleDirection(title, faces);
-  const layout = layoutLine(title, direction, viewport, measureFor(direction.font, direction.weight), titleArea);
+  const titleMeasure = measureFor(direction.font, direction.weight);
+  const minPx = viewport.width * SIZE_RATIO[NAMEPLATE_TITLE_MIN_SIZE];
+  const setTitle = (text: string) => layoutLine(text, direction, viewport, titleMeasure, titleArea);
+  const fits = (l: LineLayout) => l.glyphs.length > 0 && l.sizePx >= minPx - EPSILON && within(l.bounds, titleArea);
+  let titleText = title;
+  let layout = setTitle(title);
+  if (!fits(layout)) {
+    // Too long for two lines at the smallest title size: the longest head that
+    // fits. (If not even one character does, the area is degenerate and the
+    // whole title is left as layoutLine set it.)
+    const best = longestCut([...title], setTitle, fits);
+    if (best !== null) {
+      titleText = best.text;
+      layout = best.value;
+    }
+  }
   if (direction.orientation === 'vertical' && layout.glyphs.length > 0) {
     const room = titleArea.bottom - titleArea.top - layout.bounds.height;
     const shift = Math.max(0, room / 2);
@@ -139,8 +227,8 @@ export function composeNameplate(
   }
 
   return {
-    title: { direction, layout },
-    artist: { glyphs: artistGlyphs, sizePx: artistPx, rule },
+    title: { text: titleText, direction, layout },
+    artist: { text: artistText, glyphs: artistGlyphs, sizePx: artistPx, rule },
     meter,
     note: { x: area.left, y: area.captionBaseline, sizePx: viewport.width * SIZE_RATIO.xs },
   };

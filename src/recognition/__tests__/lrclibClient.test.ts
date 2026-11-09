@@ -175,6 +175,68 @@ describe('the /api/search fallback', () => {
     });
   });
 
+  describe('with the track’s length known, the exact match is held to it too', () => {
+    const known: Track = { ...testTrack, durationMs: 200_000 };
+
+    it('an exact match of another length (an edit under the same names) is passed over for the search', async () => {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(hit({ id: 1, duration: 245 })))
+        .mockResolvedValueOnce(jsonResponse([hit({ id: 1, duration: 245 }), hit({ id: 2, duration: 201 })]));
+      await expect(lookupLrclib(known, fetchMock as unknown as typeof fetch)).resolves.toEqual(
+        recordOf(hit({ id: 2, duration: 201 })),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // The length is compared, never sent.
+      for (const [url] of fetchMock.mock.calls) expect(String(url)).not.toContain('duration');
+    });
+
+    it('…and with nothing of the right length in the search either, there are no lyrics (never the wrong take)', async () => {
+      const fetchMock = jest
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(hit({ id: 1, duration: 245 })))
+        .mockResolvedValueOnce(jsonResponse([hit({ id: 1, duration: 245 }), hit({ id: 3, duration: 150 })]));
+      await expect(lookupLrclib(known, fetchMock as unknown as typeof fetch)).resolves.toBeNull();
+    });
+
+    it('an exact match within the tolerance is taken without searching', async () => {
+      const fetchMock = jest.fn().mockResolvedValue(jsonResponse(hit({ id: 4, duration: 202.9 })));
+      await expect(lookupLrclib(known, fetchMock as unknown as typeof fetch)).resolves.toEqual(
+        recordOf(hit({ id: 4, duration: 202.9 })),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('an exact match that reports no length is taken (nothing contradicts it)', async () => {
+      const fetchMock = jest.fn().mockResolvedValue(jsonResponse(hit({ id: 5, duration: null })));
+      await expect(lookupLrclib(known, fetchMock as unknown as typeof fetch)).resolves.toEqual(
+        recordOf(hit({ id: 5, duration: null })),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('without a length (ShazamKit today) the exact match is taken whatever its length', async () => {
+      const fetchMock = jest.fn().mockResolvedValue(jsonResponse(hit({ id: 6, duration: 999 })));
+      await expect(lookupLrclib(testTrack, fetchMock as unknown as typeof fetch)).resolves.toEqual(
+        recordOf(hit({ id: 6, duration: 999 })),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('a search by length never takes a same-named hit far from the track’s length, even when it is the only synced one', async () => {
+    const known: Track = { ...testTrack, durationMs: 200_000 };
+    const fetchMock = jest.fn().mockResolvedValue(
+      jsonResponse([
+        hit({ id: 1, duration: 260 }), // same names, synced, a minute longer
+        hit({ id: 2, duration: 199, syncedLyrics: null }), // right length, plain text only
+      ]),
+    );
+    await expect(searchLrclib(known, fetchMock as unknown as typeof fetch)).resolves.toEqual(
+      recordOf(hit({ id: 2, duration: 199, syncedLyrics: null })),
+    );
+  });
+
   it('a blank title never searches', async () => {
     const fetchMock = jest.fn();
     await expect(searchLrclib({ ...testTrack, title: ' ' }, fetchMock as unknown as typeof fetch)).resolves.toBeNull();
