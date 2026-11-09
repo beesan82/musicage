@@ -35,5 +35,8 @@ export function mapNativeRecognition(
   };
   if (e.album) r.album = e.album;
   if (e.artworkUrl) r.artworkUrl = e.artworkUrl;
+  if (typeof e.durationMs === 'number' && Number.isFinite(e.durationMs) && e.durationMs > 0) {
+    r.durationMs = e.durationMs;
+  }
   return r;
 }

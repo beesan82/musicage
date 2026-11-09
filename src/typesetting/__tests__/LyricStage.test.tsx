@@ -9,10 +9,12 @@ import { directSongByRules } from '../../direction/ruleBasedDirector';
 import { INK_TINT_MAX } from '../../direction/surge';
 import { DEFAULT_IDLE_GLYPHS } from '../../direction/types';
 import type { SongDirection } from '../../direction/types';
-import type { LyricLine } from '../../recognition/types';
+import { unsyncedNote } from '../../recognition/recognitionCopy';
+import type { LyricLine, UnsyncedKind } from '../../recognition/types';
 import { IDLE_FOCUS } from '../../textures/surfaceModel';
 import * as textureBackground from '../../textures/TextureBackground';
 import { dropDip, hexToRgb01 } from '../../textures/textureShader';
+import { METER_BASE_HEIGHT, METER_RULE_COUNT, METER_RULE_WIDTH } from '../bandMeter';
 import * as fonts from '../fonts';
 import { composeIdle } from '../idleComposition';
 import { layoutLine, printArea, SIZE_RATIO } from '../layout';
@@ -1151,6 +1153,204 @@ describe('the idle print: faces, accent and the caption rule (visual overhaul sp
   test('no caption rule without a track', async () => {
     const view = await renderStage({ source: { kind: 'idle', direction: null, track: null }, beat, nowMonotonicMs: 0 });
     expect(view.queryByTestId('idle-caption-rule')).toBeNull();
+  });
+});
+
+describe('a recognised song without synced lyrics: the nameplate', () => {
+  const track = { title: '架空の歌', artist: '架空の人' };
+  // A song without lines: the rules still give it a palette from the seed.
+  const songDirection = directSongByRules([], 'u');
+  const { palette } = songDirection;
+  const XL = 390 * SIZE_RATIO.xl;
+  const XS = 390 * SIZE_RATIO.xs;
+  const unsynced = (
+    reason: UnsyncedKind = 'lyrics_unavailable',
+    dropAtMs: number | null = null,
+  ): LyricStageProps['source'] => ({ kind: 'unsynced', track, direction: songDirection, reason, dropAtMs });
+  type Box = { x: number; y: number; width: number; height: number };
+  const rectOf = (node: { props: Record<string, any> }) => node.props.rect.value as Box;
+  const textBox = (p: Record<string, any>) => {
+    const size = p.font.getSize() as number;
+    return { left: p.x as number, top: p.y - size * 0.88, right: p.x + size, bottom: p.y + size * 0.12 };
+  };
+  const expectInside = (box: { left: number; top: number; right: number; bottom: number }) => {
+    expect(box.left).toBeGreaterThanOrEqual(STAGE_AREA.left - 1e-6);
+    expect(box.right).toBeLessThanOrEqual(STAGE_AREA.right + 1e-6);
+    expect(box.top).toBeGreaterThanOrEqual(STAGE_AREA.top - 1e-6);
+    expect(box.bottom).toBeLessThanOrEqual(STAGE_AREA.bottom + 1e-6);
+  };
+
+  test('prints the title as the line on stage under the grounding shadow, the artist small beside it, and no idle print', async () => {
+    const view = await renderStage({ source: unsynced(), beat, nowMonotonicMs: 100 });
+    const title = view.getAllByTestId(/^glyph-/) as unknown as Node[];
+    expect(title).toHaveLength(4);
+    for (const glyph of title) expect(textsIn(glyph)[0]!.props.font.getSize()).toBe(XL);
+    const shadowed = view.getByTestId('line-shadow') as unknown as Node;
+    expect(shadowed.queryAll((n) => /^glyph-/.test(n.props.testID ?? ''))).toHaveLength(4);
+
+    const artist = view.getAllByTestId(/^nameplate-artist-glyph-/) as unknown as Node[];
+    expect(artist).toHaveLength(4);
+    expect(view.getByTestId('nameplate-artist').props.opacity).toBe(0.6);
+    const rule = view.getByTestId('nameplate-artist-rule').props;
+    expect(rule).toMatchObject({ x: 24, width: 12, height: 2 });
+    expect(rule.color.value).toBe(palette.accent);
+    for (const glyph of artist) {
+      expect(textsIn(glyph)[0]!.props.font.getSize()).toBe(390 * SIZE_RATIO.s);
+      // Flat, like the caption: no body gradient.
+      expect(glyph.queryAll((n) => n.type === 'skLinearGradient')).toHaveLength(0);
+    }
+
+    expect(view.queryByTestId('idle-caption')).toBeNull();
+    expect(view.queryByTestId('idle-caption-rule')).toBeNull();
+    expect(view.queryByTestId('idle-shadow')).toBeNull();
+    expect(view.queryAllByTestId(/^exit-/)).toHaveLength(0);
+    expect(view.queryAllByTestId(/^ornament-/)).toHaveLength(0);
+  });
+
+  test('the title rises and holds pulse (it breathes on the beat heads); the artist fades in and stands still', async () => {
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await renderStage({ source: unsynced(), beat, nowMonotonicMs: 100 });
+    const inputs = spy.mock.calls.map(([input]) => input as motion.MotionInput).filter((i) => !i.exiting);
+    const title = inputs.filter((i) => i.hold === 'pulse');
+    const artist = inputs.filter((i) => i.hold === 'still');
+    expect(title.length).toBeGreaterThan(0);
+    expect(artist.length).toBeGreaterThan(0);
+    for (const i of title) expect(i.entrance).toBe('rise');
+    for (const i of artist) expect(i.entrance).toBe('fade');
+    expect(inputs.filter((i) => i.hold !== 'pulse' && i.hold !== 'still')).toHaveLength(0);
+  });
+
+  test.each(['lyrics_unavailable', 'plain', 'instrumental'] as const)(
+    'the note on the caption row for %s says what was not found, gothic xs in the ink at 0.6',
+    async (reason) => {
+      const view = await renderStage({ source: unsynced(reason), beat, nowMonotonicMs: 100 });
+      const note = view.getByTestId('unsynced-note').props;
+      expect(note.text).toBe(unsyncedNote(reason));
+      expect(note).toMatchObject({ x: 24, y: STAGE_AREA.captionBaseline, opacity: 0.6 });
+      expect(note.font.getSize()).toBe(XS);
+      expect(note.color.value).toBe(palette.ink);
+      expect(note.text).not.toContain('同期歌詞');
+    },
+  );
+
+  test('the band meter: 24 two-pixel rules on the foot of the print area, in the ink at 0.7, at the printed base before any sound', async () => {
+    const view = await renderStage({ source: unsynced(), beat, nowMonotonicMs: 100 });
+    const rules = view.getAllByTestId(/^band-rule-/);
+    expect(rules).toHaveLength(METER_RULE_COUNT);
+    const xs = rules.map((rule) => rectOf(rule).x);
+    for (const rule of rules) {
+      const rect = rectOf(rule);
+      expect(rect.width).toBe(METER_RULE_WIDTH);
+      expect(rect.height).toBe(METER_BASE_HEIGHT);
+      expect(rect.y + rect.height).toBeCloseTo(STAGE_AREA.bottom, 6);
+      expect(rule.props.color.value).toBe(palette.ink);
+      expect(rule.props.opacity).toBe(0.7);
+    }
+    expect(Math.min(...xs)).toBe(STAGE_AREA.left);
+    expect(Math.max(...xs)).toBeCloseTo(STAGE_AREA.right - METER_RULE_WIDTH, 6);
+    expect(new Set(xs).size).toBe(METER_RULE_COUNT);
+  });
+
+  test('under reduced motion the meter is a still base scale and the stage still prints the nameplate', async () => {
+    const view = await renderStage({ source: unsynced(), beat, nowMonotonicMs: 100, reducedMotion: true });
+    for (const rule of view.getAllByTestId(/^band-rule-/)) expect(rectOf(rule).height).toBe(METER_BASE_HEIGHT);
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+    expect(view.getByTestId('unsynced-note').props.text).toBe(unsyncedNote('lyrics_unavailable'));
+  });
+
+  test('the title, the artist with its rule and the meter all keep to the print area', async () => {
+    const view = await renderStage({ source: unsynced(), beat, nowMonotonicMs: 100 });
+    const glyphs = [
+      ...(view.getAllByTestId(/^glyph-/) as unknown as Node[]),
+      ...(view.getAllByTestId(/^nameplate-artist-glyph-/) as unknown as Node[]),
+    ];
+    for (const glyph of glyphs) for (const text of textsIn(glyph)) expectInside(textBox(text.props));
+    const rule = view.getByTestId('nameplate-artist-rule').props;
+    expectInside({ left: rule.x, top: rule.y, right: rule.x + rule.width, bottom: rule.y + rule.height });
+    for (const node of view.getAllByTestId(/^band-rule-/)) {
+      const rect = rectOf(node);
+      expectInside({ left: rect.x, top: rect.y, right: rect.x + rect.width, bottom: rect.y + rect.height });
+    }
+  });
+
+  test('the lamp settles on the title', async () => {
+    const spy = jest.spyOn(textureBackground, 'TextureBackground');
+    await renderStage({ source: unsynced(), beat, nowMonotonicMs: 100 });
+    const props = spy.mock.calls.at(-1)![0] as { focus?: { value: { x: number; y: number } } };
+    const focus = props.focus!.value;
+    expect(focus).not.toEqual(IDLE_FOCUS);
+    expect(focus.x).toBeGreaterThan(0.3);
+    expect(focus.x).toBeLessThan(0.7);
+  });
+
+  test('the recognition drop fires for a song without lyrics: the idle glyphs scatter on the head and the title drops onto it', async () => {
+    // The nameplate's own start is read from performance.now(); pin it to the
+    // fire time (and hand the clock back before the fake timers are removed).
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const gridValues: BeatSharedValues = { ...beatValues, nextBeatAtMs: sv(10_300), periodMs: sv(500), confidence: sv(0.9) };
+    const stage = (source: LyricStageProps['source'], nowMonotonicMs: number) =>
+      inProvider(<LyricStage beatValues={gridValues} source={source} beat={beat} nowMonotonicMs={nowMonotonicMs} />);
+    const flushUI = () =>
+      act(async () => {
+        jest.advanceTimersByTime(0);
+      });
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    const view = await render(stage({ kind: 'idle', direction: null, track: null }, 10_000));
+    await flushUI();
+    const idleCount = view.getAllByTestId(/^glyph-/).length;
+    spy.mockClear();
+
+    await view.rerender(stage(unsynced('plain', 10_000), 10_000));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-idle-glyph-/)).toHaveLength(idleCount);
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+    const inputs = spy.mock.calls.map(([input]) => input as motion.MotionInput);
+    const exits = inputs.filter((i) => i.exiting);
+    const title = inputs.filter((i) => !i.exiting && i.hold === 'pulse');
+    const artist = inputs.filter((i) => !i.exiting && i.hold === 'still');
+    expect(exits.length).toBeGreaterThan(0);
+    expect(title.length).toBeGreaterThan(0);
+    expect(artist.length).toBeGreaterThan(0);
+    for (const i of exits) {
+      expect(i.entrance).toBe('scatter');
+      expect(i.elapsedMs).toBe(-300);
+    }
+    for (const i of title) {
+      expect(i.entrance).toBe('drop');
+      expect(i.anticipationMs).toBe(300);
+      expect(i.elapsedMs).toBe(-300);
+    }
+    // The artist lands with the title: hidden until the head, then it fades in.
+    for (const i of artist) expect(i.elapsedMs).toBe(-300);
+
+    await act(async () => {
+      jest.advanceTimersByTime(1000);
+    });
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+    nowSpy.mockRestore();
+  });
+
+  test('a nameplate leaving for idle (its song was lost) keeps its title as an exiting layer, then drops it', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(100);
+    const at = (source: LyricStageProps['source']) => (
+      <LyricStage beatValues={beatValues} source={source} beat={beat} nowMonotonicMs={100} />
+    );
+    const view = await render(inProvider(at(unsynced())));
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+
+    await view.rerender(inProvider(at({ kind: 'idle', direction: null, track: null })));
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    expect(view.getAllByTestId(/^glyph-/).length).toBeGreaterThanOrEqual(5);
+    expect(view.queryAllByTestId(/^band-rule-/)).toHaveLength(0);
+    expect(view.queryByTestId('unsynced-note')).toBeNull();
+
+    // A rise exit runs 320 ms (+80 ms of slack in the stage's timer).
+    await act(async () => {
+      jest.advanceTimersByTime(600);
+    });
+    expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
+    nowSpy.mockRestore();
   });
 });
 

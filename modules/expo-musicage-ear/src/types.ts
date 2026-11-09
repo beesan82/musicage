@@ -14,6 +14,13 @@ export interface EarRecognition {
   artworkUrl?: string;
   matchedAtMonotonicMs: number;
   currentOffsetMs: number;
+  /**
+   * The track's length in ms, when the recognizer reports one. ShazamKit's
+   * SHMediaItem carries no duration, so the Swift module never sends it today;
+   * the field is wired through so a recognizer that knows it can feed the
+   * lyrics lookup without a JS change.
+   */
+  durationMs?: number;
 }
 
 export type EarErrorCode =
@@ -49,6 +56,7 @@ export interface NativeRecognitionEvent {
   artworkUrl?: string | null;
   matchedAtNativeMs: number;
   currentOffsetMs: number;
+  durationMs?: number | null;
 }
 
 export const NATIVE_MODULE_NAME = 'ExpoMusicageEar';

@@ -237,16 +237,20 @@ describe('MusicageApp', () => {
     );
   });
 
-  it('passes a plain-lyrics result as an idle caption only', async () => {
+  it('shows a plain-lyrics result as the nameplate of a song the stage cannot follow, with its note', async () => {
     const plain: LyricResult = { kind: 'plain', track, text: '夜の底で' };
     mockApp({ recognition: createRecognition({ ...IDLE_STATE, result: plain }) });
-    await renderApp();
+    const screen = await renderApp();
 
-    expect(lastStageProps().source).toEqual({
-      kind: 'idle',
-      direction: null,
+    expect(lastStageProps().source).toMatchObject({
+      kind: 'unsynced',
+      reason: 'plain',
       track: { title: track.title, artist: track.artist },
     });
+    expect(screen.getByTestId('unsynced-note').props.text).toBe(RECOGNITION_COPY.lyrics_unsynced);
+    expect(screen.queryByTestId('idle-caption')).toBeNull();
+    // The chrome takes the song's palette, as for a synced song.
+    expect(lastStageProps().source.direction).not.toBeNull();
   });
 
   it('renders the lyric stage in idle with no track', async () => {

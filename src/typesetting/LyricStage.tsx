@@ -11,11 +11,13 @@ import { lightHexFor, rgbaOf } from '../direction/palettes';
 import { surgeHighHex } from '../direction/surge';
 import { DEFAULT_IDLE_GLYPHS, DEFAULT_PALETTE } from '../direction/types';
 import type { LineDirection, SongDirection } from '../direction/types';
-import type { LyricLine } from '../recognition/types';
+import { unsyncedNote } from '../recognition/recognitionCopy';
+import type { LyricLine, UnsyncedKind } from '../recognition/types';
 import type { ScheduledLine } from '../sync/lineScheduler';
 import { IDLE_FOCUS } from '../textures/surfaceModel';
 import type { Uv } from '../textures/surfaceModel';
 import { TextureBackground } from '../textures/TextureBackground';
+import { BandMeter } from './BandMeter';
 import { createStageFont, FONT_SOURCES, useStageTypefaces } from './fonts';
 import type { FontKey, FontWeight } from './fonts';
 import { GlowLayer } from './GlowLayer';
@@ -26,6 +28,8 @@ import type { IdleComposition, IdleFaces, IdleTrack } from './idleComposition';
 import { layoutLine, printArea, SIZE_RATIO } from './layout';
 import type { GlyphMeasure, LineLayout, PlacedGlyph, PrintArea, Viewport } from './layout';
 import { dropHeadMs, entranceDurationMs, exitDurationMs, TEMPO_FEEL_FACTOR } from './motion';
+import { composeNameplate } from './nameplate';
+import type { Nameplate } from './nameplate';
 import { lineArea, Ornament } from './Ornaments';
 import { accentBody, contextInk, inkBody, surgeAccent, surgeInk } from './surgeColors';
 import type { BeatSharedValues } from './useBeatSharedValues';
@@ -44,6 +48,21 @@ export type StageSource =
        * fire time: the idle glyphs scatter on the next beat head, the
        * background dips, and the first line drops in (design spec §7).
        */
+      dropAtMs?: number | null;
+    }
+  | {
+      /**
+       * A recognized song the stage cannot follow (no synced lyrics: plain
+       * text only, an instrumental record, or none). The stage prints its
+       * nameplate (nameplate.ts): the title large as the line on stage with
+       * the `pulse` hold, the artist small, the band meter answering the
+       * music, and a short honest note on the caption row.
+       */
+      kind: 'unsynced';
+      track: NonNullable<IdleTrack>;
+      direction: SongDirection;
+      reason: UnsyncedKind;
+      /** As for `synced`: the recognition drop fires for a new song with or without lyrics. */
       dropAtMs?: number | null;
     }
   | { kind: 'idle'; direction: SongDirection | null; track: IdleTrack };
@@ -283,6 +302,9 @@ function captionGlyphs(caption: NonNullable<IdleComposition['caption']>, measure
 }
 
 interface LineScene {
+  /** Identifies the line on stage across renders: `line:<index>` for a lyric line, `title:<song>` for a nameplate. */
+  key: string;
+  /** The lyric line's index, or TITLE_INDEX for a nameplate's title (seeds and keys only). */
   index: number;
   direction: LineDirection;
   layout: LineLayout;
@@ -290,8 +312,10 @@ interface LineScene {
   next: ContextLine | null;
 }
 
+/** The scene index of a nameplate's title (never a lyric line's index). */
+const TITLE_INDEX = -3;
 /** Marks a drop whose line has been and gone: no later line takes the drop entrance. */
-const DROP_LINE_DONE = -2;
+const DROP_LINE_DONE = 'drop:done';
 /** Slack after an exit's computed end before its layer is removed. */
 const EXIT_SLACK_MS = 80;
 
@@ -309,7 +333,8 @@ interface Drop {
   idleGlyphs: PlacedGlyph[] | null;
   /** The faces those idle glyphs were set in, so they keep them while they scatter. */
   idleFaces: IdleFaces;
-  lineIndex: number | null;
+  /** The scene key of the line that drops in; null until one is shown, DROP_LINE_DONE after it. */
+  lineKey: string | null;
 }
 
 /** The parts of a drop that are on stage for a bounded time (state, so they are removed by timers). */
@@ -378,10 +403,14 @@ export function LyricStage({
 
   const lines = source.kind === 'synced' ? source.lines : null;
   const scheduled = source.kind === 'synced' ? source.scheduled : null;
+  const unsynced = source.kind === 'unsynced' ? source : null;
   const songDirection = source.direction;
   const lineIndex = scheduled?.index ?? -1;
   const lineIsEmpty = scheduled?.isEmpty ?? true;
-  const lineStartedAtMs = scheduled?.startedAtMs ?? 0;
+  // The faces the idle composition and the nameplate are set in (spec §3e):
+  // from the song's line directions, or mincho-old over gothic before a song
+  // is recognised (and for a song without lines, which has no directions).
+  const faces = useMemo(() => idleFaces(songDirection), [songDirection]);
 
   // The print area (visual overhaul spec §3d), shared with the idle
   // composition: the caption row in its bottom band is gothic xs.
@@ -394,8 +423,33 @@ export function LyricStage({
   );
   const numeralFont = fonts === null ? null : fonts('gothic', 'regular', viewport.width * SIZE_RATIO.s);
 
+  // The nameplate of a recognized song without synced lyrics (nameplate.ts):
+  // its title is the line on stage below, the rest is drawn beside it.
+  const unsyncedTitle = unsynced?.track.title ?? null;
+  const unsyncedArtist = unsynced?.track.artist ?? null;
+  const nameplate = useMemo<Nameplate | null>(() => {
+    if (fonts === null || area === null || unsyncedTitle === null || unsyncedArtist === null) return null;
+    return composeNameplate(
+      { title: unsyncedTitle, artist: unsyncedArtist },
+      faces,
+      viewport,
+      area,
+      (font, weight) => measureWith(fonts, font, weight),
+    );
+  }, [area, faces, fonts, unsyncedArtist, unsyncedTitle, viewport]);
+
   const lineScene = useMemo<LineScene | null>(() => {
     if (fonts === null || area === null || numeralFont === null) return null;
+    if (nameplate !== null) {
+      return {
+        key: `title:${unsyncedArtist}/${unsyncedTitle}`,
+        index: TITLE_INDEX,
+        direction: nameplate.title.direction,
+        layout: nameplate.title.layout,
+        prev: null,
+        next: null,
+      };
+    }
     if (lines === null || songDirection === null || lineIsEmpty) return null;
     const text = lines[lineIndex]?.text.trim() ?? '';
     if (text === '') return null;
@@ -414,27 +468,49 @@ export function LyricStage({
     const context = (side: 'prev' | 'next', line: LyricLine | undefined) =>
       showContext ? contextLine(line, side, layout, vertical, viewport, inner, fonts) : null;
     return {
+      key: `line:${lineIndex}`,
       index: lineIndex,
       direction,
       layout,
       prev: context('prev', lines[lineIndex - 1]),
       next: context('next', lines[lineIndex + 1]),
     };
-  }, [area, fonts, lineIndex, lineIsEmpty, lines, numeralFont, songDirection, viewport]);
+  }, [
+    area,
+    fonts,
+    lineIndex,
+    lineIsEmpty,
+    lines,
+    nameplate,
+    numeralFont,
+    songDirection,
+    unsyncedArtist,
+    unsyncedTitle,
+    viewport,
+  ]);
+
+  // When the nameplate on stage appeared, on the stage clock (performance.now()
+  // is the clock the anchor below tracks): its title's rise, or the drop that
+  // lands it, is timed from here. A lyric line is timed by its schedule.
+  const nameplateKey = nameplate !== null && lineScene !== null ? lineScene.key : null;
+  const nameplateKeyRef = useRef<string | null>(null);
+  const nameplateStartedAtRef = useRef(nowMonotonicMs);
+  if (nameplateKeyRef.current !== nameplateKey) {
+    nameplateKeyRef.current = nameplateKey;
+    nameplateStartedAtRef.current = performance.now();
+  }
+  const lineStartedAtMs = scheduled?.startedAtMs ?? (nameplateKey !== null ? nameplateStartedAtRef.current : 0);
 
   // The recognition drop (design spec §7), once per fire time. Computed in
   // render so the line shown in the very same render can take it: the head
   // it lands on (the next beat head, if the grid is trusted), the idle glyphs
   // on stage at the fire, and when a fresh idle may rise after their scatter.
   // Skipped under reduced motion, where the stage clock does not advance.
-  const dropAtMs = source.kind === 'synced' ? (source.dropAtMs ?? null) : null;
+  const dropAtMs = source.kind === 'synced' || source.kind === 'unsynced' ? (source.dropAtMs ?? null) : null;
   const dropRef = useRef<Drop | null>(null);
   // The idle composition shown in the previous render (null while a line is on
   // stage): the glyphs a drop firing now sends scattering.
   const idleShownRef = useRef<IdleComposition | null>(null);
-  // The faces the idle composition is set in (spec §3e): from the song's line
-  // directions, or mincho-old over gothic before a song is recognised.
-  const faces = useMemo(() => idleFaces(songDirection), [songDirection]);
   const idleFacesShownRef = useRef<IdleFaces>(faces);
   if (dropAtMs !== null && !reducedMotion && dropRef.current?.fireAtMs !== dropAtMs) {
     const periodMs = beatValues.periodMs.value;
@@ -451,17 +527,18 @@ export function LyricStage({
       idleRiseAtMs: headMs + exitDurationMs('scatter', idleGlyphs?.length ?? 0, periodMs),
       idleGlyphs,
       idleFaces: idleFacesShownRef.current,
-      lineIndex: null,
+      lineKey: null,
     };
   }
   const drop = dropRef.current;
-  // The first line shown after the fire is the one that drops in; once the
-  // stage has moved past it, no later line takes the drop.
+  // The first line shown after the fire (a lyric line, or a nameplate's title)
+  // is the one that drops in; once the stage has moved past it, no later line
+  // takes the drop.
   if (drop !== null && lineScene !== null) {
-    if (drop.lineIndex === null) drop.lineIndex = lineScene.index;
-    else if (drop.lineIndex !== lineScene.index) drop.lineIndex = DROP_LINE_DONE;
+    if (drop.lineKey === null) drop.lineKey = lineScene.key;
+    else if (drop.lineKey !== lineScene.key) drop.lineKey = DROP_LINE_DONE;
   }
-  const isDropLine = drop !== null && lineScene !== null && drop.lineIndex === lineScene.index;
+  const isDropLine = drop !== null && lineScene !== null && drop.lineKey === lineScene.key;
   const scene = useMemo<LineScene | null>(
     () =>
       lineScene !== null && isDropLine
@@ -504,7 +581,7 @@ export function LyricStage({
   useEffect(() => {
     const prev = lastSceneRef.current;
     lastSceneRef.current = scene;
-    if (prev === null || (scene !== null && scene.index === prev.index)) return;
+    if (prev === null || (scene !== null && scene.key === prev.key)) return;
     const duration = exitDurationMs(
       prev.direction.entrance,
       prev.layout.glyphs.length,
@@ -514,7 +591,11 @@ export function LyricStage({
       setExiting(null);
       return;
     }
-    setExiting({ scene: prev, startedAtMs: scheduled?.startedAtMs ?? nowMonotonicMs });
+    // The exit starts when the next line did; a nameplate leaving for idle
+    // (its song was lost) has no next line, so it starts now.
+    const startedAtMs =
+      scheduled?.startedAtMs ?? (prev.index === TITLE_INDEX ? performance.now() : nowMonotonicMs);
+    setExiting({ scene: prev, startedAtMs });
   }, [scene, beatValues, scheduled, nowMonotonicMs, reducedMotion]);
   useEffect(() => {
     if (exiting === null) return undefined;
@@ -845,6 +926,55 @@ export function LyricStage({
                   </Group>
                 );
               })}
+            </>
+          ) : null}
+          {unsynced !== null && nameplate !== null && scene !== null ? (
+            <>
+              {/* The rest of the nameplate (nameplate.ts), beside the title the
+                  block above draws as the line on stage: the artist small and
+                  flat under its accent rule (no shadow, like the caption), the
+                  band meter on the foot of the print area, the note on the
+                  caption row. The artist arrives with the title (fades in at
+                  the same landing) and otherwise stands still. */}
+              {nameplate.artist.glyphs.length > 0 ? (
+                <Group opacity={CAPTION_OPACITY} {...({ testID: 'nameplate-artist' } as object)}>
+                  <Rect
+                    {...nameplate.artist.rule}
+                    color={accentNow}
+                    {...({ testID: 'nameplate-artist-rule' } as object)}
+                  />
+                  <GlyphLayer
+                    {...shared}
+                    body={null}
+                    glyphs={nameplate.artist.glyphs}
+                    fontFor={idleSecondary}
+                    lineStartedAtMs={lineStartedAtMs}
+                    lineLandsAtMs={lineLandsAtMs}
+                    entrance="fade"
+                    hold="still"
+                    accent={false}
+                    seed={scene.index + 1}
+                    testIDPrefix="nameplate-artist-glyph"
+                  />
+                </Group>
+              ) : null}
+              <BandMeter
+                x={nameplate.meter.x}
+                width={nameplate.meter.width}
+                baseline={nameplate.meter.baseline}
+                beat={beatValues}
+                ink={inkNow}
+                reducedMotion={reducedMotion}
+              />
+              <Text
+                x={nameplate.note.x}
+                y={nameplate.note.y}
+                text={unsyncedNote(unsynced.reason)}
+                font={gothic(nameplate.note.sizePx)}
+                color={inkNow}
+                opacity={CAPTION_OPACITY}
+                {...({ testID: 'unsynced-note' } as object)}
+              />
             </>
           ) : null}
           {idle !== null && idleBase !== null ? (

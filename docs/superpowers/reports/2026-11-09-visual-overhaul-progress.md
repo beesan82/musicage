@@ -257,3 +257,72 @@
 - 段階A〜Fの実装と検証が完了。コミット：84a6670（設計）/ 8c49e5e（A）/ 5245758（B）/ cbadcc7（C）/ 686f8b7（D）/ c13a8ae（E）/ 0444d43（F）。
 - 全体テスト：50スイート632件全通過（着手前ベースライン424件から+208件）。typecheck 通過。
 - 段階G（実機所見による数値調整）は未着手で、TestFlight配信後の本人の所見待ち。調整候補は設計書§3各所とGの節に列挙済み（グラデーション振幅、灯の定数、縦組み16文字/列の是非、idleの影のfps、主ボタンのaccent枠の強さ等）。
+
+## 実機所見対応: 歌詞なしでも音楽に反応する舞台（2026-11-09、ブランチ `fix/no-lyrics-visual`）
+
+所見: 曲は認識できたのに LRCLIB に同期歌詞が無い曲では舞台が idle のままで、曲名が caption に出るだけ。音楽が鳴っているのに「何も起きていない」ように見えた。あわせて LRCLIB の `/api/get` が表記ゆれで外れる場合の取りこぼしも直す。設計書 §7 に 2026-11-09 改定として「銘板」の項を足した（AGENTS.md の「変えるときは設計書を直してから」）。
+
+### 判断
+
+1. **3 つ目の舞台ソース `unsynced`（銘板）。** `LyricResult` が `plain` / `instrumental` / `lyrics_unavailable` で track が確定しているとき、`StageSource` は `{ kind: 'unsynced', track, direction, reason, dropAtMs }`。idle には落とさない。`not_recognized` と結果なしは従来どおり idle。`UnsyncedKind` と `isUnsyncedKind` は `src/recognition/types.ts`。
+2. **銘板の組版（`src/typesetting/nameplate.ts`、純関数 `composeNameplate`）。** 版面の中を上から: 曲名の領域 → 24px → アーティストの accent 罫 12×2 と 6px 下にアーティスト行 → 20px → バンドメーターの高さ 36px（版面の下端に立つ）。caption 行に注記。
+   - 曲名 = 主役の行として `layoutLine`（xl、idle の主書体 `faces.primary` とそのウェイト、`rise`、`hold: pulse`、オーナメント none）。かな・漢字を 1 字でも含めば縦組み（置物自身の書き方）、ラテンだけなら横組み。縦組みは領域の中で上下中央に寄せる。長い曲名は `layoutLine` の既存規則で 1 段ずつ下がる。接地影・墨の身体・灯の焦点は主役の行と同じ経路（`LineScene` を流用）。
+   - アーティスト = s（版面幅に入らなければ xs）、副書体、平塗り（caption と同じ）、Group 不透明度 0.6、accent の 12×2 罫。曲名と同時に現れる（同じ着地で `fade`）。
+   - 注記 = caption 行、gothic xs、ink 0.6。文言は `recognitionCopy.ts` の `unsyncedNote(kind)`: `lyrics_unavailable`「歌詞が見つかりませんでした」、`plain`「時刻つきの歌詞が見つかりませんでした」、`instrumental`「歌のない曲として登録されています」。「同期歌詞」というラベルは出さない（製品の決まり）。
+3. **バンドメーター（`bandMeter.ts` + `BandMeter.tsx`）は刷られた目盛りで、光らない。** 24 本の 2px 罫、無音で 3px、全開で 36px × 罫ごとの形係数（0.72〜1 の決定的ハッシュ。平らなブロックにしない）。左端が低域、中央が中域、右端が高域で、その間は線形に混ぜる。色は `inkNow`（surge 追従の墨）、不透明度 0.7（rule オーナメントと同じ）。
+   - 駆動は `beatValues.low / mid / high`（`useBeatSharedValues` が attack 20ms / release 150ms で平滑化済み）を、1 つの `useFrameCallback`（UI スレッド）で τ = 120ms（拍パルスの減衰と同じ）の一次追従、各罫は `useDerivedValue` で矩形を導出。**React の毎フレーム再レンダーは無い**。無音では包絡が 0 に落ちて基線の目盛りだけ残る。reducedMotion ではフレームコールバックを止めて基線に固定。
+   - アンチゴール: 動くのは罫の高さだけで、全面の輝度は変えない。拍にも音量にも文字の大きさは直接追従させない（曲名の `pulse` は他の行と同じ規則）。語・音節の擬似同期は無い。
+4. **ドロップは歌詞なしの曲でも発火する。** `useStageSource` の発火条件を `timedTrackId` から `namedTrackId`（結果のある track の trackId）に変えた。同じ trackId の再認識・再解決（plain → lyrics_unavailable など）では発火しない。`unsynced` ソースは drop の effect がその track を見た次のレンダーから出す（新しい state `confirmedTrackId`）。その前の 1 レンダーは track つきの idle で、舞台はそこから散る idle グリフを取る（同期曲の「最初の行は 1 レンダー後に乗る」と同じ形）。フィクスチャ再生中は銘板を出さない（最初の tick 待ちの間も idle）。
+5. **`LyricStage` の行の識別を index から key に。** `LineScene.key`（`line:<index>` / `title:<artist>/<title>`）で drop の対象行と退場の判定を行う。銘板の曲名は index `TITLE_INDEX = -3`（seed 用）。銘板の開始時刻は `performance.now()`（舞台時計と同じ基準）を key が変わったときに取る。銘板 → idle（曲を見失った）では曲名が退場レイヤーに残り、`rise` の退場（320ms）で消える。アーティスト・メーター・注記は即時に消える（退場なし）。
+6. **行が無くても曲の方向を作る。** `directSongByRules([], seed)` で家族（palette / texture）を決めるので、歌詞なしの曲でも地の色・クロームが曲ごとに変わる。行の direction が無いので idle の書体規則は未認識と同じ（`mincho-old` / `gothic`）になり、銘板もその書体。plain の本文を方向決めの材料に使うかは据え置き（後述）。
+7. **LRCLIB フォールバック（`lrclibClient.ts`）。** `/api/get` が 404 なら `/api/search?track_name=&artist_name=`（アルバム名も長さも送らない。送るものは従来と同じ 2 つの名前だけ）。候補の選び方 `pickSearchCandidate`:
+   - track に `durationMs` があれば、長さの差が **3 秒以内**で最寄りの 1 件。範囲内に無ければ null（同名の別録音に同期すると偽同期になる）。長さの無い候補は数えない。
+   - 無ければ、正規化した曲名とアーティストが両方一致する候補。正規化 `normalizeName` = NFKC → 小文字 → 括弧の後置詞（`(Remastered)` など。全体が括弧なら残す）除去 → 空白・句読点・記号を除去。字種の翻字はしない。
+   - 同点は synced > plain > instrumental > 検索順。歌詞も instrumental 印も無い候補は数えない。
+   - ShazamKit の `SHMediaItem` は長さを返さないので、**今は名前一致の経路だけが動く**。`durationMs` は `NativeRecognitionEvent` → `EarRecognition` → `Track` に配線だけした（Swift は未送信、`Track.durationMs` は報告が無ければフィールド自体を付けない）。
+   - 検索でも見つからなければ従来どおり `lyrics_unavailable`。エラーの意味（aborted / http / malformed / network / rate_limited）は `/api/get` と同じ。
+8. **plain 歌詞（時刻なしテキスト）の本文表示は今回スコープ外。** 新しい銘板モードで受け（注記は「時刻つきの歌詞が見つかりませんでした」）、本文は出さない。出すなら設計書で「行を追わない」表示（例: 連・段落単位で拍に乗せずに流す）を決めてから。
+
+### 特徴量ストリームの確認（認識完了後も舞台へ流れ続けるか）
+
+コードで追った経路と結論: **止まる経路は無く、直すものは無い。**
+
+- Swift（`ExpoMusicageEarModule.swift`）: `analysisMixer.installTap` のクロージャは、`matchSink.current()` が nil でも毎バッファ `analyzer.push` を呼び、`onFeatures` を送る。照合の終了 `endMatch()` は `matchSink` を nil にし `SHSession` を捨てるだけで、tap も engine も止めない。tap と engine を止めるのは `stopListening()`（マイク停止・OnDestroy）だけ。
+- JS モジュール（`modules/expo-musicage-ear/src/index.ts`）: `addFeaturesListener` は `onFeatures` を常時購読。認識イベントとは独立。
+- `useNativeEar`: `statusRef === 'listening'` の間だけ `emitter.emit`。status を変えるのは start / stop / `audio_setup_failed` / `interrupted` / AppState の非アクティブ化で、認識の完了・失敗・キャンセルは関係しない。
+- `useEarRecognition`: マイクの状態に触れない。`cancel()` は `recognizer.cancelMatch()`（Swift では `endMatch`）だけ。
+- `useStageSource`: 購読 effect の依存は `[beatValues, earStream, status]`。`result` が変わっても再購読・解除しない。`beatValues.write`（low / mid / high の包絡、pulse など）と `surge` / `silence` は毎フレーム書く。
+- `LyricStage` → `BandMeter`: `beatValues.low / mid / high` を UI スレッドで直接読む。
+- テスト: `useStageSource.test.tsx`「the band values keep flowing to the shared values while the nameplate is on stage」で、unsynced ソースのまま耳フレームが shared value に届くことを確認（書いたが未実行）。
+- 実機で追加確認が要るのは、ShazamKit の照合中〜直後に `analyzer.push` の処理落ちが無いか（tap のスレッドで `matchStreamingBuffer` と FFT が同居する）。Swift は変えていない。
+
+### 変更ファイル
+
+- 変更: `modules/expo-musicage-ear/src/types.ts`（`durationMs`）、`modules/expo-musicage-ear/src/mapNative.ts`、`src/recognition/types.ts`（`durationMs`、`UnsyncedKind`、`isUnsyncedKind`）、`src/recognition/lrclibClient.ts`（search フォールバック）、`src/recognition/recognitionCopy.ts`（注記 3 種、`unsyncedNote`）、`src/app/useStageSource.ts`（`unsynced` ソース、`confirmedTrackId`、drop の条件）、`src/typesetting/LyricStage.tsx`（`unsynced` の描画、行の key 化）、`docs/superpowers/specs/2026-10-18-lyric-typography-object-design.md`（§7 の改定）、本ファイル。
+- 新規: `src/typesetting/nameplate.ts`、`src/typesetting/bandMeter.ts`、`src/typesetting/BandMeter.tsx`。
+- テスト（書いたもの。**未実行**。実行は呼び出し側）: 新規 `src/typesetting/__tests__/bandMeter.test.ts`、`src/typesetting/__tests__/nameplate.test.ts`、`src/recognition/__tests__/recognitionCopy.test.ts`。更新 `src/app/__tests__/useStageSource.test.tsx`（「plain は idle」を「plain / instrumental / lyrics_unavailable は銘板、結果なしは idle」に置き換え、drop の発火・非発火、最初のレンダーが idle、フィクスチャ優先、特徴量の継続）、`src/typesetting/__tests__/LyricStage.test.tsx`（新 describe「the nameplate」: 曲名が影の下の主役の行、アーティスト、注記 3 種、メーター 24 本の位置・色・基線高さ、reducedMotion、版面内、灯の焦点、歌詞なしでも drop で idle が散り曲名が落ちる、銘板 → idle の退場）、`src/recognition/__tests__/lrclibClient.test.ts`（404 → search、URL の中身、候補選択の全規則、normalizeName）、`src/recognition/__tests__/types.test.ts`、`modules/expo-musicage-ear/src/__tests__/mapNative.test.ts`、`src/app/MusicageApp.test.tsx`（「plain は idle caption」を銘板と注記に置き換え）。
+- 既存テストで仕様が変わったもの: `useStageSource.test.tsx`「a plain-lyrics result or no result is an idle source」と `MusicageApp.test.tsx`「passes a plain-lyrics result as an idle caption only」を新仕様に書き換えた。`lrclibClient.test.ts`「maps LRCLIB 404 to no record」は 404 が 2 回（get と search）になる前提に更新。実在の歌詞・曲名は使っていない。
+
+### 描画ノード・レイヤーへの影響
+
+- 銘板中: 主役の行（曲名）は同期曲と同じ（接地影のオフスクリーン 1 枚、グラデーション）。追加は `skRect` 24 本（メーター）+ 1 本（アーティストの罫）、アーティストの `skText`（平塗り）、注記の `skText` 1 つ。オフスクリーンは増えない。
+- UI スレッドの導出: メーターのフレームコールバック 1 つ + 罫ごとの `useDerivedValue` 24 個（矩形）。毎フレームの React 再レンダーは無い。
+
+### 実機で確認すること（歌詞なしの舞台）
+
+- 同期歌詞の無い曲（インストゥルメンタルを含む）を認識させたとき、idle ではなく曲名が大きく出て、アーティストが小さく、足元のメーターが音に合わせて動く。注記が caption 行に 1 行で読める。
+- メーターが「光っている」ように見えない（細い墨の罫の高さだけが動く）。ベースで左、ボーカル帯域で中央、シンバル・歯擦音で右が立つ。無音（針を上げる）で 1 秒以内に基線に落ちて止まる。
+- 認識の瞬間に idle グリフが散って曲名が拍頭に落ちる（同期曲と同じドロップ）。同じ曲をもう一度読み取っても再発火しない。
+- 曲名が縦組み（日本語）/ 横組み（英語）で版面に収まり、ワードマーク・操作列・caption 行に掛からない。長い曲名が小さくなりすぎないか。
+- 曲が変わると地の色とクロームも変わる（行が無くても家族が決まる）。
+- 歌詞ありの曲 → 歌詞なしの曲、歌詞なし → 歌詞あり、歌詞なし → 見失い（idle）で、交代が崩れない（曲名の退場、メーター・注記の消え方）。
+- fps 55 以上（メーター 24 本 + 曲名の影の同時描画）。
+- LRCLIB: 以前「歌詞なし」だった曲のうち、表記ゆれ（括弧の後置詞、全角）で外れていたものが検索フォールバックで同期歌詞に変わるか。逆に同名の別録音を拾って同期がずれる曲が無いか（長さが取れないので名前一致だけで選んでいる。ずれる例があれば `/api/search` の結果の `duration` と ShazamKit の照合位置から長さを推定する案を検討）。
+
+### 据え置き・申し送り
+
+- plain 歌詞の本文表示（判断 8）。
+- 歌詞なしの曲の書体は未認識と同じ 2 書体（判断 6）。plain のテキストや曲名から書体・家族を選ぶかは、本文表示の設計と一緒に決める。
+- `durationMs` の供給元が無い（ShazamKit は長さを返さない）。Apple Music のカタログ照会や検索結果の長さの推定は別件。
+- 以上はすべて **未検証**（テスト・typecheck 未実行、実機未確認）。
+- 検証結果（2026-11-09、呼び出し側で実行）: `npm test -- --watchman=false` は 53 スイート・690 件全通過、`npm run typecheck` も通過。
