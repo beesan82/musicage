@@ -5,7 +5,7 @@ import { interpolateColor, makeMutable } from 'react-native-reanimated';
 import { DEFAULT_PALETTE } from '../../direction/types';
 import type { LineDirection } from '../../direction/types';
 import { GlyphLayer } from '../GlyphLayer';
-import { layoutLine } from '../layout';
+import { layoutLine, printArea } from '../layout';
 import type { GlyphMeasure } from '../layout';
 import * as motion from '../motion';
 import type { GlyphTransform, MotionInput } from '../motion';
@@ -13,6 +13,7 @@ import type { BeatSharedValues } from '../useBeatSharedValues';
 
 const vp = { width: 390, height: 844, insetTop: 59, insetBottom: 34 };
 const measure: GlyphMeasure = (_ch, size) => ({ advance: size, ascent: -size * 0.88, descent: size * 0.12 });
+const AREA = printArea(vp, measure('字', vp.width * 0.045).ascent);
 const direction: LineDirection = {
   font: 'mincho',
   weight: 'regular',
@@ -38,6 +39,7 @@ const beat: BeatSharedValues = {
   mid: shared(0),
   high: shared(0),
   surge: shared(0),
+  silence: shared(0),
   write: () => {},
 };
 
@@ -45,7 +47,7 @@ afterEach(() => jest.restoreAllMocks());
 
 async function renderAt(elapsedMs: number) {
   const spy = jest.spyOn(motion, 'glyphTransform');
-  const layout = layoutLine('夜 の 底', direction, vp, measure);
+  const layout = layoutLine('夜 の 底', direction, vp, measure, AREA);
   await render(
     <GlyphLayer
       glyphs={layout.glyphs}
@@ -109,7 +111,7 @@ interface LayerOptions {
 
 async function renderLayer(directionOverrides: Partial<LineDirection>, opts: LayerOptions = {}) {
   const dir: LineDirection = { ...direction, entrance: 'fade', hold: 'still', ...directionOverrides };
-  const layout = layoutLine('夜の底', dir, vp, measure);
+  const layout = layoutLine('夜の底', dir, vp, measure, AREA);
   const view = await render(
     <GlyphLayer
       glyphs={layout.glyphs}
@@ -201,7 +203,7 @@ describe('the emphasis colour migration', () => {
       emphasis: [0, 2],
       accent: true,
     };
-    const layout = layoutLine('夜の底', dir, vp, measure);
+    const layout = layoutLine('夜の底', dir, vp, measure, AREA);
     const view = await render(
       <GlyphLayer
         glyphs={layout.glyphs}
@@ -260,7 +262,7 @@ describe('the surge-interpolated ink and accent', () => {
       emphasis: [0],
       accent: true,
     };
-    const layout = layoutLine('夜の底', dir, vp, measure);
+    const layout = layoutLine('夜の底', dir, vp, measure, AREA);
     const inkValue = makeMutable('#112233');
     const accentValue = makeMutable('#445566');
     const view = await render(
@@ -286,6 +288,137 @@ describe('the surge-interpolated ink and accent', () => {
       .getAllByTestId(/^glyph-/)
       .map((g) => textsIn(g as unknown as Node)[0]!.props.color.value as string);
     expect(colors).toEqual(['#445566', '#112233', '#112233']);
+  });
+});
+
+describe("the ink's body gradient (visual overhaul spec §3c.1)", () => {
+  const palette = { background: '#000000', ink: '#EEEEEE', accent: '#FF0000' };
+  const INK_BODY = ['#F0F0F0', '#D0D0D0'];
+  const ACCENT_BODY = ['#FF8080', '#FF0000'];
+  const gradientsIn = (node: Node) => node.queryAll((n) => n.type === 'skLinearGradient');
+
+  async function renderBody(opts: { timeMs?: number; lineEndsAtMs?: number | null; heavy?: boolean } = {}) {
+    const dir: LineDirection = { ...direction, entrance: 'fade', hold: 'still', emphasis: [0], accent: true };
+    const layout = layoutLine('夜の底', dir, vp, measure, AREA);
+    const view = await render(
+      <GlyphLayer
+        glyphs={layout.glyphs}
+        fontFor={(sizePx) => Skia.Font(undefined as never, sizePx)}
+        time={shared(opts.timeMs ?? 100)}
+        lineStartedAtMs={0}
+        lineEndsAtMs={opts.lineEndsAtMs ?? null}
+        entrance="fade"
+        hold="still"
+        palette={palette}
+        body={{ ink: makeMutable(INK_BODY), accent: makeMutable(ACCENT_BODY) }}
+        accent
+        heavy={opts.heavy ?? false}
+        beat={beat}
+        reducedMotion={false}
+        seed={7}
+        feel={1}
+      />,
+    );
+    return { view, layout };
+  }
+
+  test('each fill gets one gradient from the glyph top to its foot, without adding draws', async () => {
+    const { view, layout } = await renderBody();
+    const groups = view.getAllByTestId(/^glyph-/) as unknown as Node[];
+    expect(groups).toHaveLength(3);
+    groups.forEach((group, i) => {
+      const texts = textsIn(group);
+      expect(texts).toHaveLength(1);
+      const gradients = gradientsIn(texts[0]!);
+      expect(gradients).toHaveLength(1);
+      const { x, y, sizePx } = layout.glyphs[i]!;
+      expect(gradients[0]!.props.start).toEqual({ x, y: y - sizePx * 0.88 });
+      expect(gradients[0]!.props.end).toEqual({ x, y: y + sizePx * 0.12 });
+    });
+  });
+
+  test('ink glyphs share the ink body and a static accent glyph the accent body', async () => {
+    const { view } = await renderBody();
+    const colors = (view.getAllByTestId(/^glyph-/) as unknown as Node[]).map(
+      (g) => gradientsIn(g)[0]!.props.colors.value as string[],
+    );
+    expect(colors).toEqual([ACCENT_BODY, INK_BODY, INK_BODY]);
+  });
+
+  test('a migrating emphasized glyph moves each stop from the ink body to the accent body', async () => {
+    const { view } = await renderBody({ timeMs: 500, lineEndsAtMs: 1000 });
+    const first = view.getAllByTestId(/^glyph-/)[0] as unknown as Node;
+    expect(gradientsIn(first)[0]!.props.colors.value).toEqual([
+      interpolateColor(0.5, [0, 1], [INK_BODY[0]!, ACCENT_BODY[0]!]),
+      interpolateColor(0.5, [0, 1], [INK_BODY[1]!, ACCENT_BODY[1]!]),
+    ]);
+  });
+
+  test('the stroke twin of a heavy line takes the same gradient', async () => {
+    const { view } = await renderBody({ heavy: true });
+    for (const group of view.getAllByTestId(/^glyph-/) as unknown as Node[]) {
+      const texts = textsIn(group);
+      expect(texts).toHaveLength(2);
+      for (const text of texts) expect(gradientsIn(text)).toHaveLength(1);
+    }
+  });
+
+  test('without a body the glyphs are filled flat', async () => {
+    const { view } = await renderLayer({});
+    expect(gradientsIn(view.container as unknown as Node)).toHaveLength(0);
+  });
+});
+
+describe('idle glyph marks: accent and alpha (visual overhaul spec §3e)', () => {
+  const palette = { background: '#000000', ink: '#EEEEEE', accent: '#FF0000' };
+  const INK_BODY = ['#F0F0F0', '#D0D0D0'];
+  const ACCENT_BODY = ['#FF8080', '#FF0000'];
+  const glyph = (index: number, extra: object) => ({
+    char: '七',
+    index,
+    x: 24 + index * 40,
+    y: 300,
+    rotateDeg: 0 as const,
+    sizePx: 30,
+    emphasized: false,
+    ...extra,
+  });
+
+  async function renderIdle() {
+    const view = await render(
+      <GlyphLayer
+        glyphs={[glyph(0, {}), glyph(1, { accent: true }), glyph(2, { alpha: 0.75 })]}
+        fontFor={(sizePx) => Skia.Font(undefined as never, sizePx)}
+        time={shared(10_000)}
+        lineStartedAtMs={0}
+        entrance="fade"
+        hold="still"
+        palette={palette}
+        body={{ ink: makeMutable(INK_BODY), accent: makeMutable(ACCENT_BODY) }}
+        accent={false}
+        beat={beat}
+        reducedMotion={false}
+        seed={7}
+        feel={1}
+      />,
+    );
+    return view.getAllByTestId(/^glyph-/) as unknown as Node[];
+  }
+
+  test('a glyph marked accent takes the accent colour and body even on a layer without accent', async () => {
+    const groups = await renderIdle();
+    const fills = groups.map((g) => textsIn(g)[0]!);
+    expect(fills.map((t) => t.props.color.value)).toEqual([palette.ink, palette.accent, palette.ink]);
+    const bodies = fills.map((t) => t.queryAll((n) => n.type === 'skLinearGradient')[0]!.props.colors.value);
+    expect(bodies).toEqual([INK_BODY, ACCENT_BODY, INK_BODY]);
+  });
+
+  test('alpha multiplies the motion opacity', async () => {
+    const groups = await renderIdle();
+    const plain = groups[0]!.props.opacity.value as number;
+    expect(plain).toBeGreaterThan(0);
+    expect(groups[1]!.props.opacity.value).toBe(plain);
+    expect(groups[2]!.props.opacity.value).toBeCloseTo(plain * 0.75, 10);
   });
 });
 

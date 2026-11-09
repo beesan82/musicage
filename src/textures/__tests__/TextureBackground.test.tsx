@@ -1,12 +1,15 @@
-import { render } from '@testing-library/react-native';
+import { act, render } from '@testing-library/react-native';
 import { makeMutable } from 'react-native-reanimated';
 
+import { lightHexFor, PALETTE_FAMILIES } from '../../direction/palettes';
 import { DEFAULT_PALETTE } from '../../direction/types';
 import type { Palette, Texture } from '../../direction/types';
 import { GRAIN_SKSL } from '../grain';
 import { PAPER_SKSL } from '../paper';
 import { SCAN_SKSL } from '../scan';
+import { IDLE_FOCUS, REDUCED_MOTION_LAMP } from '../surfaceModel';
 import { TextureBackground } from '../TextureBackground';
+import type { TextureBackgroundProps } from '../TextureBackground';
 import { INK_TINT_MAX } from '../../direction/surge';
 import {
   DROP_DIP_MS,
@@ -15,10 +18,11 @@ import {
   getTextureEffect,
   hexToRgb01,
   mixRgb,
+  SURFACE_CONSTANTS,
   TEXTURE_BLEND_RANGE,
   TEXTURE_SKSL_PRELUDE,
 } from '../textureShader';
-import { VOID_SKSL } from '../void';
+import { VOID_LAMP, VOID_SKSL } from '../void';
 
 const TEXTURES: Texture[] = ['paper', 'grain', 'void', 'scan'];
 
@@ -70,30 +74,107 @@ test('renders a still frame with reducedMotion', async () => {
   expect(getByTestId('texture-background')).toBeTruthy();
 });
 
-test('every texture body declares main and uses iPulse', () => {
+// The pulse now reaches every texture through the prelude's beatLift (the
+// lift inside the lamp's pool), so the bodies call it instead of reading
+// iPulse themselves.
+test('every texture body declares main and takes the pulse through beatLift', () => {
   for (const body of [PAPER_SKSL, GRAIN_SKSL, VOID_SKSL, SCAN_SKSL]) {
     expect(body).toMatch(/half4 main\(/);
-    expect(body).toContain('iPulse');
+    expect(body).toContain('beatLift(uv)');
   }
+  expect(TEXTURE_SKSL_PRELUDE).toContain('float3 beatLift(float2 uv)');
 });
 
-test('the prelude declares the band and confidence uniforms', () => {
-  for (const name of ['iLow', 'iMid', 'iHigh', 'iConfidence']) {
+test('the prelude declares the band, confidence and lamp uniforms', () => {
+  for (const name of ['iLow', 'iMid', 'iHigh', 'iConfidence', 'iLamp']) {
     expect(TEXTURE_SKSL_PRELUDE).toMatch(new RegExp(`uniform float\\s+${name};`));
   }
+  expect(TEXTURE_SKSL_PRELUDE).toMatch(/uniform float2\s+iFocus;/);
+  expect(TEXTURE_SKSL_PRELUDE).toMatch(/uniform float3\s+iLight;/);
 });
 
-test('every texture gates its pulse response with iConfidence and reads its band', () => {
+// The confidence gate moved with the pulse into beatLift; void lost its band
+// (its material is bare lacquer, spec §3b.2) and answers the music through
+// the lamp and the beat lift only.
+test('the beat lift is gated by iConfidence, and the textures with a material read their band', () => {
+  const lift = TEXTURE_SKSL_PRELUDE.slice(TEXTURE_SKSL_PRELUDE.indexOf('float3 beatLift('));
+  expect(lift.slice(0, lift.indexOf('}'))).toContain('iPulse * iConfidence');
   const bands: [string, string][] = [
     [GRAIN_SKSL, 'iHigh'],
     [PAPER_SKSL, 'iLow'],
     [SCAN_SKSL, 'iMid'],
-    [VOID_SKSL, 'iLow'],
   ];
   for (const [body, band] of bands) {
-    expect(body).toContain('iPulse * iConfidence');
     expect(body).toContain(band);
   }
+});
+
+describe('the lit surface (visual overhaul §3b)', () => {
+  const bodies: [string, string][] = [
+    [PAPER_SKSL, 'paper'],
+    [GRAIN_SKSL, 'grain'],
+    [VOID_SKSL, 'void'],
+    [SCAN_SKSL, 'scan'],
+  ];
+  const mainOf = (body: string) => body.slice(body.indexOf('half4 main('));
+  // The prelude's float literals: always with a decimal point.
+  const sksl = (v: number) => (Number.isInteger(v) ? v.toFixed(1) : String(v));
+
+  test('the prelude defines the pool, the surface, the frame and the beat lift', () => {
+    for (const signature of [
+      'float lampPool(float2 uv)',
+      'float lampStrength(float base)',
+      'float3 surface(float2 uv)',
+      'float frame(float2 uv)',
+      'float3 beatLift(float2 uv)',
+    ]) {
+      expect(TEXTURE_SKSL_PRELUDE).toContain(signature);
+    }
+  });
+
+  test('SURFACE_CONSTANTS are templated into the prelude', () => {
+    const { LAMP_BASE, LAMP_GAIN, LAMP_RADIUS, FRAME_DARK, PULSE_LIFT } = SURFACE_CONSTANTS;
+    expect(TEXTURE_SKSL_PRELUDE).toContain(`smoothstep(0.0, ${sksl(LAMP_RADIUS)}, length(d))`);
+    expect(TEXTURE_SKSL_PRELUDE).toContain(`base + ${sksl(LAMP_GAIN)} * clamp(iLamp, 0.0, 1.0)`);
+    expect(TEXTURE_SKSL_PRELUDE).toContain(`lampStrength(${sksl(LAMP_BASE)})`);
+    expect(TEXTURE_SKSL_PRELUDE).toContain(`smoothstep(0.35, 0.8, d) * ${sksl(FRAME_DARK)}`);
+    expect(TEXTURE_SKSL_PRELUDE).toContain(`gate * ${sksl(PULSE_LIFT)}`);
+    // The pool is round on screen (y scaled by the aspect).
+    expect(TEXTURE_SKSL_PRELUDE).toContain('(uv - iFocus) * float2(1.0, iResolution.y / iResolution.x)');
+  });
+
+  test("the void's sharper lamp templates VOID_LAMP and shares the gain", () => {
+    expect(VOID_SKSL).toContain('float3 voidSurface(float2 uv)');
+    expect(VOID_SKSL).toContain(`pow(lampPool(uv), ${VOID_LAMP.POWER.toFixed(1)})`);
+    expect(VOID_SKSL).toContain(`lampStrength(${VOID_LAMP.BASE.toFixed(2)})`);
+  });
+
+  test('every texture runs surface * material, then beatLift, then frame, then dropDip', () => {
+    for (const [body, name] of bodies) {
+      const main = mainOf(body);
+      const surfaceCall = name === 'void' ? 'voidSurface(uv) * blendTextures(' : `surface(uv) * `;
+      const surfaceAt = main.indexOf(surfaceCall);
+      expect(surfaceAt).toBeGreaterThan(-1);
+      const liftAt = main.indexOf('col += beatLift(uv);');
+      const frameAt = main.indexOf('col *= frame(uv);');
+      const dipAt = main.indexOf('dropDip(col)');
+      expect(liftAt).toBeGreaterThan(surfaceAt);
+      expect(frameAt).toBeGreaterThan(liftAt);
+      expect(dipAt).toBeGreaterThan(frameAt);
+    }
+  });
+
+  test('the full-frame pulse lift and the old vignette are gone', () => {
+    for (const source of [TEXTURE_SKSL_PRELUDE, ...bodies.map(([body]) => body)]) {
+      expect(source).not.toMatch(/iPulse\s*\*\s*iConfidence\s*\*\s*0\.06/);
+      expect(source).not.toContain('vignette');
+    }
+  });
+
+  test('paper keeps two fbm3 (one per face) and adds 6 px laid lines', () => {
+    expect(PAPER_SKSL.match(/fbm3\(/g)).toHaveLength(2);
+    expect(PAPER_SKSL).toContain('1.0 - 0.03 * step(0.5, fract(fragCoord.y / 6.0))');
+  });
 });
 
 describe('the recognition drop dip (iDrop)', () => {
@@ -304,6 +385,9 @@ describe('the energy crossfade (two faces per texture)', () => {
         'iBackground',
         'iInk',
         'iAccent',
+        'iFocus',
+        'iLight',
+        'iLamp',
       ]),
     );
     for (const used of usedUniforms(TEXTURE_SKSL_PRELUDE)) {
@@ -317,17 +401,17 @@ describe('the energy crossfade (two faces per texture)', () => {
   });
 
   test('the blend weight is the only new place iEnergy enters, and it is clamped at both ends', () => {
-    // The prelude reads iEnergy only inside clamp(...) (vignette and energyBlend),
-    // so the shader is well-formed at iEnergy = 0 and iEnergy = 1 alike.
+    // The prelude reads iEnergy only inside clamp(...) (energyBlend), so the
+    // shader is well-formed at iEnergy = 0 and iEnergy = 1 alike.
     const prelude = code(TEXTURE_SKSL_PRELUDE).replace(/uniform\s+float\s+iEnergy;/, '');
     const reads = prelude.match(/iEnergy/g) ?? [];
     expect(reads.length).toBeGreaterThan(0);
     expect(prelude.match(/clamp\(iEnergy, 0\.0, 1\.0\)/g)).toHaveLength(reads.length);
-    // The bodies take the weight from energyBlend(); the only direct read left
-    // is void's calm radius, which predates stage 6 and widens by a bounded amount.
-    for (const [body, name] of bodies) {
-      const direct = code(body).match(/iEnergy/g) ?? [];
-      expect(direct.length).toBe(name === 'void' ? 1 : 0);
+    // The bodies take the weight from energyBlend(); none reads iEnergy
+    // directly (void's calm radius went with its old lift; the lamp's
+    // opening follows the energy on the UI thread as iLamp).
+    for (const [body] of bodies) {
+      expect(code(body).match(/iEnergy/g) ?? []).toHaveLength(0);
     }
   });
 
@@ -347,14 +431,14 @@ describe('the energy crossfade (two faces per texture)', () => {
     expect(faces + main).not.toContain('vnoise(');
   });
 
-  test('the shared tail (pulse lift, vignette, drop dip) still follows the crossfade in every texture', () => {
+  test('the shared tail (beat lift, frame, drop dip) still follows the crossfade in every texture', () => {
     for (const [body] of bodies) {
       const main = body.slice(body.indexOf('half4 main('));
       const blendAt = main.search(/blendTextures\(|energyBlend\(/);
       expect(blendAt).toBeGreaterThan(-1);
-      expect(main.indexOf('iPulse * iConfidence * 0.06')).toBeGreaterThan(blendAt);
-      expect(main.indexOf('vignette(uv)')).toBeGreaterThan(main.indexOf('iPulse * iConfidence * 0.06'));
-      expect(main.indexOf('dropDip(col)')).toBeGreaterThan(main.indexOf('vignette(uv)'));
+      expect(main.indexOf('beatLift(uv)')).toBeGreaterThan(blendAt);
+      expect(main.indexOf('frame(uv)')).toBeGreaterThan(main.indexOf('beatLift(uv)'));
+      expect(main.indexOf('dropDip(col)')).toBeGreaterThan(main.indexOf('frame(uv)'));
     }
   });
 
@@ -407,4 +491,110 @@ test('the derived uniforms carry the band values and the confidence', async () =
   expect(uniforms.iHigh).toBeCloseTo(0.33);
   expect(uniforms.iConfidence).toBeCloseTo(0.9);
   await unmount();
+});
+
+describe("the lamp's uniforms (iLamp, iFocus, iLight, iBackground)", () => {
+  // Reanimated's jest runtime runs the frame loop and the derived values'
+  // mappers on timers; fake timers keep them still until a test advances them.
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+  type Uniforms = Record<string, number | number[]>;
+  const uniformsOf = (container: { queryAll: (p: (n: any) => boolean) => any[] }) => {
+    const withUniforms = container.queryAll(
+      (node) => (node.props as { uniforms?: { value?: unknown } })?.uniforms?.value !== undefined,
+    );
+    return (withUniforms[0]!.props as { uniforms: { value: Uniforms } }).uniforms.value;
+  };
+  const round = (v: number | number[]) => (Array.isArray(v) ? v.map((x) => +x.toFixed(3)) : +v.toFixed(3));
+  const [first, second] = PALETTE_FAMILIES.map((f) => f.palette as Palette);
+  const stage = (palette: Palette, extra: Partial<TextureBackgroundProps> = {}) => (
+    <TextureBackground
+      texture="grain"
+      palette={palette}
+      pulse={makeMutable(0)}
+      energy={makeMutable(0.5)}
+      width={390}
+      height={844}
+      {...extra}
+    />
+  );
+
+  test('at mount the followers start where they are headed: the palette, the idle focus, the lamp shut', async () => {
+    const { container, unmount } = await render(stage(first!));
+    const u = uniformsOf(container);
+    expect(round(u.iBackground!)).toEqual(round(hexToRgb01(first!.background)));
+    expect(round(u.iLight!)).toEqual(round(hexToRgb01(lightHexFor(first!))));
+    expect(u.iFocus).toEqual([IDLE_FOCUS.x, IDLE_FOCUS.y]);
+    expect(u.iLamp).toBe(0);
+    await unmount();
+  });
+
+  test('without palette.light the lamp is the derived light', async () => {
+    const { container, unmount } = await render(stage(DEFAULT_PALETTE));
+    expect(round(uniformsOf(container).iLight!)).toEqual(round(hexToRgb01(lightHexFor(DEFAULT_PALETTE))));
+    await unmount();
+  });
+
+  test('under reduced motion the lamp is held at 0.3, the focus is the target and a new palette lands at once', async () => {
+    const focus = makeMutable({ x: 0.3, y: 0.6 });
+    const view = await render(stage(first!, { reducedMotion: true, focus }));
+    const u = uniformsOf(view.container);
+    expect(u.iLamp).toBe(REDUCED_MOTION_LAMP);
+    expect(u.iFocus).toEqual([0.3, 0.6]);
+
+    await view.rerender(stage(second!, { reducedMotion: true, focus }));
+    // Let the derived value pick up its new inputs (no frame loop runs under reduced motion).
+    await act(async () => {
+      jest.advanceTimersByTime(50);
+    });
+    const after = uniformsOf(view.container);
+    expect(round(after.iBackground!)).toEqual(round(hexToRgb01(second!.background)));
+    expect(round(after.iLight!)).toEqual(round(hexToRgb01(lightHexFor(second!))));
+    await view.unmount();
+  });
+
+  describe('on the frame loop', () => {
+    const run = (ms: number) =>
+      act(async () => {
+        jest.advanceTimersByTime(ms);
+      });
+
+    // One mount for the whole describe: Reanimated's jest frame registry
+    // does not restart its loop for a second mount under fake timers (the
+    // followers then never advance), so the loop's behaviour is exercised
+    // in a single lifecycle.
+    test('the colours follow a palette change, the lamp opens with sound and shuts in silence, the focus slides', async () => {
+      const silence = makeMutable(0);
+      const focus = makeMutable({ x: 0.5, y: 0.7 });
+      const view = await render(stage(first!, { silence, focus }));
+
+      // The lamp opens toward 0.3 + 0.7 x energy and the focus slides to
+      // its target.
+      await run(8000);
+      let u = uniformsOf(view.container);
+      expect(u.iLamp as number).toBeCloseTo(0.3 + 0.7 * 0.5, 2);
+      expect((u.iFocus as number[])[1]).toBeCloseTo(0.7, 2);
+
+      // A palette change is not a cut: straight after the change the
+      // ground is still the old one, then the colours follow and arrive
+      // within a couple of seconds.
+      await view.rerender(stage(second!, { silence, focus }));
+      expect(round(uniformsOf(view.container).iBackground!)).toEqual(round(hexToRgb01(first!.background)));
+      await run(3000);
+      u = uniformsOf(view.container);
+      expect(round(u.iBackground!)).toEqual(round(hexToRgb01(second!.background)));
+      expect(round(u.iLight!)).toEqual(round(hexToRgb01(lightHexFor(second!))));
+
+      // In silence the lamp shuts.
+      silence.value = 1;
+      await run(8000);
+      u = uniformsOf(view.container);
+      expect(u.iLamp as number).toBeCloseTo(0, 2);
+      await view.unmount();
+    });
+  });
 });

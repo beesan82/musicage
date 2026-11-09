@@ -25,7 +25,8 @@
       "expo-asset",
       "expo-secure-store",
       "expo-status-bar",
-      "./plugins/withSceneLifecycle"
+      "./plugins/withSceneLifecycle",
+      "expo-font"
     ],
     "owner": "beesan",
     "extra": {

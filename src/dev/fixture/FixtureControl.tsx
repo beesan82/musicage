@@ -1,12 +1,16 @@
 import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { paletteFamilyKeyFor } from '../../direction/palettes';
+import { DEFAULT_CHROME_THEME } from '../../theme/chrome';
+import type { ChromeTheme } from '../../theme/chrome';
 import { useFrameRate } from '../useFrameRate';
 import { fixturePositionMs } from './useFixturePlayback';
 import type { FixturePlayback } from './useFixturePlayback';
 
 interface FixtureControlProps {
   playback: FixturePlayback;
+  theme?: ChromeTheme;
 }
 
 const REFRESH_MS = 250;
@@ -21,10 +25,10 @@ function formatPosition(positionMs: number): string {
 /**
  * Development pill (top-right, below the scene lock) that drives the fictional
  * fixture song: tap = play/pause, long press = on/off, side buttons seek ±5 s,
- * and RELOAD re-validates the fixture direction.
+ * RELOAD re-validates the fixture direction, and PAL cycles its colour family.
  * Renders nothing outside development builds.
  */
-export function FixtureControl({ playback }: FixtureControlProps) {
+export function FixtureControl({ playback, theme = DEFAULT_CHROME_THEME }: FixtureControlProps) {
   const fps = useFrameRate(playback.enabled);
   const [now, setNow] = useState(() => performance.now());
 
@@ -43,6 +47,10 @@ export function FixtureControl({ playback }: FixtureControlProps) {
     ? 'FIX OFF'
     : `FIX ${playback.paused ? '❚❚' : '▶'} ${formatPosition(fixturePositionMs(playback, now))}`;
   const label = fps === null ? state : `${state} · ${fps}`;
+  // Colours only (stage F): the pills keep the system font.
+  const pill = [styles.pill, { borderColor: theme.border, backgroundColor: theme.scrim }];
+  const pillActive = { borderColor: theme.inkMuted };
+  const text = [styles.label, { color: theme.inkMuted }];
 
   return (
     <View style={styles.row}>
@@ -51,10 +59,10 @@ export function FixtureControl({ playback }: FixtureControlProps) {
         accessibilityRole="button"
         hitSlop={8}
         onPress={() => playback.seek(-SEEK_MS)}
-        style={styles.pill}
+        style={pill}
         testID="fixture-seek-back"
       >
-        <Text style={styles.label}>−5s</Text>
+        <Text style={text}>−5s</Text>
       </Pressable>
       <Pressable
         accessibilityLabel="フィクスチャ曲を再生"
@@ -63,33 +71,43 @@ export function FixtureControl({ playback }: FixtureControlProps) {
         onLongPress={playback.toggle}
         onPress={playback.active ? playback.playPause : playback.toggle}
         style={({ pressed }) => [
-          styles.pill,
-          playback.active ? styles.pillActive : null,
+          pill,
+          playback.active ? pillActive : null,
           pressed ? styles.pillPressed : null,
         ]}
         testID="fixture-control"
       >
-        <Text style={[styles.label, playback.active ? styles.labelActive : null]}>{label}</Text>
+        <Text style={[text, playback.active ? { color: theme.ink } : null]}>{label}</Text>
       </Pressable>
       <Pressable
         accessibilityLabel="フィクスチャを5秒進める"
         accessibilityRole="button"
         hitSlop={8}
         onPress={() => playback.seek(SEEK_MS)}
-        style={styles.pill}
+        style={pill}
         testID="fixture-seek-forward"
       >
-        <Text style={styles.label}>+5s</Text>
+        <Text style={text}>+5s</Text>
       </Pressable>
       <Pressable
         accessibilityLabel="フィクスチャの演出を再読み込み"
         accessibilityRole="button"
         hitSlop={8}
         onPress={() => playback.reloadDirection()}
-        style={styles.pill}
+        style={pill}
         testID="fixture-reload"
       >
-        <Text style={styles.label}>RELOAD</Text>
+        <Text style={text}>RELOAD</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel="フィクスチャの色の家族を切り替える"
+        accessibilityRole="button"
+        hitSlop={8}
+        onPress={() => playback.cyclePalette()}
+        style={pill}
+        testID="fixture-palette"
+      >
+        <Text style={text}>{`PAL ${paletteFamilyKeyFor(playback.direction.palette) ?? '?'}`}</Text>
       </Pressable>
     </View>
   );
@@ -104,27 +122,17 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   pill: {
-    borderColor: 'rgba(169, 170, 164, 0.35)',
     borderRadius: 12,
     borderWidth: 1,
     paddingHorizontal: 10,
     paddingVertical: 4,
-    backgroundColor: 'rgba(16, 17, 18, 0.35)',
-  },
-  pillActive: {
-    borderColor: 'rgba(244, 240, 230, 0.6)',
-    backgroundColor: 'rgba(16, 17, 18, 0.6)',
   },
   pillPressed: {
     opacity: 0.6,
   },
   label: {
-    color: 'rgba(169, 170, 164, 0.7)',
     fontSize: 9,
     fontWeight: '700',
     letterSpacing: 2,
-  },
-  labelActive: {
-    color: '#F4F0E6',
   },
 });

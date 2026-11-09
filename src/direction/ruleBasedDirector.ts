@@ -1,7 +1,8 @@
 import type { FontKey } from '../typesetting/fonts';
+import { fnv1a } from './hash';
+import { paletteFamilyFor } from './palettes';
 import {
   DEFAULT_IDLE_GLYPHS,
-  DEFAULT_PALETTE,
   type Entrance,
   type Hold,
   type LineDirection,
@@ -20,16 +21,6 @@ export const MIN_ACCENT_REPEATS = 2;
 const KANJI_MINCHO_RATIO = 0.4;
 const HAN = /\p{Script=Han}/u;
 const ASCII_ALNUM = /[A-Za-z0-9]/;
-
-/** FNV-1a 32-bit hash. */
-function fnv1a(text: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h >>> 0;
-}
 
 function pick<T>(pool: readonly T[], seed: string, banned: T | null): T {
   let index = fnv1a(seed) % pool.length;
@@ -131,9 +122,12 @@ export function directSongByRules(lines: readonly string[], seed: string): SongD
     };
   });
 
+  // Colour and material come from the family the lyrics point to (visual overhaul spec §3a.3).
+  const family = paletteFamilyFor(lines, seed);
+
   return {
-    palette: { ...DEFAULT_PALETTE },
-    texture: 'grain',
+    palette: { ...family.palette },
+    texture: family.texture,
     tempoFeel: 'sway',
     idleGlyphs: DEFAULT_IDLE_GLYPHS,
     lines: result,

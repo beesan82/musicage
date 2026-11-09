@@ -1,5 +1,6 @@
 import { useCallback, useState } from 'react';
 
+import { PALETTE_FAMILIES, paletteFamilyKeyFor, type PaletteFamily } from '../../direction/palettes';
 import { validateSongDirection } from '../../direction/validateDirection';
 import type { SongDirection } from '../../direction/types';
 import { parseLrc } from '../../recognition/lrc';
@@ -19,6 +20,8 @@ export interface FixturePlayback {
   playPause(): void;
   seek(deltaMs: number): void;
   reloadDirection(): void;
+  /** Swaps palette and texture for the next colour family; line directions stay. */
+  cyclePalette(): void;
 }
 
 interface Transport {
@@ -97,6 +100,16 @@ export function useFixturePlayback(enabled: boolean = __DEV__): FixturePlayback 
     setDirection(validated);
   }, []);
 
+  const cyclePalette = useCallback(() => {
+    setDirection((d) => {
+      const key = paletteFamilyKeyFor(d.palette);
+      // An unknown palette starts the round from the first family.
+      const index = key === null ? -1 : PALETTE_FAMILIES.findIndex((f) => f.key === key);
+      const next = PALETTE_FAMILIES[(index + 1) % PALETTE_FAMILIES.length] as PaletteFamily;
+      return { ...d, palette: { ...next.palette }, texture: next.texture };
+    });
+  }, []);
+
   if (!enabled) {
     return {
       enabled: false,
@@ -108,8 +121,18 @@ export function useFixturePlayback(enabled: boolean = __DEV__): FixturePlayback 
       playPause: noop,
       seek: noop,
       reloadDirection: noop,
+      cyclePalette: noop,
     };
   }
 
-  return { enabled: true, ...transport, direction, toggle, playPause, seek, reloadDirection };
+  return {
+    enabled: true,
+    ...transport,
+    direction,
+    toggle,
+    playPause,
+    seek,
+    reloadDirection,
+    cyclePalette,
+  };
 }

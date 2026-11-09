@@ -1,4 +1,5 @@
 import { parseLrc } from '../../../recognition/lrc';
+import { PALETTE_FAMILIES, paletteFamilyFor } from '../../../direction/palettes';
 import { validateSongDirection } from '../../../direction/validateDirection';
 import { FIXTURE_DIRECTION, FIXTURE_LRC, FIXTURE_TRACK } from '../fixtureSong';
 
@@ -44,6 +45,13 @@ test('fixture direction has two fonts, three xl lines and mixed orientation', ()
   expect(new Set(dirs.map((d) => d.font)).size).toBe(2);
   expect(dirs.filter((d) => d.size === 'xl')).toHaveLength(3);
   expect(new Set(dirs.map((d) => d.orientation)).size).toBe(2);
+});
+
+test('fixture direction wears the kohaku family, the one its own lyrics point to', () => {
+  const kohaku = PALETTE_FAMILIES.find((f) => f.key === 'kohaku')!;
+  expect(FIXTURE_DIRECTION.palette).toEqual(kohaku.palette);
+  expect(FIXTURE_DIRECTION.texture).toBe(kohaku.texture);
+  expect(paletteFamilyFor(lines.map((l) => l.text), 'fixture').key).toBe('kohaku');
 });
 
 test('fixture track is the placeholder title', () => {

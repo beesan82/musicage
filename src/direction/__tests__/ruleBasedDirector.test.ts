@@ -1,3 +1,4 @@
+import { PALETTE_FAMILIES, paletteFamilyFor } from '../palettes';
 import { directSongByRules } from '../ruleBasedDirector';
 import { validateSongDirection } from '../validateDirection';
 import { DEFAULT_IDLE_GLYPHS, DEFAULT_PALETTE } from '../types';
@@ -98,10 +99,58 @@ describe('directSongByRules', () => {
 
   test('fills song-level defaults', () => {
     const d = directSongByRules(LINES, 'a');
-    expect(d.palette).toEqual(DEFAULT_PALETTE);
-    expect(d.texture).toBe('grain');
     expect(d.tempoFeel).toBe('sway');
     expect(d.idleGlyphs).toBe(DEFAULT_IDLE_GLYPHS);
+  });
+
+  test('takes palette and texture from the colour family the lyrics point to', () => {
+    // LINES has 夜 (twice), 窓, 静, 眠 for ai against 光 (twice), 朝 for kohaku.
+    const d = directSongByRules(LINES, 'a');
+    const ai = PALETTE_FAMILIES.find((f) => f.key === 'ai')!;
+    expect(d.palette).toEqual(ai.palette);
+    expect(d.texture).toBe('void');
+    expect(d.palette).not.toBe(ai.palette);
+  });
+
+  test('sea lyrics get umi; the palette follows paletteFamilyFor for any lines', () => {
+    const sea = ['遠い海の向こう', '波を数えて', 'さよなら'];
+    const d = directSongByRules(sea, 'x');
+    const umi = PALETTE_FAMILIES.find((f) => f.key === 'umi')!;
+    expect(d.palette).toEqual(umi.palette);
+    expect(d.texture).toBe(umi.texture);
+
+    const plain = ['ラララ', 'さよなら'];
+    for (const seed of ['a', 'b', 'c', 'd']) {
+      const family = paletteFamilyFor(plain, seed);
+      const rules = directSongByRules(plain, seed);
+      expect(rules.palette).toEqual(family.palette);
+      expect(rules.texture).toBe(family.texture);
+    }
+  });
+
+  test('the palette is no longer fixed to DEFAULT_PALETTE', () => {
+    expect(directSongByRules(LINES, 'a').palette).not.toEqual(DEFAULT_PALETTE);
+  });
+
+  test('palette choice leaves the line directions untouched', () => {
+    // Same lines, same seed: only song-level colour comes from the family.
+    const sea = ['遠い海の向こう', '波を数えて'];
+    const night = ['遠い夜の向こう', '月を数えて'];
+    const a = directSongByRules(sea, 's').lines.map(({ font, size, orientation, entrance, hold }) => ({
+      font,
+      size,
+      orientation,
+      entrance,
+      hold,
+    }));
+    const b = directSongByRules(night, 's').lines.map(({ font, size, orientation, entrance, hold }) => ({
+      font,
+      size,
+      orientation,
+      entrance,
+      hold,
+    }));
+    expect(a).toEqual(b);
   });
 
   test('passes its own validator', () => {

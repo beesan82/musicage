@@ -4,6 +4,7 @@ import type {
   Hold,
   LineDirection,
   Ornament,
+  Palette,
   Size,
   SongDirection,
   TempoFeel,
@@ -85,7 +86,7 @@ export function validateSongDirection(
   if (!isRecord(input)) return null;
   const { palette, texture, tempoFeel, idleGlyphs, lines } = input;
   if (!isRecord(palette)) return null;
-  const { background, ink, accent, accentHigh } = palette;
+  const { background, ink, accent, accentHigh, light } = palette;
   if (
     typeof background !== 'string' ||
     typeof ink !== 'string' ||
@@ -100,6 +101,13 @@ export function validateSongDirection(
   if (accentHigh !== undefined && (typeof accentHigh !== 'string' || !HEX_COLOR.test(accentHigh))) {
     return null;
   }
+  // The lamp colour is optional in the same way.
+  if (light !== undefined && (typeof light !== 'string' || !HEX_COLOR.test(light))) {
+    return null;
+  }
+  const cleanPalette: Palette = { background, ink, accent };
+  if (accentHigh !== undefined) cleanPalette.accentHigh = accentHigh;
+  if (light !== undefined) cleanPalette.light = light;
   if (!isOneOf(TEXTURES, texture) || !isOneOf(TEMPO_FEELS, tempoFeel)) return null;
   if (typeof idleGlyphs !== 'string') return null;
   if (!Array.isArray(lines) || lines.length !== lineTexts.length) return null;
@@ -122,7 +130,7 @@ export function validateSongDirection(
   }
 
   return {
-    palette: accentHigh === undefined ? { background, ink, accent } : { background, ink, accent, accentHigh },
+    palette: cleanPalette,
     texture,
     tempoFeel,
     idleGlyphs,

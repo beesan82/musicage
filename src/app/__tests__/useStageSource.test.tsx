@@ -41,6 +41,7 @@ const playbackOff: FixturePlayback = {
   playPause: noop,
   seek: noop,
   reloadDirection: noop,
+  cyclePalette: noop,
 };
 
 const frame = (timestampMs: number, level: number): EarFeatures => ({
@@ -339,6 +340,9 @@ describe('useStageSource', () => {
     expect(values.low.value).toBeCloseTo(0.1, 5);
     expect(values.mid.value).toBeCloseTo(0.1, 5);
     expect(values.confidence.value).toBe(published.confidence);
+    // The room is audible, so the lamp's silence flag is down.
+    expect(published.silence).toBe(false);
+    expect(values.silence.value).toBe(0);
 
     // 10 ms after the last frame (50 ms after the last publish): no new pulse
     // head (rms and low are flat, and mid/high never drive onsets), so the
@@ -560,8 +564,11 @@ describe('useStageSource', () => {
     await act(async () => emitter.emit(frame(900, 0.9)));
     expect(hook.result.current.beat.pulse).toBeGreaterThan(0.5);
 
+    expect(hook.result.current.beatValues.silence.value).toBe(0);
+
     await hook.rerender({ status: 'idle', playback: playbackOff, result: null });
     expect(hook.result.current.beat).toBe(QUIET_BEAT);
+    expect(hook.result.current.beatValues.silence.value).toBe(1);
 
     // Frames that still arrive while not listening are ignored.
     await act(async () => emitter.emit(frame(920, 0.9)));

@@ -1,5 +1,7 @@
 import { DEFAULT_IDLE_GLYPHS } from '../../direction/types';
-import { composeIdle } from '../idleComposition';
+import type { LineDirection, SongDirection } from '../../direction/types';
+import type { FontKey } from '../fonts';
+import { composeIdle, idleFaces, UNRECOGNIZED_IDLE_FACES } from '../idleComposition';
 import { SIZE_RATIO } from '../layout';
 import type { GlyphMeasure, PlacedGlyph } from '../layout';
 
@@ -218,6 +220,120 @@ test('caption is "artist — title" at the left margin just above the controls, 
   expect(CAPTION_Y + XS * 0.12).toBeLessThanOrEqual(CONTROLS_TOP);
   expect(glyphs).toEqual(compose(3, 0).glyphs);
   expect(compose(3, 0).caption).toBeNull();
+});
+
+describe('the print: faces, accent and muted companions (visual overhaul spec §3e)', () => {
+  test('anchors take the primary face; companions the secondary', () => {
+    eachComposition((glyphs) => {
+      for (const g of glyphs) expect(g.face).toBe(g.sizePx === XL ? 'primary' : 'secondary');
+    });
+  });
+
+  test('each epoch has exactly one accent anchor, on the same row for all its bars', () => {
+    const rows = new Set<number>();
+    for (let epoch = 0; epoch < 32; epoch++) {
+      const accentAnchors = (bar: number) =>
+        compose(epoch, bar).glyphs.filter((g) => g.sizePx === XL && g.accent === true);
+      const first = accentAnchors(0);
+      expect(first).toHaveLength(1);
+      const row = rowOf(first[0]!);
+      rows.add(row);
+      for (let bar = 1; bar < 8; bar++) {
+        const anchors = accentAnchors(bar);
+        // That row's anchor stays accent; any other accent anchor is the swapped glyph.
+        expect(anchors.filter((g) => rowOf(g) === row)).toHaveLength(1);
+        for (const g of anchors) if (rowOf(g) !== row) expect(g.index).toBeGreaterThanOrEqual(1000);
+      }
+    }
+    // The accent row is hashed per epoch, so the lamp moves between rows.
+    expect(rows.size).toBeGreaterThan(1);
+  });
+
+  test('the latest swapped glyph is accent until the next swap; the rest are the accent anchor and ink', () => {
+    eachComposition((glyphs, _epoch, bar) => {
+      const swapped = glyphs.filter((g) => g.index >= 1000);
+      expect(swapped).toHaveLength(bar === 0 ? 0 : 1);
+      for (const g of swapped) expect(g.accent).toBe(true);
+      const accents = glyphs.filter((g) => g.accent === true);
+      const anchorAccents = accents.filter((g) => g.sizePx === XL && g.index < 1000);
+      // One accent anchor (unless the swap landed on it) plus the swapped glyph.
+      expect(accents.length).toBeGreaterThanOrEqual(1);
+      expect(accents.length).toBeLessThanOrEqual(2);
+      expect(anchorAccents.length).toBeLessThanOrEqual(1);
+      for (const g of accents) expect(g.sizePx === XL || g.index >= 1000).toBe(true);
+    });
+  });
+
+  test('m-tier companions in the ink are at 0.75; every other glyph has no alpha', () => {
+    eachComposition((glyphs) => {
+      for (const g of glyphs) {
+        expect(g.alpha).toBe(g.sizePx === M && g.accent !== true ? 0.75 : undefined);
+      }
+    });
+  });
+});
+
+describe('idleFaces (visual overhaul spec §3e)', () => {
+  const line = (font: FontKey): LineDirection => ({
+    font,
+    weight: 'regular',
+    size: 'm',
+    orientation: 'horizontal',
+    entrance: 'fade',
+    hold: 'still',
+    emphasis: [],
+    accent: false,
+    ornament: 'none',
+  });
+  const song = (fonts: FontKey[]) =>
+    ({ lines: fonts.map(line) }) as unknown as SongDirection;
+
+  test('before a song is recognised: mincho-old over gothic, anchors regular', () => {
+    expect(idleFaces(null)).toEqual({ primary: 'mincho-old', secondary: 'gothic', anchorWeight: 'regular' });
+    expect(UNRECOGNIZED_IDLE_FACES).toEqual(idleFaces(null));
+  });
+
+  test("a recognised song: its most used face over its other face", () => {
+    expect(idleFaces(song(['gothic', 'brush', 'brush', 'gothic', 'brush']))).toEqual({
+      primary: 'brush',
+      secondary: 'gothic',
+      anchorWeight: 'regular',
+    });
+  });
+
+  test('a tie goes to the face of the earlier line', () => {
+    expect(idleFaces(song(['mincho', 'gothic-round', 'gothic-round', 'mincho']))).toMatchObject({
+      primary: 'mincho',
+      secondary: 'gothic-round',
+    });
+    expect(idleFaces(song(['gothic-round', 'mincho', 'mincho', 'gothic-round']))).toMatchObject({
+      primary: 'gothic-round',
+      secondary: 'mincho',
+    });
+  });
+
+  test('one face only: gothic is the secondary', () => {
+    expect(idleFaces(song(['mincho', 'mincho']))).toMatchObject({ primary: 'mincho', secondary: 'gothic' });
+  });
+
+  test('a gothic primary sets the anchors bold', () => {
+    expect(idleFaces(song(['gothic', 'gothic', 'mincho']))).toEqual({
+      primary: 'gothic',
+      secondary: 'mincho',
+      anchorWeight: 'bold',
+    });
+    expect(idleFaces(song(['gothic']))).toEqual({ primary: 'gothic', secondary: 'gothic', anchorWeight: 'bold' });
+  });
+
+  test('a song without line directions falls back to the unrecognised faces', () => {
+    expect(idleFaces(song([]))).toEqual(UNRECOGNIZED_IDLE_FACES);
+  });
+
+  test('never more than two faces', () => {
+    const faces = idleFaces(song(['brush', 'mincho', 'gothic-heavy', 'brush']));
+    expect(new Set([faces.primary, faces.secondary]).size).toBeLessThanOrEqual(2);
+    expect(faces).toMatchObject({ primary: 'brush', secondary: 'mincho' });
+  });
 });
 
 test('falls back to DEFAULT_IDLE_GLYPHS when the string is empty', () => {

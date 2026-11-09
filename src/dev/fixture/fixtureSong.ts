@@ -1,5 +1,5 @@
+import { PALETTE_FAMILIES, type PaletteFamily } from '../../direction/palettes';
 import type { LineDirection, SongDirection } from '../../direction/types';
-import { DEFAULT_PALETTE } from '../../direction/types';
 import type { IdleTrack } from '../../typesetting/idleComposition';
 
 /**
@@ -49,9 +49,12 @@ const EMPTY_LINE = line({
   hold: 'still',
 });
 
+// The lyrics' 夜明け / 暁 / 光 / 朝 point to kohaku, the family the rules would pick too.
+const KOHAKU = PALETTE_FAMILIES.find((f) => f.key === 'kohaku') as PaletteFamily;
+
 export const FIXTURE_DIRECTION: SongDirection = {
-  palette: DEFAULT_PALETTE,
-  texture: 'grain',
+  palette: { ...KOHAKU.palette },
+  texture: KOHAKU.texture,
   tempoFeel: 'sway',
   idleGlyphs: '夜明暁鼓動0123○△□',
   lines: [

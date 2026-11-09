@@ -37,6 +37,45 @@ export function surgeAccent(palette: Palette, surge: number): string {
   return interpolateColor(clamp01(surge), [0, 1], [palette.accent, surgeHighHex(palette)]);
 }
 
+// The ink's body (visual overhaul spec §3c.1): each glyph is filled with a
+// slight top-to-bottom gradient, lit on top and shaded at the foot, like ink
+// taken up by paper under one lamp. Amplitudes are "the print's take", not a
+// metallic sheen; stage G may lower them to 0.08 / 0.06.
+
+/** How far the top of an ink glyph leans toward the lamp colour. */
+export const INK_BODY_LIGHT = 0.12;
+/** How far the foot of an ink glyph leans toward the background. */
+export const INK_BODY_SHADE = 0.1;
+/** How far the top of an accent glyph leans toward the high accent. */
+export const ACCENT_BODY_HIGH = 0.3;
+/** How far a context line's ink leans toward the lamp colour (its half-shadow). */
+export const CONTEXT_INK_LIGHT = 0.3;
+
+/** Gradient stops of the gradient's start (glyph top) and end (glyph foot), in glyph sizes from the baseline. */
+export const BODY_TOP = -0.88;
+export const BODY_FOOT = 0.12;
+
+/** The ink body's gradient colours, top then foot. */
+export function inkBody(ink: string, light: string, background: string): string[] {
+  'worklet';
+  return [
+    interpolateColor(INK_BODY_LIGHT, [0, 1], [ink, light]),
+    interpolateColor(INK_BODY_SHADE, [0, 1], [ink, background]),
+  ];
+}
+
+/** The accent body's gradient colours, top then foot. */
+export function accentBody(accent: string, accentHigh: string): string[] {
+  'worklet';
+  return [interpolateColor(ACCENT_BODY_HIGH, [0, 1], [accent, accentHigh]), accent];
+}
+
+/** The ink of a context line: the ink mixed toward the lamp colour. */
+export function contextInk(ink: string, light: string): string {
+  'worklet';
+  return interpolateColor(CONTEXT_INK_LIGHT, [0, 1], [ink, light]);
+}
+
 /**
  * How much the glow shows, 0..1: the beat pulse (a one-off decay from each
  * beat head, never a steady light) scaled by the surge strength (0 outside a

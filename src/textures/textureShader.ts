@@ -18,6 +18,37 @@ import { VOID_SKSL } from './void';
  */
 export const TEXTURE_BLEND_RANGE = { low: 0.35, high: 0.85 } as const;
 
+/**
+ * The lit surface (visual overhaul spec §3b.1): one pool of lamp light on the
+ * background, a darkened frame, and a beat lift confined to the pool. Values
+ * are in 0..1 colour units and are templated into the prelude, so the shader
+ * and the TS twin (surfaceModel.ts) share one source.
+ *
+ * - LAMP_BASE: the pool's centre over the ground with the lamp shut (silence).
+ * - LAMP_GAIN: how much more the centre takes with the lamp fully open.
+ * - LAMP_RADIUS: where the pool reaches 0, in screen widths (isotropic).
+ * - FRAME_DARK: how far the corners sink (x 1 - FRAME_DARK).
+ * - PULSE_LIFT: the beat's lift at the pool's centre, at full pulse.
+ *
+ * LAMP_RADIUS, LAMP_BASE and LAMP_GAIN differ from the spec's first guesses
+ * (0.75, 0.07, 0.05): with a 0.75 pool no lamp strength that keeps the centre
+ * under 42/255 lifts the frame's mean to 18/255 (the pool covers too little of
+ * a 9:19.5 screen), so the pool was widened and the strength rebalanced. See
+ * surfaceModel.test.ts for the targets.
+ */
+export const SURFACE_CONSTANTS = {
+  LAMP_BASE: 0.08,
+  LAMP_GAIN: 0.0375,
+  LAMP_RADIUS: 1.0,
+  FRAME_DARK: 0.45,
+  PULSE_LIFT: 0.02,
+} as const;
+
+/** A float literal for SkSL: always carries a decimal point. */
+function skslFloat(value: number): string {
+  return Number.isInteger(value) ? value.toFixed(1) : String(value);
+}
+
 /** The TS twin of the prelude's `energyBlend()`, for tests and tuning. */
 export function energyBlend(energy: number): number {
   const { low, high } = TEXTURE_BLEND_RANGE;
@@ -34,14 +65,20 @@ export function energyBlend(energy: number): number {
  * and its own helpers.
  *
  * iInk and iAccent are declared for completeness but the textures paint from
- * iBackground only; ink and accent belong to the lyrics drawn on top.
+ * iBackground and iLight only; ink and accent belong to the lyrics on top.
  *
  * iDrop is the recognition drop's dip (0..1, see dropDip below): a one-off
  * darkening that every texture applies to its final colour.
  *
+ * iFocus / iLight / iLamp are the lamp (visual overhaul spec §3b): its centre
+ * in uv, its colour, and how far it is open (0 in silence, opening with the
+ * energy). All three are slow followers driven on the UI thread. Every
+ * texture is `surface * material`, then the beat lift (inside the pool only),
+ * then the frame, then the drop dip.
+ *
  * energyBlend / blendTextures are the stage 6 crossfade: every texture is
  * written as two faces (calm, lively) of the same kind, built to share one
- * mean luminance, and mixes them by the energy. The texture kinds stay four.
+ * mean, and mixes them by the energy. The texture kinds stay four.
  */
 export const TEXTURE_SKSL_PRELUDE = `
 uniform float2 iResolution;
@@ -56,6 +93,9 @@ uniform float  iDrop;
 uniform float3 iBackground;
 uniform float3 iInk;
 uniform float3 iAccent;
+uniform float2 iFocus;
+uniform float3 iLight;
+uniform float  iLamp;
 
 // The recognition drop: the frame sinks towards black by iDrop and comes
 // back (iDrop is 0 at every other time).
@@ -91,12 +131,36 @@ float fbm3(float2 p) {
   return v;
 }
 
-// Edge darkening shared by every texture; energy eases it slightly so loud
-// passages open the frame up.
-float vignette(float2 uv) {
+// The lamp's pool: 1 at iFocus, falling to 0 at LAMP_RADIUS screen widths.
+// Isotropic: y is scaled by the aspect so the pool is round on screen.
+float lampPool(float2 uv) {
+  float2 d = (uv - iFocus) * float2(1.0, iResolution.y / iResolution.x);
+  return 1.0 - smoothstep(0.0, ${skslFloat(SURFACE_CONSTANTS.LAMP_RADIUS)}, length(d));
+}
+
+// The lamp's strength at the pool's centre: base with the lamp shut, plus
+// LAMP_GAIN fully open.
+float lampStrength(float base) {
+  return base + ${skslFloat(SURFACE_CONSTANTS.LAMP_GAIN)} * clamp(iLamp, 0.0, 1.0);
+}
+
+// The surface: the ground plus the lamp's colour in its pool. The centre
+// takes LAMP_BASE with the lamp shut and LAMP_BASE + LAMP_GAIN fully open.
+float3 surface(float2 uv) {
+  return iBackground + iLight * (lampPool(uv) * lampStrength(${skslFloat(SURFACE_CONSTANTS.LAMP_BASE)}));
+}
+
+// The frame: the corners sink by FRAME_DARK so the sheet has an edge.
+float frame(float2 uv) {
   float d = length(uv - 0.5);
-  float strength = max(0.0, 0.18 - clamp(iEnergy, 0.0, 1.0) * 0.03);
-  return 1.0 - smoothstep(0.3, 0.85, d) * strength;
+  return 1.0 - smoothstep(0.35, 0.8, d) * ${skslFloat(SURFACE_CONSTANTS.FRAME_DARK)};
+}
+
+// The beat: a lift in the lamp's colour, inside the pool only, gated by the
+// beat confidence, at most PULSE_LIFT at the pool's centre. Never full-frame.
+float3 beatLift(float2 uv) {
+  float gate = clamp(iPulse * iConfidence, 0.0, 1.0);
+  return iLight * (lampPool(uv) * gate * ${skslFloat(SURFACE_CONSTANTS.PULSE_LIFT)});
 }
 
 // The crossfade weight between a texture's calm face (0) and its lively face
@@ -106,9 +170,9 @@ float energyBlend() {
   return smoothstep(${TEXTURE_BLEND_RANGE.low.toFixed(2)}, ${TEXTURE_BLEND_RANGE.high.toFixed(2)}, clamp(iEnergy, 0.0, 1.0));
 }
 
-// Linear crossfade of the two faces. Each texture builds both faces around
-// the same mean luminance, so mixing them leaves the frame's mean, and its
-// black base, where they were.
+// Linear crossfade of the two faces. Each texture's faces are materials
+// (multipliers on the surface) built around the same mean, so mixing them
+// leaves the frame's mean where it was.
 float3 blendTextures(float3 calm, float3 lively, float t) {
   return mix(calm, lively, clamp(t, 0.0, 1.0));
 }

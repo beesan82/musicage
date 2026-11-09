@@ -1,6 +1,7 @@
 import { DEFAULT_IDLE_GLYPHS } from '../direction/types';
-import type { Size } from '../direction/types';
-import { SIZE_RATIO } from './layout';
+import type { Size, SongDirection } from '../direction/types';
+import type { FontKey, FontWeight } from './fonts';
+import { printArea, SIZE_RATIO } from './layout';
 import type { GlyphMeasure, PlacedGlyph, Viewport } from './layout';
 
 // Idle composition: shown while no lyric line is active. The composition is
@@ -25,13 +26,20 @@ import type { GlyphMeasure, PlacedGlyph, Viewport } from './layout';
 // and marks lie sideways here. Each glyph carries `phaseOffset` from its cell,
 // (col + row) / 8, so the breathe hold crosses the grid as a wave.
 //
-// Reserved bands (y down). The stage is drawn full-screen behind MusicageApp's
-// chrome, which drifts with it (both are inside the burn-in drift view), so
-// the bands can be fixed offsets from the safe-area insets:
+// The print (visual overhaul spec §3e): each glyph carries its face role
+// (anchors primary, companions secondary; the stage picks the faces with
+// `idleFaces`), one anchor per epoch is in the accent, and so is the most
+// recently swapped glyph until the next swap. The other glyphs are ink, the
+// m-tier companions at MUTED_ALPHA. Rows and columns are measured with the
+// caller's measure (the print area's gothic) whatever the faces, so a song
+// being recognised never moves the rows.
+//
+// Reserved bands: the print area (layout.ts `printArea`, shared with the
+// context lines of LyricStage):
 // - Top: the wordmark row (MUSICAGE / status). Glyph boxes start below it
 //   plus a margin.
 // - Bottom: the controls stack (recognition row, listening row). Glyph boxes
-//   and the caption stay above it. The caption's baseline sits CAPTION_GAP
+//   and the caption stay above it. The caption's baseline sits a small gap
 //   above the controls, at the left margin; the glyph rows end a margin above
 //   the caption's top. The caption line is reserved even when there is no
 //   track, so recognising a song does not move the rows.
@@ -51,7 +59,6 @@ export function captionText(track: NonNullable<IdleTrack>): string {
   return `${track.artist} — ${track.title}`;
 }
 
-const MARGIN = 24;
 const COLUMNS = 3;
 const ROWS = 4;
 /** Size tiers, largest first; tier 0 is the row anchor. */
@@ -65,22 +72,48 @@ const ZIGZAG = [0, 1, 2, 1];
  * the reserved bands degrades to touching rows rather than inverted ones.
  */
 const MIN_ROW_PITCH = 1.15;
+/** Opacity of the m-tier companions (ink 0.75, spec §3e). */
+const MUTED_ALPHA = 0.75;
+
+/** The idle screen's two faces (visual overhaul spec §3e). */
+export interface IdleFaces {
+  /** The anchors' face. */
+  primary: FontKey;
+  /** The companions' and the caption's face. */
+  secondary: FontKey;
+  /** Bold when the primary face is gothic (the only face with a bold file). */
+  anchorWeight: FontWeight;
+}
+
+/** Before a song is recognised: an old mincho over gothic. */
+export const UNRECOGNIZED_IDLE_FACES: IdleFaces = {
+  primary: 'mincho-old',
+  secondary: 'gothic',
+  anchorWeight: 'regular',
+};
 
 /**
- * Height of MusicageApp's wordmark row below the top inset: `wordmarkRow`
- * paddingTop 12 plus one line of 13pt text (about 16px on iOS).
+ * The idle faces for a song (spec §3e). The primary face is the face of the
+ * most of the song's line directions; a tie goes to the face that appears on
+ * the earlier line. The secondary is the song's other face (the next by the
+ * same count, should a direction carry more than two), or gothic when the song
+ * has one face only. With no song, or a song without line directions,
+ * UNRECOGNIZED_IDLE_FACES.
  */
-const TOP_RESERVED = 12 + 16;
-/**
- * Height of MusicageApp's controls above the bottom inset: `content`
- * paddingBottom 18, then `controlsStack` holding RecognitionControls and
- * ListeningControls (each one button row of minHeight 48) with gap 16.
- * A message line (mic denied, recognition error) can grow the stack past
- * this; those are exceptional states and may cover the lowest row.
- */
-const BOTTOM_RESERVED = 18 + 48 + 16 + 48;
-/** From the caption's baseline down to the controls' top. */
-const CAPTION_GAP = 12;
+export function idleFaces(direction: SongDirection | null): IdleFaces {
+  if (direction === null || direction.lines.length === 0) return UNRECOGNIZED_IDLE_FACES;
+  // Map keeps insertion order, i.e. each face's first line; the stable sort
+  // keeps that order between equal counts.
+  const counts = new Map<FontKey, number>();
+  for (const line of direction.lines) counts.set(line.font, (counts.get(line.font) ?? 0) + 1);
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([font]) => font);
+  const primary = ranked[0]!;
+  return {
+    primary,
+    secondary: ranked[1] ?? 'gothic',
+    anchorWeight: primary === 'gothic' ? 'bold' : 'regular',
+  };
+}
 
 /** FNV-1a 32-bit hash. */
 function fnv1a(text: string): number {
@@ -113,16 +146,13 @@ export function composeIdle(
 
   // Vertical bands. Metrics come from the font, not the character, so any
   // pool character stands in for the row's ascent and descent.
-  const controlsTop = viewport.height - viewport.insetBottom - BOTTOM_RESERVED;
-  const captionY = controlsTop - CAPTION_GAP;
-  const captionTop = captionY + measure(pool[0]!, captionPx).ascent;
-  const areaTop = viewport.insetTop + TOP_RESERVED + MARGIN;
-  const areaBottom = captionTop - MARGIN;
+  const area = printArea(viewport, measure(pool[0]!, captionPx).ascent);
+  const captionY = area.captionBaseline;
   const anchorMetrics = measure(pool[0]!, tierPx[0]!);
-  const firstBaseline = areaTop - anchorMetrics.ascent;
-  const lastBaseline = areaBottom - anchorMetrics.descent;
+  const firstBaseline = area.top - anchorMetrics.ascent;
+  const lastBaseline = area.bottom - anchorMetrics.descent;
   const pitch = Math.max((lastBaseline - firstBaseline) / (ROWS - 1), tierPx[0]! * MIN_ROW_PITCH);
-  const columnWidth = (viewport.width - 2 * MARGIN) / COLUMNS;
+  const columnWidth = (area.right - area.left) / COLUMNS;
 
   // Anchors: one per row, on one column (odd epochs) or zigzagging (even).
   const aligned = epoch % 2 === 1;
@@ -172,25 +202,34 @@ export function composeIdle(
     }
   }
 
-  const placed: PlacedGlyph[] = cells.map(({ row, col, tier }, slot) => ({
-    char: chars[slot]!,
-    // The swapped glyph gets a one-off index so its key in GlyphLayer
-    // changes and its `rise` entrance replays; every other slot keeps its
-    // slot number as a stable key.
-    index: slot === swappedSlot ? 1000 + epoch * IDLE_EPOCH_BARS + barInEpoch : slot,
-    x: MARGIN + col * columnWidth,
-    y: firstBaseline + row * pitch,
-    rotateDeg: 0,
-    sizePx: tierPx[tier]!,
-    emphasized: false,
-    phaseOffset: (col + row) / 8,
-  }));
+  // The epoch's accent anchor: the anchor on one hashed row.
+  const accentRow = pick('accentRow', ROWS);
+  const placed = cells.map(({ row, col, tier }, slot): PlacedGlyph => {
+    const accent = (tier === 0 && row === accentRow) || slot === swappedSlot;
+    const muted = !accent && tier === TIERS.length - 1;
+    return {
+      char: chars[slot]!,
+      // The swapped glyph gets a one-off index so its key in GlyphLayer
+      // changes and its `rise` entrance replays; every other slot keeps its
+      // slot number as a stable key.
+      index: slot === swappedSlot ? 1000 + epoch * IDLE_EPOCH_BARS + barInEpoch : slot,
+      x: area.left + col * columnWidth,
+      y: firstBaseline + row * pitch,
+      rotateDeg: 0,
+      sizePx: tierPx[tier]!,
+      emphasized: false,
+      phaseOffset: (col + row) / 8,
+      face: tier === 0 ? 'primary' : 'secondary',
+      accent,
+      ...(muted ? { alpha: MUTED_ALPHA } : {}),
+    };
+  });
 
   return {
     glyphs: placed,
     caption: track && {
       text: captionText(track),
-      x: MARGIN,
+      x: area.left,
       y: captionY,
       sizePx: captionPx,
     },

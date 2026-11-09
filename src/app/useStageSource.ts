@@ -122,6 +122,7 @@ export function useStageSource({
         QUIET_BEAT,
       );
       beatValues.surge.value = 0;
+      beatValues.silence.value = 1;
       setBeat(QUIET_BEAT);
       return undefined;
     }
@@ -145,6 +146,7 @@ export function useStageSource({
       // Every frame reaches the shared values before the throttled publish:
       // worklets derive the continuous beat from them without re-rendering.
       beatValues.write(frame, next);
+      beatValues.silence.value = next.silence ? 1 : 0;
       // The surge: the acoustic detection (guarded inside the profile by the
       // beat confidence, the silence hold-off and the song's history) OR the
       // accent line, on a fast-in / slow-out follower.

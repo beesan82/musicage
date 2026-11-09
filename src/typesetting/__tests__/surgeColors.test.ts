@@ -3,11 +3,14 @@ import { interpolateColor } from 'react-native-reanimated';
 import { INK_TINT_MAX, surgeHighHex } from '../../direction/surge';
 import type { Palette } from '../../direction/types';
 import {
+  accentBody,
+  contextInk,
   GLOW_MAX_GLYPHS,
   GLOW_RADIUS_MAX_PX,
   glowAmount,
   glowOpacity,
   glowRadiusPx,
+  inkBody,
   surgeAccent,
   surgeInk,
 } from '../surgeColors';
@@ -54,4 +57,24 @@ test('the glow radius never exceeds the spec ceiling of 10 px, and the limit is 
   expect(glowOpacity(0)).toBe(0);
   expect(glowOpacity(1)).toBeLessThanOrEqual(1);
   expect(GLOW_MAX_GLYPHS).toBe(3);
+});
+
+describe("the ink's body (visual overhaul spec §3c.1)", () => {
+  test('an ink glyph is lit 12% toward the lamp on top and shaded 10% toward the ground at its foot', () => {
+    expect(inkBody('#EEEEEE', '#FFCC88', '#101010')).toEqual([
+      interpolateColor(0.12, [0, 1], ['#EEEEEE', '#FFCC88']),
+      interpolateColor(0.1, [0, 1], ['#EEEEEE', '#101010']),
+    ]);
+  });
+
+  test('an accent glyph leans 30% toward the high accent on top and is the accent at its foot', () => {
+    expect(accentBody('#FF0000', '#FFFF00')).toEqual([
+      interpolateColor(0.3, [0, 1], ['#FF0000', '#FFFF00']),
+      '#FF0000',
+    ]);
+  });
+
+  test('a context line is the ink leaned 30% toward the lamp', () => {
+    expect(contextInk('#EEEEEE', '#FFCC88')).toBe(interpolateColor(0.3, [0, 1], ['#EEEEEE', '#FFCC88']));
+  });
 });

@@ -1,12 +1,16 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import type { RecognitionViewState } from '../recognition/types';
+import { DEFAULT_CHROME_THEME, chromeFont } from '../theme/chrome';
+import type { ChromeTheme } from '../theme/chrome';
+import { ChromeButton } from './ChromeButton';
 
 export interface RecognitionControlsProps {
   state: RecognitionViewState;
   onRecognize(): void;
   onCancel(): void;
   onOpenSettings(): void;
+  theme?: ChromeTheme;
 }
 
 export function RecognitionControls({
@@ -14,6 +18,7 @@ export function RecognitionControls({
   onRecognize,
   onCancel,
   onOpenSettings,
+  theme = DEFAULT_CHROME_THEME,
 }: RecognitionControlsProps) {
   const listening = state.phase === 'listening';
   const resolving = state.phase === 'resolving_lyrics';
@@ -33,30 +38,21 @@ export function RecognitionControls({
 
   return (
     <View style={styles.root} testID="recognition-controls">
-      {state.message ? <Text style={styles.message}>{state.message}</Text> : null}
+      {state.message ? (
+        <Text style={[styles.message, chromeFont(theme, 'regular'), { color: theme.inkMuted }]}>
+          {state.message}
+        </Text>
+      ) : null}
       <View style={styles.row}>
-        <Pressable
-          accessibilityLabel={label}
-          accessibilityRole="button"
-          accessibilityState={{ disabled }}
+        <ChromeButton
           disabled={disabled}
+          label={label}
           onPress={onPress}
-          style={({ pressed }) => [
-            styles.button,
-            disabled && styles.buttonDisabled,
-            pressed && !disabled && styles.buttonPressed,
-          ]}
-        >
-          <Text style={styles.buttonText}>{label}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityLabel="設定"
-          accessibilityRole="button"
-          onPress={onOpenSettings}
-          style={({ pressed }) => [styles.button, pressed && styles.buttonPressed]}
-        >
-          <Text style={styles.buttonText}>設定</Text>
-        </Pressable>
+          primary
+          testID="recognize-button"
+          theme={theme}
+        />
+        <ChromeButton label="設定" onPress={onOpenSettings} testID="settings-button" theme={theme} />
       </View>
     </View>
   );
@@ -73,31 +69,8 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   message: {
-    color: '#C8C6B8',
-    fontSize: 12,
-    lineHeight: 19,
+    fontSize: 13,
+    lineHeight: 20,
     maxWidth: 300,
-  },
-  button: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(17, 21, 20, 0.68)',
-    borderColor: '#D8D0BA',
-    borderRadius: 22,
-    borderWidth: 1,
-    justifyContent: 'center',
-    minHeight: 48,
-    paddingHorizontal: 18,
-  },
-  buttonDisabled: {
-    opacity: 0.48,
-  },
-  buttonPressed: {
-    backgroundColor: 'rgba(226, 219, 198, 0.16)',
-  },
-  buttonText: {
-    color: '#F7F2E5',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1.2,
   },
 });

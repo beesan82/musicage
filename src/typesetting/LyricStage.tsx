@@ -1,4 +1,4 @@
-import { Canvas, Group, Text } from '@shopify/react-native-skia';
+import { Canvas, Group, Paint, Rect, Shadow, Text } from '@shopify/react-native-skia';
 import type { SkFont } from '@shopify/react-native-skia';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
@@ -7,22 +7,27 @@ import { useDerivedValue, useFrameCallback, useSharedValue } from 'react-native-
 import { useSafeAreaFrame, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { BeatState } from '../beat/types';
+import { lightHexFor, rgbaOf } from '../direction/palettes';
+import { surgeHighHex } from '../direction/surge';
 import { DEFAULT_IDLE_GLYPHS, DEFAULT_PALETTE } from '../direction/types';
 import type { LineDirection, SongDirection } from '../direction/types';
 import type { LyricLine } from '../recognition/types';
 import type { ScheduledLine } from '../sync/lineScheduler';
+import { IDLE_FOCUS } from '../textures/surfaceModel';
+import type { Uv } from '../textures/surfaceModel';
 import { TextureBackground } from '../textures/TextureBackground';
 import { createStageFont, FONT_SOURCES, useStageTypefaces } from './fonts';
 import type { FontKey, FontWeight } from './fonts';
 import { GlowLayer } from './GlowLayer';
 import { GlyphLayer } from './GlyphLayer';
-import { captionText, composeIdle, IDLE_EPOCH_BARS } from './idleComposition';
-import type { IdleComposition, IdleTrack } from './idleComposition';
-import { layoutLine, SIZE_RATIO } from './layout';
-import type { GlyphMeasure, LineLayout, PlacedGlyph, Viewport } from './layout';
+import type { GlyphBody } from './GlyphLayer';
+import { captionText, composeIdle, IDLE_EPOCH_BARS, idleFaces } from './idleComposition';
+import type { IdleComposition, IdleFaces, IdleTrack } from './idleComposition';
+import { layoutLine, printArea, SIZE_RATIO } from './layout';
+import type { GlyphMeasure, LineLayout, PlacedGlyph, PrintArea, Viewport } from './layout';
 import { dropHeadMs, entranceDurationMs, exitDurationMs, TEMPO_FEEL_FACTOR } from './motion';
-import { Ornament } from './Ornaments';
-import { surgeAccent, surgeInk } from './surgeColors';
+import { lineArea, Ornament } from './Ornaments';
+import { accentBody, contextInk, inkBody, surgeAccent, surgeInk } from './surgeColors';
 import type { BeatSharedValues } from './useBeatSharedValues';
 
 export type StageSource =
@@ -70,9 +75,35 @@ export function anchoredTime(
   return Math.max(previousTimeMs, anchorNowMs + (frameMs - anchorFrameMs));
 }
 
-const MARGIN = 24;
-const CONTEXT_OPACITY = 0.35;
+/** Context lines sit in the lamp's half-shadow (visual overhaul spec §3c.3). */
+const CONTEXT_OPACITY = 0.5;
+/** Distance between the line on stage and a context line. */
+const CONTEXT_GAP = 28;
+/** The context line's accent rule: 10×2px, this far from its text. */
+const CONTEXT_RULE_WIDTH = 10;
+const CONTEXT_RULE_HEIGHT = 2;
+const CONTEXT_RULE_GAP = 6;
+/**
+ * Beside a vertical line, a context line wraps to the room on its side, which
+ * must hold at least this many xs glyphs a row; with less (two xl columns
+ * reach the margins) it goes above (prev) or below (next) the column block,
+ * clamped into the print area even if that overlaps the block.
+ */
+const CONTEXT_MIN_GLYPHS = 2;
+const CONTEXT_ROW_GAP = 1.3;
+/**
+ * The line on stage's grounding shadow (spec §3c.2): one blurred shadow for the
+ * whole line, in the background's colour, so it shows only where the lamp has
+ * lit the surface.
+ */
+const LINE_SHADOW_DY = 2;
+const LINE_SHADOW_BLUR = 3;
+const LINE_SHADOW_ALPHA = 0.6;
 const CAPTION_OPACITY = 0.6;
+/** The idle caption's accent rule (spec §3e): 12×2px, this far above its text. */
+const CAPTION_RULE_WIDTH = 12;
+const CAPTION_RULE_HEIGHT = 2;
+const CAPTION_RULE_GAP = 6;
 const FONT_KEYS = Object.keys(FONT_SOURCES) as FontKey[];
 const CONTEXT_DIRECTION: LineDirection = {
   font: 'gothic',
@@ -119,27 +150,122 @@ function measureWith(fonts: StageFonts, key: FontKey, weight: FontWeight): Glyph
   };
 }
 
-/** Lays a neighbour line out in gothic xs and moves its block to a corner. */
-function contextGlyphs(
+interface ContextRow {
+  glyphs: { char: string; index: number; offset: number }[];
+  /** Advance so far, spaces included. */
+  cursor: number;
+  /** Up to the end of the row's last glyph. */
+  width: number;
+}
+
+interface ContextLine {
+  glyphs: PlacedGlyph[];
+  /** The accent rule: after the last glyph (prev) or before the first (next). */
+  rule: { x: number; y: number; width: number; height: number };
+}
+
+/**
+ * Lays a neighbour line out in gothic xs, horizontal, next to the line on
+ * stage (visual overhaul spec §3c.3), as a block of its text plus its rule:
+ * - Horizontal line: prev ends at the line's right edge, CONTEXT_GAP above
+ *   it (right-aligned); next starts at the line's left edge, CONTEXT_GAP
+ *   below it (left-aligned).
+ * - Vertical line: prev to the right of the column block, level with its top;
+ *   next to the left of it, level with its foot. Each wraps to the room on its
+ *   side; with room for fewer than CONTEXT_MIN_GLYPHS it is placed as for a
+ *   horizontal line instead.
+ * The block is then clamped into `area` (the line's area: the print area,
+ * never under the wordmark, the controls or the caption row, nor in the side
+ * margins, less the room of the line's ornament); at the bottom the clamp
+ * wins over the top, so the block never slides under the controls.
+ */
+function contextLine(
   line: LyricLine | undefined,
-  corner: 'top-left' | 'bottom-right',
+  side: 'prev' | 'next',
+  main: LineLayout,
+  vertical: boolean,
   viewport: Viewport,
+  area: PrintArea,
   fonts: StageFonts,
-): PlacedGlyph[] | null {
+): ContextLine | null {
   const text = line?.text.trim() ?? '';
   if (text === '') return null;
-  const { glyphs, bounds } = layoutLine(
-    text,
-    CONTEXT_DIRECTION,
-    viewport,
-    measureWith(fonts, 'gothic', 'regular'),
-  );
-  const dx = corner === 'top-left' ? MARGIN - bounds.x : viewport.width - MARGIN - (bounds.x + bounds.width);
-  const dy =
-    corner === 'top-left'
-      ? viewport.insetTop + MARGIN - bounds.y
-      : viewport.height - viewport.insetBottom - MARGIN - (bounds.y + bounds.height);
-  return glyphs.map((g) => ({ ...g, x: g.x + dx, y: g.y + dy }));
+  const chars = [...text];
+  const sizePx = viewport.width * SIZE_RATIO.xs;
+  const measure = measureWith(fonts, 'gothic', 'regular');
+  const { ascent, descent } = measure(chars[0]!, sizePx);
+  const b = main.bounds;
+  const ruleSpan = CONTEXT_RULE_WIDTH + CONTEXT_RULE_GAP;
+
+  // Where the block goes: one horizontal edge and one vertical edge it hangs from.
+  const besideRoom = side === 'prev' ? area.right - (b.x + b.width + CONTEXT_GAP) : b.x - CONTEXT_GAP - area.left;
+  const beside = vertical && besideRoom >= CONTEXT_MIN_GLYPHS * sizePx + ruleSpan;
+  const maxWidth = (beside ? besideRoom : area.right - area.left) - ruleSpan;
+
+  // Greedy rows within maxWidth; spaces keep their advance but never start a row.
+  // A row's cursor runs over its spaces; its width ends at its last glyph, so
+  // a space before a wrap does not push a right-aligned row off its edge.
+  const rows: ContextRow[] = [{ glyphs: [], cursor: 0, width: 0 }];
+  chars.forEach((char, index) => {
+    const { advance } = measure(char, sizePx);
+    let row = rows[rows.length - 1]!;
+    if (row.cursor > 0 && row.cursor + advance > maxWidth) {
+      row = { glyphs: [], cursor: 0, width: 0 };
+      rows.push(row);
+    }
+    if (char.trim() === '') {
+      if (row.cursor > 0) row.cursor += advance;
+      return;
+    }
+    row.glyphs.push({ char, index, offset: row.cursor });
+    row.cursor += advance;
+    row.width = row.cursor;
+  });
+  const pitch = sizePx * CONTEXT_ROW_GAP;
+  const blockWidth = Math.max(...rows.map((row) => row.width)) + ruleSpan;
+  const blockHeight = -ascent + descent + (rows.length - 1) * pitch;
+
+  let left: number;
+  let top: number;
+  if (beside) {
+    left = side === 'prev' ? b.x + b.width + CONTEXT_GAP : b.x - CONTEXT_GAP - blockWidth;
+    top = side === 'prev' ? b.y : b.y + b.height - blockHeight;
+  } else {
+    left = side === 'prev' ? b.x + b.width - blockWidth : b.x;
+    top = side === 'prev' ? b.y - CONTEXT_GAP - blockHeight : b.y + b.height + CONTEXT_GAP;
+  }
+  left = Math.max(area.left, Math.min(left, area.right - blockWidth));
+  top = Math.min(Math.max(top, area.top), area.bottom - blockHeight);
+
+  // prev: rows right-aligned, the rule after the last row's end. next: rows
+  // left-aligned after the rule's room, the rule before the first row.
+  const glyphs: PlacedGlyph[] = [];
+  rows.forEach((row, line) => {
+    const rowLeft = side === 'prev' ? left + blockWidth - ruleSpan - row.width : left + ruleSpan;
+    const baseline = top - ascent + line * pitch;
+    for (const { char, index, offset } of row.glyphs) {
+      glyphs.push({ char, index, x: rowLeft + offset, y: baseline, rotateDeg: 0, sizePx, emphasized: false });
+    }
+  });
+  const ruleLine = side === 'prev' ? rows.length - 1 : 0;
+  const ruleBaseline = top - ascent + ruleLine * pitch;
+  return {
+    glyphs,
+    rule: {
+      x: side === 'prev' ? left + blockWidth - CONTEXT_RULE_WIDTH : left,
+      y: ruleBaseline + (ascent + descent) / 2 - CONTEXT_RULE_HEIGHT / 2,
+      width: CONTEXT_RULE_WIDTH,
+      height: CONTEXT_RULE_HEIGHT,
+    },
+  };
+}
+
+/** The idle glyphs split by face role, one GlyphLayer each (spec §3e). */
+function splitByFace(glyphs: readonly PlacedGlyph[]): { primary: PlacedGlyph[]; secondary: PlacedGlyph[] } {
+  return {
+    primary: glyphs.filter((g) => g.face === 'primary'),
+    secondary: glyphs.filter((g) => g.face !== 'primary'),
+  };
 }
 
 /** The idle caption laid out glyph by glyph, so it can trace in after the drop. */
@@ -160,8 +286,8 @@ interface LineScene {
   index: number;
   direction: LineDirection;
   layout: LineLayout;
-  prev: PlacedGlyph[] | null;
-  next: PlacedGlyph[] | null;
+  prev: ContextLine | null;
+  next: ContextLine | null;
 }
 
 /** Marks a drop whose line has been and gone: no later line takes the drop entrance. */
@@ -181,6 +307,8 @@ interface Drop {
   headMs: number;
   idleRiseAtMs: number;
   idleGlyphs: PlacedGlyph[] | null;
+  /** The faces those idle glyphs were set in, so they keep them while they scatter. */
+  idleFaces: IdleFaces;
   lineIndex: number | null;
 }
 
@@ -255,26 +383,44 @@ export function LyricStage({
   const lineIsEmpty = scheduled?.isEmpty ?? true;
   const lineStartedAtMs = scheduled?.startedAtMs ?? 0;
 
+  // The print area (visual overhaul spec §3d), shared with the idle
+  // composition: the caption row in its bottom band is gothic xs.
+  const area = useMemo<PrintArea | null>(
+    () =>
+      fonts === null
+        ? null
+        : printArea(viewport, fonts('gothic', 'regular', viewport.width * SIZE_RATIO.xs).getMetrics().ascent),
+    [fonts, viewport],
+  );
+  const numeralFont = fonts === null ? null : fonts('gothic', 'regular', viewport.width * SIZE_RATIO.s);
+
   const lineScene = useMemo<LineScene | null>(() => {
-    if (fonts === null || lines === null || songDirection === null || lineIsEmpty) return null;
+    if (fonts === null || area === null || numeralFont === null) return null;
+    if (lines === null || songDirection === null || lineIsEmpty) return null;
     const text = lines[lineIndex]?.text.trim() ?? '';
     if (text === '') return null;
     const direction = songDirection.lines[lineIndex] ?? FALLBACK_DIRECTION;
+    // The line and its context lines keep clear of the room its ornament takes.
+    const inner = lineArea(area, direction, numeralFont.getMetrics());
     const layout = layoutLine(
       text,
       direction,
       viewport,
       measureWith(fonts, direction.font, direction.weight),
+      inner,
     );
     const showContext = direction.size !== 'xl';
+    const vertical = direction.orientation === 'vertical';
+    const context = (side: 'prev' | 'next', line: LyricLine | undefined) =>
+      showContext ? contextLine(line, side, layout, vertical, viewport, inner, fonts) : null;
     return {
       index: lineIndex,
       direction,
       layout,
-      prev: showContext ? contextGlyphs(lines[lineIndex - 1], 'top-left', viewport, fonts) : null,
-      next: showContext ? contextGlyphs(lines[lineIndex + 1], 'bottom-right', viewport, fonts) : null,
+      prev: context('prev', lines[lineIndex - 1]),
+      next: context('next', lines[lineIndex + 1]),
     };
-  }, [fonts, lineIndex, lineIsEmpty, lines, songDirection, viewport]);
+  }, [area, fonts, lineIndex, lineIsEmpty, lines, numeralFont, songDirection, viewport]);
 
   // The recognition drop (design spec §7), once per fire time. Computed in
   // render so the line shown in the very same render can take it: the head
@@ -286,6 +432,10 @@ export function LyricStage({
   // The idle composition shown in the previous render (null while a line is on
   // stage): the glyphs a drop firing now sends scattering.
   const idleShownRef = useRef<IdleComposition | null>(null);
+  // The faces the idle composition is set in (spec §3e): from the song's line
+  // directions, or mincho-old over gothic before a song is recognised.
+  const faces = useMemo(() => idleFaces(songDirection), [songDirection]);
+  const idleFacesShownRef = useRef<IdleFaces>(faces);
   if (dropAtMs !== null && !reducedMotion && dropRef.current?.fireAtMs !== dropAtMs) {
     const periodMs = beatValues.periodMs.value;
     const headMs = dropHeadMs(
@@ -300,6 +450,7 @@ export function LyricStage({
       headMs,
       idleRiseAtMs: headMs + exitDurationMs('scatter', idleGlyphs?.length ?? 0, periodMs),
       idleGlyphs,
+      idleFaces: idleFacesShownRef.current,
       lineIndex: null,
     };
   }
@@ -415,23 +566,53 @@ export function LyricStage({
     epochStartedAtRef.current = performance.now();
   }
   const idleSwapped = idle?.glyphs.find((g) => g.index >= 1000) ?? null;
-  const idleBase = idle?.glyphs.filter((g) => g !== idleSwapped) ?? null;
+  const idleBase = useMemo(
+    () => (idle === null ? null : splitByFace(idle.glyphs.filter((g) => g.index < 1000))),
+    [idle],
+  );
   idleShownRef.current = idle;
+  idleFacesShownRef.current = faces;
   // After a drop the idle layers are remounted (key) so their rise replays,
   // timed to begin once the previous idle glyphs have scattered.
   const idleKey = drop?.fireAtMs ?? 0;
   const idleRiseAtMs = drop?.idleRiseAtMs ?? 0;
   const idleExit = dropPlay?.idleExit ?? null;
+  const idleExitByFace = useMemo(() => (idleExit === null ? null : splitByFace(idleExit)), [idleExit]);
   // While the caption traces in it is drawn glyph by glyph from the head.
   const captionTraceFromMs = dropPlay?.captionTracing === true && drop !== null ? drop.headMs : null;
   const caption = idle?.caption ?? null;
   const captionTrace = useMemo(
     () =>
       caption !== null && captionTraceFromMs !== null && fonts !== null
-        ? captionGlyphs(caption, measureWith(fonts, 'gothic', 'regular'))
+        ? captionGlyphs(caption, measureWith(fonts, faces.secondary, 'regular'))
         : null,
-    [caption, captionTraceFromMs, fonts],
+    [caption, captionTraceFromMs, faces.secondary, fonts],
   );
+
+  // The lamp's centre (visual overhaul spec §3c.3, §3e): the line on stage's
+  // bounds, in uv; in idle the centre of the epoch's accent anchor (so the
+  // lamp slides to another row each epoch); failing both, a little above the
+  // centre. Written only when it moves (a new line, a new epoch, a new
+  // viewport); the background slides the lamp there on the UI thread.
+  const focusTarget = useSharedValue<Uv>(IDLE_FOCUS);
+  const sceneBounds = scene?.layout.bounds ?? null;
+  const idleAnchor = idle?.glyphs.find((g) => g.face === 'primary' && g.accent === true) ?? null;
+  let focusX = IDLE_FOCUS.x;
+  let focusY = IDLE_FOCUS.y;
+  if (sceneBounds !== null) {
+    focusX = (sceneBounds.x + sceneBounds.width / 2) / width;
+    focusY = (sceneBounds.y + sceneBounds.height / 2) / height;
+  } else if (idleAnchor !== null && fonts !== null) {
+    const { advance, ascent, descent } = measureWith(fonts, faces.primary, faces.anchorWeight)(
+      idleAnchor.char,
+      idleAnchor.sizePx,
+    );
+    focusX = (idleAnchor.x + advance / 2) / width;
+    focusY = (idleAnchor.y + (ascent + descent) / 2) / height;
+  }
+  useEffect(() => {
+    focusTarget.value = { x: focusX, y: focusY };
+  }, [focusTarget, focusX, focusY]);
 
   const palette = songDirection?.palette ?? DEFAULT_PALETTE;
   const texture = songDirection?.texture ?? 'grain';
@@ -444,6 +625,24 @@ export function LyricStage({
     () => surgeAccent(palette, beatValues.surge.value),
     [palette, beatValues],
   );
+  // The ink's body (visual overhaul spec §3c.1): the gradient colours of ink
+  // and accent glyphs, derived here once per frame and shared by every glyph.
+  // A context line is flat, in the ink leaned toward the lamp (§3c.3).
+  const light = lightHexFor(palette);
+  const inkBodyNow = useDerivedValue(
+    () => inkBody(inkNow.value, light, palette.background),
+    [palette, light],
+  );
+  const accentBodyNow = useDerivedValue(
+    () => accentBody(accentNow.value, surgeHighHex(palette)),
+    [palette],
+  );
+  const body = useMemo<GlyphBody>(
+    () => ({ ink: inkBodyNow, accent: accentBodyNow }),
+    [inkBodyNow, accentBodyNow],
+  );
+  const contextInkNow = useDerivedValue(() => contextInk(inkNow.value, light), [light]);
+  const lineShadowColor = rgbaOf(palette.background, LINE_SHADOW_ALPHA);
   const shared = {
     time,
     beat: beatValues,
@@ -452,9 +651,29 @@ export function LyricStage({
     feel,
     inkValue: inkNow,
     accentValue: accentNow,
+    body,
   } as const;
   // Stable font getters keep the memoised GlyphLayers from re-rendering on every beat update.
   const gothic = useCallback((sizePx: number) => fonts!('gothic', 'regular', sizePx), [fonts]);
+  // The idle faces (spec §3e): anchors in the primary, the rest in the
+  // secondary. Idle glyphs scattering at a drop keep the faces they were in.
+  const idlePrimary = useCallback(
+    (sizePx: number) => fonts!(faces.primary, faces.anchorWeight, sizePx),
+    [fonts, faces.primary, faces.anchorWeight],
+  );
+  const idleSecondary = useCallback(
+    (sizePx: number) => fonts!(faces.secondary, 'regular', sizePx),
+    [fonts, faces.secondary],
+  );
+  const exitFaces = drop?.idleFaces ?? faces;
+  const exitIdlePrimary = useCallback(
+    (sizePx: number) => fonts!(exitFaces.primary, exitFaces.anchorWeight, sizePx),
+    [fonts, exitFaces.primary, exitFaces.anchorWeight],
+  );
+  const exitIdleSecondary = useCallback(
+    (sizePx: number) => fonts!(exitFaces.secondary, 'regular', sizePx),
+    [fonts, exitFaces.secondary],
+  );
   const lineFace = scene?.direction.font ?? 'gothic';
   const lineWeight = scene?.direction.weight ?? 'regular';
   const lineFont = useCallback(
@@ -501,6 +720,8 @@ export function LyricStage({
           high={beatValues.high}
           confidence={beatValues.confidence}
           surge={beatValues.surge}
+          silence={beatValues.silence}
+          focus={focusTarget}
           time={time}
           dropAtMs={drop?.fireAtMs ?? null}
           width={width}
@@ -510,22 +731,26 @@ export function LyricStage({
       </View>
       {fonts !== null ? (
         <Canvas style={styles.layer}>
-          {idleExit !== null && drop !== null ? (
-            // The idle glyphs at the fire: held in place until the head, then
-            // scattered (the exit derived from `scatter`).
-            <GlyphLayer
-              {...shared}
-              glyphs={idleExit}
-              fontFor={gothic}
-              lineStartedAtMs={drop.headMs}
-              entrance="scatter"
-              hold="still"
-              accent={false}
-              exiting
-              seed={epoch + 1}
-              testIDPrefix="exit-idle-glyph"
-            />
-          ) : null}
+          {idleExitByFace !== null && drop !== null
+            ? // The idle glyphs at the fire, in the faces they were set in:
+              // held in place until the head, then scattered (the exit derived
+              // from `scatter`). No shadow, like any leaving line.
+              (['primary', 'secondary'] as const).map((role) => (
+                <GlyphLayer
+                  key={`exit-idle-${role}`}
+                  {...shared}
+                  glyphs={idleExitByFace[role]}
+                  fontFor={role === 'primary' ? exitIdlePrimary : exitIdleSecondary}
+                  lineStartedAtMs={drop.headMs}
+                  entrance="scatter"
+                  hold="still"
+                  accent={false}
+                  exiting
+                  seed={epoch + 1}
+                  testIDPrefix="exit-idle-glyph"
+                />
+              ))
+            : null}
           {exiting !== null ? (
             <GlyphLayer
               {...shared}
@@ -541,16 +766,18 @@ export function LyricStage({
               testIDPrefix="exit-glyph"
             />
           ) : null}
-          {scene !== null ? (
+          {scene !== null && area !== null && numeralFont !== null ? (
             <>
               <Ornament
                 ornament={scene.direction.ornament}
                 orientation={scene.direction.orientation}
                 bounds={scene.layout.bounds}
-                viewport={viewport}
-                ink={palette.ink}
+                area={area}
+                ink={inkNow}
+                accent={accentNow}
+                accentLine={scene.direction.accent}
                 bar={beat.bar}
-                numeralFont={gothic(viewport.width * SIZE_RATIO.xs)}
+                numeralFont={numeralFont}
               />
               {!reducedMotion ? (
                 // The beat-head glow of the surge (spec §5): blurred twins of
@@ -570,28 +797,43 @@ export function LyricStage({
                   feel={feel}
                 />
               ) : null}
-              <GlyphLayer
-                {...shared}
-                glyphs={scene.layout.glyphs}
-                fontFor={lineFont}
-                lineStartedAtMs={lineStartedAtMs}
-                lineLandsAtMs={lineLandsAtMs}
-                lineEndsAtMs={lineEndsAtMs}
-                entrance={scene.direction.entrance}
-                hold={scene.direction.hold}
-                accent={scene.direction.accent}
-                heavy={lineHeavy}
-                seed={scene.index + 1}
-              />
+              {/* The grounding shadow (spec §3c.2): one offscreen layer for the
+                  whole line on stage. Not on the leaving line, the context
+                  lines, the caption or the glow. */}
+              <Group
+                layer={
+                  <Paint>
+                    <Shadow dx={0} dy={LINE_SHADOW_DY} blur={LINE_SHADOW_BLUR} color={lineShadowColor} />
+                  </Paint>
+                }
+                {...({ testID: 'line-shadow' } as object)}
+              >
+                <GlyphLayer
+                  {...shared}
+                  glyphs={scene.layout.glyphs}
+                  fontFor={lineFont}
+                  lineStartedAtMs={lineStartedAtMs}
+                  lineLandsAtMs={lineLandsAtMs}
+                  lineEndsAtMs={lineEndsAtMs}
+                  entrance={scene.direction.entrance}
+                  hold={scene.direction.hold}
+                  accent={scene.direction.accent}
+                  heavy={lineHeavy}
+                  seed={scene.index + 1}
+                />
+              </Group>
               {(['prev', 'next'] as const).map((side) => {
-                const glyphs = scene[side];
-                if (glyphs === null) return null;
+                const context = scene[side];
+                if (context === null) return null;
                 const testProps = { testID: `context-${side}` } as object;
                 return (
                   <Group key={side} opacity={CONTEXT_OPACITY} {...testProps}>
+                    <Rect {...context.rule} color={accentNow} {...({ testID: `context-${side}-rule` } as object)} />
                     <GlyphLayer
                       {...shared}
-                      glyphs={glyphs}
+                      inkValue={contextInkNow}
+                      body={null}
+                      glyphs={context.glyphs}
                       fontFor={gothic}
                       lineStartedAtMs={lineStartedAtMs}
                       entrance={CONTEXT_DIRECTION.entrance}
@@ -607,28 +849,57 @@ export function LyricStage({
           ) : null}
           {idle !== null && idleBase !== null ? (
             <>
-              <GlyphLayer
-                key={`idle-base-${idleKey}`}
-                {...shared}
-                glyphs={idleBase}
-                fontFor={gothic}
-                lineStartedAtMs={Math.max(epochStartedAtRef.current, idleRiseAtMs)}
-                entrance="rise"
-                hold="breathe"
-                accent={false}
-                seed={epoch}
-              />
-              {idleSwapped !== null ? (
-                <GlyphLayer
-                  key={`idle-swap-${idleKey}`}
-                  {...shared}
-                  glyphs={[idleSwapped]}
-                  fontFor={gothic}
-                  lineStartedAtMs={Math.max(barStartedAtRef.current, idleRiseAtMs)}
-                  entrance="rise"
-                  hold="breathe"
-                  accent={false}
-                  seed={epoch}
+              {/* The idle print (spec §3e): one layer per face, under the same
+                  grounding shadow as the line on stage (§3c.2), one offscreen
+                  layer for the whole composition. Not on the caption. */}
+              <Group
+                layer={
+                  <Paint>
+                    <Shadow dx={0} dy={LINE_SHADOW_DY} blur={LINE_SHADOW_BLUR} color={lineShadowColor} />
+                  </Paint>
+                }
+                {...({ testID: 'idle-shadow' } as object)}
+              >
+                {(['primary', 'secondary'] as const).map((role) => (
+                  <GlyphLayer
+                    key={`idle-base-${role}-${idleKey}`}
+                    {...shared}
+                    glyphs={idleBase[role]}
+                    fontFor={role === 'primary' ? idlePrimary : idleSecondary}
+                    lineStartedAtMs={Math.max(epochStartedAtRef.current, idleRiseAtMs)}
+                    entrance="rise"
+                    hold="breathe"
+                    accent={false}
+                    seed={epoch}
+                  />
+                ))}
+                {idleSwapped !== null ? (
+                  <GlyphLayer
+                    key={`idle-swap-${idleKey}`}
+                    {...shared}
+                    glyphs={[idleSwapped]}
+                    fontFor={idleSwapped.face === 'primary' ? idlePrimary : idleSecondary}
+                    lineStartedAtMs={Math.max(barStartedAtRef.current, idleRiseAtMs)}
+                    entrance="rise"
+                    hold="breathe"
+                    accent={false}
+                    seed={epoch}
+                  />
+                ) : null}
+              </Group>
+              {idle.caption !== null ? (
+                <Rect
+                  x={idle.caption.x}
+                  y={
+                    idle.caption.y +
+                    idleSecondary(idle.caption.sizePx).getMetrics().ascent -
+                    CAPTION_RULE_GAP -
+                    CAPTION_RULE_HEIGHT
+                  }
+                  width={CAPTION_RULE_WIDTH}
+                  height={CAPTION_RULE_HEIGHT}
+                  color={accentNow}
+                  {...({ testID: 'idle-caption-rule' } as object)}
                 />
               ) : null}
               {idle.caption !== null && captionTrace !== null && captionTraceFromMs !== null ? (
@@ -637,8 +908,9 @@ export function LyricStage({
                 <Group opacity={CAPTION_OPACITY}>
                   <GlyphLayer
                     {...shared}
+                    body={null}
                     glyphs={captionTrace}
-                    fontFor={gothic}
+                    fontFor={idleSecondary}
                     lineStartedAtMs={captionTraceFromMs}
                     entrance="trace"
                     hold="still"
@@ -652,7 +924,7 @@ export function LyricStage({
                   x={idle.caption.x}
                   y={idle.caption.y}
                   text={idle.caption.text}
-                  font={gothic(idle.caption.sizePx)}
+                  font={idleSecondary(idle.caption.sizePx)}
                   color={inkNow}
                   opacity={CAPTION_OPACITY}
                   {...({ testID: 'idle-caption' } as object)}

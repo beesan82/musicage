@@ -31,6 +31,12 @@ export interface BeatSharedValues {
    */
   surge: SharedValue<number>;
   /**
+   * 1 while the beat calls the room silent, 0 with sound. Written by the stage
+   * source on every ear frame (see useStageSource); the background's lamp
+   * shuts in silence (visual overhaul spec §3b.1). Starts silent.
+   */
+  silence: SharedValue<number>;
+  /**
    * Writes one ear frame and the beat state it produced straight to the
    * shared values. Called on every frame from the stage source's subscribe,
    * independent of the throttled React publish: assigning shared values never
@@ -56,6 +62,7 @@ export function useBeatSharedValues(): BeatSharedValues {
   const mid = useSharedValue(0);
   const high = useSharedValue(0);
   const surge = useSharedValue(0);
+  const silence = useSharedValue(1);
 
   const envelope = useRef({ low: 0, mid: 0, high: 0, atMs: Number.NaN });
   const previousPulse = useRef(0);
@@ -110,6 +117,7 @@ export function useBeatSharedValues(): BeatSharedValues {
       mid,
       high,
       surge,
+      silence,
       write,
     };
   }, [
@@ -124,6 +132,7 @@ export function useBeatSharedValues(): BeatSharedValues {
     periodMs,
     phase,
     pulse,
+    silence,
     surge,
   ]);
 }

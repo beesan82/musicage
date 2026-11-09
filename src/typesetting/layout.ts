@@ -3,11 +3,11 @@ import type { LineDirection, Size } from '../direction/types';
 // Coordinate convention (canvas pixels, y grows downward):
 // - `x`, `y` on a PlacedGlyph are the glyph's baseline origin, i.e. where Skia's
 //   <Text x y> puts it. `ascent` from GlyphMeasure is negative (above the baseline).
-// - The usable area is the viewport minus the safe-area insets and a 24px margin
-//   on every side.
+// - The usable area is the print area (`printArea`, visual overhaul spec §3d) the
+//   caller passes in, less any room the line's ornament needs (Ornaments.tsx `lineArea`).
 // - Vertical: each glyph takes a square cell of its own `sizePx` and the cells stack
-//   downward from the top of the usable area. Column 1 is centred on the viewport's
-//   centre x; each further column sits `sizePx · 1.4` to the left. An upright glyph's
+//   downward from the top of the usable area. Column 1 is centred on the usable
+//   area's centre x; each further column sits `sizePx · 1.4` to the left. An upright glyph's
 //   origin is its left edge (column centre minus half its advance) on the baseline
 //   `ascent` below the cell top. A glyph with `rotateDeg: 90` is drawn by the renderer
 //   rotated 90° clockwise about its own origin, so its advance runs downward and its
@@ -16,7 +16,7 @@ import type { LineDirection, Size } from '../direction/types';
 // - Vertical punctuation (、。，．) stays upright (`rotateDeg: 0`) but its origin is
 //   shifted by (+0.5·sizePx, −0.5·sizePx) from the upright placement, so the mark
 //   sits in the cell's upper right as vertical Japanese typesetting expects.
-// - Horizontal: rows start 24px from the left and advance by each glyph's `advance`;
+// - Horizontal: rows start at the usable area's left edge and advance by each glyph's `advance`;
 //   rows are `sizePx · 1.3` apart and the block is centred vertically in the usable area.
 // - A line that needs more than two columns (rows) is retried one size smaller, down
 //   to `xs`, which wraps into as many columns (rows) as it needs.
@@ -47,6 +47,22 @@ export interface PlacedGlyph {
    * grid); line layouts leave it unset, which motion reads as 0.
    */
   phaseOffset?: number;
+  /**
+   * Which of the idle screen's two faces sets this glyph (visual overhaul spec
+   * §3e): the anchors take the primary face, the companions the secondary.
+   * Only the idle composition sets it; the stage resolves it to a FontKey.
+   */
+  face?: 'primary' | 'secondary';
+  /**
+   * Drawn in the accent, statically, instead of the ink. Only the idle
+   * composition sets it (one anchor per epoch and the latest swapped glyph).
+   */
+  accent?: boolean;
+  /**
+   * Opacity multiplier on top of the motion's opacity. Only the idle
+   * composition sets it (its m-tier companions); unset reads as 1.
+   */
+  alpha?: number;
 }
 
 export interface LineLayout {
@@ -62,6 +78,54 @@ export const ROTATED_IN_VERTICAL = /[A-Za-z0-9ー（）「」『』【】()\[\]<
 export const SHIFTED_IN_VERTICAL = /[、。，．]/;
 
 const MARGIN = 24;
+
+// Reserved bands (y down). The stage is drawn full-screen behind MusicageApp's
+// chrome, which drifts with it (both are inside the burn-in drift view), so
+// the bands can be fixed offsets from the safe-area insets.
+
+/**
+ * Height of MusicageApp's wordmark row below the top inset: `wordmarkRow`
+ * paddingTop 12 plus one line of 13pt text (about 16px on iOS).
+ */
+const TOP_RESERVED = 12 + 16;
+/**
+ * Height of MusicageApp's controls above the bottom inset: `content`
+ * paddingBottom 18, then `controlsStack` holding RecognitionControls and
+ * ListeningControls (each one button row of minHeight 48) with gap 16.
+ * A message line (mic denied, recognition error) can grow the stack past
+ * this; those are exceptional states and may cover the lowest row.
+ */
+const BOTTOM_RESERVED = 18 + 48 + 16 + 48;
+/** From the caption's baseline down to the controls' top. */
+const CAPTION_GAP = 12;
+
+/**
+ * The print area (visual overhaul spec §3d): the part of the stage between the
+ * reserved bands and inside the side margins, where every stage element sits.
+ * The bottom band holds the controls and the caption row; the caption is gothic
+ * xs, so its top needs that font's (negative) ascent.
+ */
+export interface PrintArea {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  /** The caption's baseline, at the left margin. */
+  captionBaseline: number;
+}
+
+export function printArea(viewport: Viewport, captionAscent: number): PrintArea {
+  const controlsTop = viewport.height - viewport.insetBottom - BOTTOM_RESERVED;
+  const captionBaseline = controlsTop - CAPTION_GAP;
+  return {
+    left: MARGIN,
+    right: viewport.width - MARGIN,
+    top: viewport.insetTop + TOP_RESERVED + MARGIN,
+    bottom: captionBaseline + captionAscent - MARGIN,
+    captionBaseline,
+  };
+}
+
 const COLUMN_GAP = 1.4;
 const ROW_GAP = 1.3;
 const MAX_WRAPPED_LINES = 2;
@@ -99,11 +163,12 @@ export function layoutLine(
   direction: LineDirection,
   viewport: Viewport,
   measure: GlyphMeasure,
+  area: PrintArea,
 ): LineLayout {
   const chars = [...text.trim()];
   let step = SIZE_ORDER.indexOf(direction.size);
   for (;;) {
-    const layout = layoutAtSize(chars, direction, viewport, measure, step);
+    const layout = layoutAtSize(chars, direction, viewport, measure, area, step);
     if (layout.columns <= MAX_WRAPPED_LINES || step === 0) return layout;
     step -= 1;
   }
@@ -114,6 +179,7 @@ function layoutAtSize(
   direction: LineDirection,
   viewport: Viewport,
   measure: GlyphMeasure,
+  area: PrintArea,
   step: number,
 ): LineLayout {
   const sizePx = viewport.width * SIZE_RATIO[SIZE_ORDER[step]!];
@@ -126,9 +192,9 @@ function layoutAtSize(
   });
   if (!cells.some((c) => !c.space)) return { glyphs: [], sizePx, bounds: ZERO_BOUNDS, columns: 0 };
 
-  const top = viewport.insetTop + MARGIN;
-  const usableHeight = viewport.height - viewport.insetTop - viewport.insetBottom - 2 * MARGIN;
-  const usableWidth = viewport.width - 2 * MARGIN;
+  const top = area.top;
+  const usableHeight = area.bottom - area.top;
+  const usableWidth = area.right - area.left;
   const vertical = direction.orientation === 'vertical';
   const slots = vertical
     ? wrap(cells, (c) => c.sizePx, usableHeight)
@@ -139,7 +205,7 @@ function layoutAtSize(
   const boxes: Box[] = [];
   if (vertical) {
     for (const { cell, line, offset } of slots) {
-      const centerX = viewport.width / 2 - line * sizePx * COLUMN_GAP;
+      const centerX = (area.left + area.right) / 2 - line * sizePx * COLUMN_GAP;
       const cellTop = top + offset;
       const rotated = ROTATED_IN_VERTICAL.test(cell.char);
       const shift = !rotated && SHIFTED_IN_VERTICAL.test(cell.char) ? cell.sizePx / 2 : 0;
@@ -154,7 +220,7 @@ function layoutAtSize(
     const blockHeight = -metrics.ascent + metrics.descent + (columns - 1) * sizePx * ROW_GAP;
     const firstBaseline = top + (usableHeight - blockHeight) / 2 - metrics.ascent;
     for (const { cell, line, offset } of slots) {
-      const x = MARGIN + offset;
+      const x = area.left + offset;
       const y = firstBaseline + line * sizePx * ROW_GAP;
       glyphs.push(place(cell, x, y, 0));
       boxes.push({ x, y: y + cell.ascent, width: cell.advance, height: cell.descent - cell.ascent });

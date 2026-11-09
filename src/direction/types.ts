@@ -29,6 +29,12 @@ export interface Palette {
    * surge strength rises. Without it the accent itself is the high colour.
    */
   accentHigh?: string;
+  /**
+   * Optional lamp colour (visual overhaul spec §3a.1, 2026-11-09): the tint of
+   * the one pool of light on the surface. Without it, `lightHexFor` derives
+   * mix(ink, accent, 0.4).
+   */
+  light?: string;
 }
 
 export interface SongDirection {
