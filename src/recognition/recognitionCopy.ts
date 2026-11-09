@@ -8,6 +8,7 @@ export const RECOGNITION_COPY: Record<
   | 'lyrics_failed'
   | 'lyrics_unavailable'
   | 'lyrics_unsynced'
+  | 'lyrics_plain_sheet'
   | 'instrumental',
   string
 > = {
@@ -20,6 +21,10 @@ export const RECOGNITION_COPY: Record<
   // label claims a sync; each says plainly what was not found).
   lyrics_unavailable: '歌詞が見つかりませんでした',
   lyrics_unsynced: '時刻つきの歌詞が見つかりませんでした',
+  // Under the lyric sheet (plain text without times): the text is printed,
+  // and the note says plainly that it carries no timing, so nothing on the
+  // sheet reads as following the song.
+  lyrics_plain_sheet: '同期情報のない歌詞です',
   instrumental: '歌のない曲として登録されています',
 };
 

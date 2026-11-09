@@ -87,7 +87,7 @@ export function titleDirection(title: string, faces: IdleFaces): LineDirection {
 }
 
 /** A horizontal row of glyphs from `x` on `baseline`; spaces advance but are not placed. */
-function rowGlyphs(text: string, x: number, baseline: number, sizePx: number, measure: GlyphMeasure): PlacedGlyph[] {
+export function rowGlyphs(text: string, x: number, baseline: number, sizePx: number, measure: GlyphMeasure): PlacedGlyph[] {
   const glyphs: PlacedGlyph[] = [];
   let cursor = x;
   [...text].forEach((char, index) => {
@@ -100,7 +100,7 @@ function rowGlyphs(text: string, x: number, baseline: number, sizePx: number, me
   return glyphs;
 }
 
-function rowWidth(text: string, sizePx: number, measure: GlyphMeasure): number {
+export function rowWidth(text: string, sizePx: number, measure: GlyphMeasure): number {
   return [...text].reduce((w, char) => w + measure(char, sizePx).advance, 0);
 }
 
@@ -134,7 +134,7 @@ function longestCut<T>(chars: readonly string[], attempt: (text: string) => T, f
 }
 
 /** One row of `text` no wider than `width`: the text itself, or its longest head that fits with the ellipsis. */
-function fitRow(text: string, sizePx: number, measure: GlyphMeasure, width: number): string {
+export function fitRow(text: string, sizePx: number, measure: GlyphMeasure, width: number): string {
   if (rowWidth(text, sizePx, measure) <= width + EPSILON) return text;
   const best = longestCut([...text], (t) => rowWidth(t, sizePx, measure), (w) => w <= width + EPSILON);
   return best?.text ?? NAMEPLATE_ELLIPSIS;

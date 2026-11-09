@@ -14,3 +14,10 @@ test('no note claims a sync or carries a "synced lyrics" label (design spec §7)
     expect(note).not.toMatch(/同期中|同期しました/);
   }
 });
+
+test('the lyric sheet note says honestly that the text carries no timing, and claims no sync', () => {
+  const note = RECOGNITION_COPY.lyrics_plain_sheet;
+  expect(note).toBe('同期情報のない歌詞です');
+  expect(note).not.toContain('同期歌詞');
+  expect(note).not.toMatch(/同期中|同期しました/);
+});

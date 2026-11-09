@@ -237,20 +237,31 @@ describe('MusicageApp', () => {
     );
   });
 
-  it('shows a plain-lyrics result as the nameplate of a song the stage cannot follow, with its note', async () => {
+  it('shows a plain-lyrics result as the lyric sheet, with its honest note', async () => {
     const plain: LyricResult = { kind: 'plain', track, text: '夜の底で' };
     mockApp({ recognition: createRecognition({ ...IDLE_STATE, result: plain }) });
     const screen = await renderApp();
 
     expect(lastStageProps().source).toMatchObject({
-      kind: 'unsynced',
-      reason: 'plain',
+      kind: 'plain',
+      text: '夜の底で',
       track: { title: track.title, artist: track.artist },
     });
-    expect(screen.getByTestId('unsynced-note').props.text).toBe(RECOGNITION_COPY.lyrics_unsynced);
+    expect(screen.getByTestId('plain-note').props.text).toBe(RECOGNITION_COPY.lyrics_plain_sheet);
+    expect(screen.getByTestId('plain-page')).toBeTruthy();
+    expect(screen.queryByTestId('unsynced-note')).toBeNull();
     expect(screen.queryByTestId('idle-caption')).toBeNull();
     // The chrome takes the song's palette, as for a synced song.
     expect(lastStageProps().source.direction).not.toBeNull();
+  });
+
+  it('keeps a plain result with nothing printable as the nameplate, with its note', async () => {
+    const plain: LyricResult = { kind: 'plain', track, text: '  \n \n' };
+    mockApp({ recognition: createRecognition({ ...IDLE_STATE, result: plain }) });
+    const screen = await renderApp();
+
+    expect(lastStageProps().source).toMatchObject({ kind: 'unsynced', reason: 'plain' });
+    expect(screen.getByTestId('unsynced-note').props.text).toBe(RECOGNITION_COPY.lyrics_unsynced);
   });
 
   it('renders the lyric stage in idle with no track', async () => {

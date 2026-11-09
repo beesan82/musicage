@@ -11,7 +11,7 @@ import { lightHexFor, rgbaOf } from '../direction/palettes';
 import { surgeHighHex } from '../direction/surge';
 import { DEFAULT_PALETTE } from '../direction/types';
 import type { LineDirection, SongDirection } from '../direction/types';
-import { unsyncedNote } from '../recognition/recognitionCopy';
+import { RECOGNITION_COPY, unsyncedNote } from '../recognition/recognitionCopy';
 import type { LyricLine, UnsyncedKind } from '../recognition/types';
 import type { ScheduledLine } from '../sync/lineScheduler';
 import { IDLE_FOCUS } from '../textures/surfaceModel';
@@ -31,6 +31,17 @@ import { dropHeadMs, ENTRANCE_DURATION_MS, entranceDurationMs, exitDurationMs, T
 import { composeNameplate } from './nameplate';
 import type { Nameplate } from './nameplate';
 import { lineArea, Ornament } from './Ornaments';
+import { PlainBody } from './PlainBody';
+import type { PlainBodyProps } from './PlainBody';
+import {
+  composePlainSheet,
+  PLAIN_BODY_DELAY_MS,
+  PLAIN_EXIT_MS,
+  plainNextTurnInMs,
+  plainPageIndex,
+  plainPageOpacity,
+} from './plainSheet';
+import type { PlainPage, PlainSheet } from './plainSheet';
 import { accentBody, contextInk, inkBody, surgeAccent, surgeInk } from './surgeColors';
 import type { BeatSharedValues } from './useBeatSharedValues';
 
@@ -63,6 +74,21 @@ export type StageSource =
       direction: SongDirection;
       reason: UnsyncedKind;
       /** As for `synced`: the recognition drop fires for a new song with or without lyrics. */
+      dropAtMs?: number | null;
+    }
+  | {
+      /**
+       * A recognized song whose lyrics are plain text without times (design
+       * spec §7, 2026-11-10). The stage prints them as a lyric sheet
+       * (plainSheet.ts) that never follows the song: a small heading, the
+       * body a page at a time on a fixed interval, the band meter, an honest
+       * note. Only text with something printable comes as this kind.
+       */
+      kind: 'plain';
+      track: NonNullable<IdleTrack>;
+      direction: SongDirection;
+      text: string;
+      /** As for `synced`; on the sheet only its heading's title takes the drop. */
       dropAtMs?: number | null;
     }
   | { kind: 'idle'; direction: SongDirection | null; track: IdleTrack };
@@ -320,6 +346,19 @@ const DROP_LINE_DONE = 'drop:done';
 const EXIT_SLACK_MS = 80;
 /** The idle clock ticks this long after each second boundary, so a timer firing early still lands in the new second. */
 const CLOCK_TICK_SLACK_MS = 15;
+/** Likewise for the lyric sheet's page turns. */
+const PAGE_TICK_SLACK_MS = 15;
+
+/** The lyric sheet's page on stage, as the body last drew it (what a leaving body fades from). */
+interface ShownBody {
+  key: string;
+  page: PlainPage;
+  pageIndex: number;
+  pageCount: number;
+  startMs: number;
+  font: FontKey;
+  sizePx: number;
+}
 
 /**
  * One recognition drop (design spec §7), keyed by its fire time. The stage
@@ -351,7 +390,8 @@ interface DropPlay {
  * glyphs (or the idle composition) on a second Canvas stacked above it.
  *
  * Layout runs on the JS thread only when the source, viewport or typefaces
- * change (the idle clock also once a second); all motion is derived on the UI
+ * change (the idle clock also once a second, the lyric sheet once a page
+ * turn); all motion is derived on the UI
  * thread from the `time` shared value and the beat shared values.
  */
 export function LyricStage({
@@ -404,6 +444,7 @@ export function LyricStage({
   const lines = source.kind === 'synced' ? source.lines : null;
   const scheduled = source.kind === 'synced' ? source.scheduled : null;
   const unsynced = source.kind === 'unsynced' ? source : null;
+  const plain = source.kind === 'plain' ? source : null;
   const songDirection = source.direction;
   const lineIndex = scheduled?.index ?? -1;
   const lineIsEmpty = scheduled?.isEmpty ?? true;
@@ -439,6 +480,26 @@ export function LyricStage({
     );
   }, [area, faces, fonts, unsyncedArtist, unsyncedTitle, viewport]);
 
+  // The lyric sheet of a recognized song with plain lyrics only (plainSheet.ts):
+  // its heading's title is the line on stage below; the body, the rest of the
+  // heading, the meter and the note are drawn beside it.
+  const plainTitle = plain?.track.title ?? null;
+  const plainArtist = plain?.track.artist ?? null;
+  const plainText = plain?.text ?? null;
+  const sheet = useMemo<PlainSheet | null>(() => {
+    if (fonts === null || area === null || plainTitle === null || plainArtist === null || plainText === null) {
+      return null;
+    }
+    return composePlainSheet(
+      { title: plainTitle, artist: plainArtist },
+      plainText,
+      faces,
+      viewport,
+      area,
+      (font, weight) => measureWith(fonts, font, weight),
+    );
+  }, [area, faces, fonts, plainArtist, plainText, plainTitle, viewport]);
+
   const lineScene = useMemo<LineScene | null>(() => {
     if (fonts === null || area === null || numeralFont === null) return null;
     if (nameplate !== null) {
@@ -447,6 +508,19 @@ export function LyricStage({
         index: TITLE_INDEX,
         direction: nameplate.title.direction,
         layout: nameplate.title.layout,
+        prev: null,
+        next: null,
+      };
+    }
+    if (sheet !== null) {
+      // A key of its own: the sheet and the nameplate of the same song are
+      // different stages (a re-resolution between them hands over by exit
+      // and rise).
+      return {
+        key: `plain:${plainArtist}/${plainTitle}`,
+        index: TITLE_INDEX,
+        direction: sheet.title.direction,
+        layout: sheet.title.layout,
         prev: null,
         next: null,
       };
@@ -484,30 +558,34 @@ export function LyricStage({
     lines,
     nameplate,
     numeralFont,
+    plainArtist,
+    plainTitle,
+    sheet,
     songDirection,
     unsyncedArtist,
     unsyncedTitle,
     viewport,
   ]);
 
-  // When the nameplate on stage appeared, on the stage clock (performance.now()
-  // is the clock the anchor below tracks): its title's rise, or the drop that
-  // lands it, is timed from here. A lyric line is timed by its schedule.
-  const nameplateKey = nameplate !== null && lineScene !== null ? lineScene.key : null;
-  const nameplateKeyRef = useRef<string | null>(null);
-  const nameplateStartedAtRef = useRef(nowMonotonicMs);
-  if (nameplateKeyRef.current !== nameplateKey) {
-    nameplateKeyRef.current = nameplateKey;
-    nameplateStartedAtRef.current = performance.now();
+  // When the nameplate or lyric sheet on stage appeared, on the stage clock
+  // (performance.now() is the clock the anchor below tracks): its title's
+  // rise, or the drop that lands it, is timed from here, and so is the
+  // sheet's body. A lyric line is timed by its schedule.
+  const plateKey = (nameplate !== null || sheet !== null) && lineScene !== null ? lineScene.key : null;
+  const plateKeyRef = useRef<string | null>(null);
+  const plateStartedAtRef = useRef(nowMonotonicMs);
+  if (plateKeyRef.current !== plateKey) {
+    plateKeyRef.current = plateKey;
+    plateStartedAtRef.current = performance.now();
   }
-  const lineStartedAtMs = scheduled?.startedAtMs ?? (nameplateKey !== null ? nameplateStartedAtRef.current : 0);
+  const lineStartedAtMs = scheduled?.startedAtMs ?? (plateKey !== null ? plateStartedAtRef.current : 0);
 
   // The recognition drop (design spec §7), once per fire time. Computed in
   // render so the line shown in the very same render can take it: the head
   // it lands on (the next beat head, if the grid is trusted), the idle glyphs
   // on stage at the fire, and when a fresh idle may rise after their scatter.
   // Skipped under reduced motion, where the stage clock does not advance.
-  const dropAtMs = source.kind === 'synced' || source.kind === 'unsynced' ? (source.dropAtMs ?? null) : null;
+  const dropAtMs = source.kind === 'idle' ? null : (source.dropAtMs ?? null);
   const dropRef = useRef<Drop | null>(null);
   // The idle composition shown in the previous render (null while a line is on
   // stage): the glyphs a drop firing now sends scattering. With it, when idle
@@ -638,6 +716,84 @@ export function LyricStage({
     return () => clearTimeout(id);
   }, [exiting, beatValues]);
 
+  // The lyric sheet's body (design spec §7, 2026-11-10): from
+  // PLAIN_BODY_DELAY_MS after the sheet came on, one page at a time on the
+  // fixed PLAIN_PAGE_MS interval, on the wall clock. Nothing the music does
+  // reaches it (not the beat, the bands, the surge, nor the drop's head). The
+  // page index is state, set by a timer at each page boundary, where the
+  // opacity is 0, so the swap is unseen; the fades are derived on the UI
+  // thread from the stage clock. React re-renders once per page turn.
+  const bodyStartMs = sheet !== null && plateKey !== null ? plateStartedAtRef.current + PLAIN_BODY_DELAY_MS : null;
+  const pageCount = sheet?.body.pages.length ?? 0;
+  const [plainPage, setPlainPage] = useState(0);
+  useLayoutEffect(() => {
+    if (bodyStartMs === null) return undefined;
+    let id: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      const elapsed = performance.now() - bodyStartMs;
+      setPlainPage(plainPageIndex(elapsed, pageCount));
+      const wait = plainNextTurnInMs(elapsed, pageCount);
+      if (wait !== null) id = setTimeout(tick, wait + PAGE_TICK_SLACK_MS);
+    };
+    tick();
+    return () => clearTimeout(id);
+  }, [bodyStartMs, pageCount]);
+  const pageIndex = Math.min(plainPage, Math.max(0, pageCount - 1));
+  // The folio says which leaf of the sheet is up, never where the song is.
+  const folio = sheet?.folios[pageIndex] ?? null;
+  const shownBody = useMemo<ShownBody | null>(
+    () =>
+      sheet === null || plateKey === null || bodyStartMs === null
+        ? null
+        : {
+            key: plateKey,
+            page: sheet.body.pages[pageIndex]!,
+            pageIndex,
+            pageCount,
+            startMs: bodyStartMs,
+            font: sheet.body.font,
+            sizePx: sheet.body.sizePx,
+          },
+    [bodyStartMs, pageCount, pageIndex, plateKey, sheet],
+  );
+  const bodyTiming = useMemo<PlainBodyProps['timing'] | null>(
+    () =>
+      shownBody === null
+        ? null
+        : { kind: 'page', startMs: shownBody.startMs, pageCount: shownBody.pageCount, pageIndex: shownBody.pageIndex },
+    [shownBody],
+  );
+  // The leaving body: when the sheet leaves the stage (or gives way to
+  // another song's sheet), its page fades out over the fixed PLAIN_EXIT_MS
+  // from the opacity it had, then is removed. Not under reduced motion.
+  const [leavingBody, setLeavingBody] = useState<{
+    body: ShownBody;
+    timing: Extract<PlainBodyProps['timing'], { kind: 'leaving' }>;
+  } | null>(null);
+  const lastBodyRef = useRef<ShownBody | null>(null);
+  useEffect(() => {
+    const prev = lastBodyRef.current;
+    lastBodyRef.current = shownBody;
+    if (prev === null || (shownBody !== null && shownBody.key === prev.key)) return;
+    const now = performance.now();
+    const elapsed = now - prev.startMs;
+    const fromOpacity =
+      plainPageIndex(elapsed, prev.pageCount) === prev.pageIndex ? plainPageOpacity(elapsed, prev.pageCount) : 0;
+    if (reducedMotion || fromOpacity <= 0) {
+      setLeavingBody(null);
+      return;
+    }
+    setLeavingBody({ body: prev, timing: { kind: 'leaving', startMs: now, fromOpacity } });
+  }, [shownBody, reducedMotion]);
+  useEffect(() => {
+    if (leavingBody === null) return undefined;
+    const id = setTimeout(
+      () => setLeavingBody((current) => (current === leavingBody ? null : current)),
+      PLAIN_EXIT_MS + EXIT_SLACK_MS,
+    );
+    return () => clearTimeout(id);
+  }, [leavingBody]);
+
   const showIdle = fonts !== null && scene === null;
   const trackTitle = source.track?.title ?? null;
   const trackArtist = source.track?.artist ?? null;
@@ -715,12 +871,18 @@ export function LyricStage({
   // viewport; the clock's focus does not move with the seconds); the
   // background slides the lamp there on the UI thread.
   const focusTarget = useSharedValue<Uv>(IDLE_FOCUS);
+  // On the lyric sheet the lamp lies on the body (all its pages together, so
+  // a page turn does not move it), not on the small heading.
+  const sheetBounds = sheet !== null && scene !== null ? sheet.body.bounds : null;
   const sceneBounds = scene?.layout.bounds ?? null;
   const idleFocus = idle?.focus ?? null;
   const idleAnchor = idle?.glyphs.find((g) => g.face === 'primary' && g.accent === true) ?? null;
   let focusX = IDLE_FOCUS.x;
   let focusY = IDLE_FOCUS.y;
-  if (sceneBounds !== null) {
+  if (sheetBounds !== null) {
+    focusX = (sheetBounds.x + sheetBounds.width / 2) / width;
+    focusY = (sheetBounds.y + sheetBounds.height / 2) / height;
+  } else if (sceneBounds !== null) {
     focusX = (sceneBounds.x + sceneBounds.width / 2) / width;
     focusY = (sceneBounds.y + sceneBounds.height / 2) / height;
   } else if (idleFocus !== null) {
@@ -1009,6 +1171,84 @@ export function LyricStage({
                 opacity={CAPTION_OPACITY}
                 {...({ testID: 'unsynced-note' } as object)}
               />
+            </>
+          ) : null}
+          {leavingBody !== null ? (
+            <PlainBody
+              page={leavingBody.body.page}
+              font={fonts(leavingBody.body.font, 'regular', leavingBody.body.sizePx)}
+              color={palette.ink}
+              time={time}
+              timing={leavingBody.timing}
+              reducedMotion={reducedMotion}
+              testID="plain-page-leaving"
+            />
+          ) : null}
+          {plain !== null && sheet !== null && scene !== null ? (
+            <>
+              {/* The lyric sheet (plainSheet.ts), beside its heading's title
+                  that the block above draws as the line on stage: the body a
+                  page at a time in the palette's own ink (flat, no shadow, no
+                  motion, never highlighted), the artist small and flat, the
+                  accent rule under the heading, the band meter on the foot of
+                  the print area, the note and the folio on the caption row. */}
+              {shownBody !== null && bodyTiming !== null ? (
+                <PlainBody
+                  page={shownBody.page}
+                  font={fonts(shownBody.font, 'regular', shownBody.sizePx)}
+                  color={palette.ink}
+                  time={time}
+                  timing={bodyTiming}
+                  reducedMotion={reducedMotion}
+                  testID="plain-page"
+                />
+              ) : null}
+              {sheet.artist.glyphs.length > 0 ? (
+                <Group opacity={CAPTION_OPACITY} {...({ testID: 'plain-artist' } as object)}>
+                  <GlyphLayer
+                    {...shared}
+                    body={null}
+                    glyphs={sheet.artist.glyphs}
+                    fontFor={plateSecondary}
+                    lineStartedAtMs={lineStartedAtMs}
+                    lineLandsAtMs={lineLandsAtMs}
+                    entrance="fade"
+                    hold="still"
+                    accent={false}
+                    seed={scene.index + 1}
+                    testIDPrefix="plain-artist-glyph"
+                  />
+                </Group>
+              ) : null}
+              <Rect {...sheet.rule} color={accentNow} {...({ testID: 'plain-rule' } as object)} />
+              <BandMeter
+                x={sheet.meter.x}
+                width={sheet.meter.width}
+                baseline={sheet.meter.baseline}
+                beat={beatValues}
+                ink={inkNow}
+                reducedMotion={reducedMotion}
+              />
+              <Text
+                x={sheet.note.x}
+                y={sheet.note.y}
+                text={RECOGNITION_COPY.lyrics_plain_sheet}
+                font={gothic(sheet.note.sizePx)}
+                color={inkNow}
+                opacity={CAPTION_OPACITY}
+                {...({ testID: 'plain-note' } as object)}
+              />
+              {folio !== null ? (
+                <Text
+                  x={folio.x}
+                  y={folio.y}
+                  text={folio.text}
+                  font={gothic(folio.sizePx)}
+                  color={inkNow}
+                  opacity={CAPTION_OPACITY}
+                  {...({ testID: 'plain-folio' } as object)}
+                />
+              ) : null}
             </>
           ) : null}
           {idle !== null && idleBase !== null ? (

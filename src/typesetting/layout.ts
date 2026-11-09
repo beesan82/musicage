@@ -206,11 +206,8 @@ function layoutAtSize(
     for (const { cell, line, offset } of slots) {
       const centerX = (area.left + area.right) / 2 - line * sizePx * COLUMN_GAP;
       const cellTop = top + offset;
-      const rotated = ROTATED_IN_VERTICAL.test(cell.char);
-      const shift = !rotated && SHIFTED_IN_VERTICAL.test(cell.char) ? cell.sizePx / 2 : 0;
-      const x = rotated ? centerX - (-cell.ascent - cell.descent) / 2 : centerX - cell.advance / 2 + shift;
-      const y = rotated ? cellTop + (cell.sizePx - cell.advance) / 2 : cellTop - cell.ascent - shift;
-      glyphs.push(place(cell, x, y, rotated ? 90 : 0));
+      const { x, y, rotateDeg } = verticalOrigin(cell.char, cell, cell.sizePx, centerX, cellTop);
+      glyphs.push(place(cell, x, y, rotateDeg));
       boxes.push({ x: centerX - cell.sizePx / 2, y: cellTop, width: cell.sizePx, height: cell.sizePx });
     }
   } else {
@@ -226,6 +223,25 @@ function layoutAtSize(
     }
   }
   return { glyphs, sizePx, bounds: union(boxes), columns };
+}
+
+/**
+ * Where a glyph of a vertical column is drawn: its baseline origin and turn,
+ * for a square cell of `sizePx` whose top is `cellTop` on a column centred on
+ * `centerX` (see the coordinate convention at the top of this file).
+ */
+export function verticalOrigin(
+  char: string,
+  metrics: { advance: number; ascent: number; descent: number },
+  sizePx: number,
+  centerX: number,
+  cellTop: number,
+): { x: number; y: number; rotateDeg: 0 | 90 } {
+  const rotated = ROTATED_IN_VERTICAL.test(char);
+  const shift = !rotated && SHIFTED_IN_VERTICAL.test(char) ? sizePx / 2 : 0;
+  return rotated
+    ? { x: centerX - (-metrics.ascent - metrics.descent) / 2, y: cellTop + (sizePx - metrics.advance) / 2, rotateDeg: 90 }
+    : { x: centerX - metrics.advance / 2 + shift, y: cellTop - metrics.ascent - shift, rotateDeg: 0 };
 }
 
 // Greedy wrap: a cell that would overflow `limit` starts the next line. Spaces keep

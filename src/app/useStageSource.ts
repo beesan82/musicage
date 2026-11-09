@@ -21,6 +21,7 @@ import type { ScheduledLine } from '../sync/lineScheduler';
 import { songPositionMs } from '../sync/lyricClock';
 import type { StageSource } from '../typesetting/LyricStage';
 import type { IdleTrack } from '../typesetting/idleComposition';
+import { plainParagraphs } from '../typesetting/plainSheet';
 import { useBeatSharedValues } from '../typesetting/useBeatSharedValues';
 import type { BeatSharedValues } from '../typesetting/useBeatSharedValues';
 
@@ -72,6 +73,7 @@ const sameLine = (a: ScheduledLine | null, b: ScheduledLine) =>
  * Everything the lyric stage needs from the app: the beat (one engine fed by
  * the ear stream), the source (the fixture song while it plays, else the
  * recognized song synced to its ShazamKit anchor, else a recognized song
+ * with plain lyrics only as a `plain` lyric sheet, else a recognized song
  * without synced lyrics as an `unsynced` nameplate, else idle), and the
  * `performance.now()` clock the scheduled line is on. Ear frames never
  * re-render on their own: the beat is published at once on a new pulse head
@@ -204,6 +206,13 @@ export function useStageSource({
   // instrumental record, or no record. It gets the nameplate, not idle.
   const unsyncedKind: UnsyncedKind | null =
     result !== null && isUnsyncedKind(result.kind) ? result.kind : null;
+  // Plain lyrics with something printable get the lyric sheet instead (design
+  // spec §7, 2026-11-10); blank text stays the nameplate.
+  const plainText = result?.kind === 'plain' ? result.text : null;
+  const printablePlain = useMemo(
+    () => (plainText !== null && plainParagraphs(plainText).length > 0 ? plainText : null),
+    [plainText],
+  );
 
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   const previousRef = useRef<ScheduledLine | null>(null);
@@ -343,28 +352,38 @@ export function useStageSource({
         dropAtMs,
       };
     }
-    // The nameplate waits for the drop effect to have seen the track (see
-    // confirmedTrackId), and never shows under the fixture: while the fixture
-    // is active but its first tick is pending the stage stays idle, as it
-    // does before a recognized song's first line. In a room quiet for
-    // SILENCE_REARM_MS it gives way to idle (with the track's caption), as a
-    // synced line does, and comes back when sound does: the song is still the
-    // one recognized, so there is no new drop.
+    // The nameplate (and the lyric sheet) waits for the drop effect to have
+    // seen the track (see confirmedTrackId), and never shows under the
+    // fixture: while the fixture is active but its first tick is pending the
+    // stage stays idle, as it does before a recognized song's first line. In
+    // a room quiet for SILENCE_REARM_MS it gives way to idle (with the
+    // track's caption), as a synced line does, and comes back when sound
+    // does: the song is still the one recognized, so there is no new drop.
     if (
-      unsyncedKind !== null &&
       !active &&
       !roomQuiet &&
       confirmedTrackId === namedTrackId &&
       recognizedTrack !== null &&
       recognizedDirection !== null
     ) {
-      return {
-        kind: 'unsynced',
-        track: recognizedTrack,
-        direction: recognizedDirection,
-        reason: unsyncedKind,
-        dropAtMs,
-      };
+      if (printablePlain !== null) {
+        return {
+          kind: 'plain',
+          track: recognizedTrack,
+          direction: recognizedDirection,
+          text: printablePlain,
+          dropAtMs,
+        };
+      }
+      if (unsyncedKind !== null) {
+        return {
+          kind: 'unsynced',
+          track: recognizedTrack,
+          direction: recognizedDirection,
+          reason: unsyncedKind,
+          dropAtMs,
+        };
+      }
     }
     return { kind: 'idle', direction: recognizedDirection, track: recognizedTrack };
   }, [
@@ -374,6 +393,7 @@ export function useStageSource({
     dropAtMs,
     fixtureDirection,
     namedTrackId,
+    printablePlain,
     recognizedDirection,
     recognizedTrack,
     roomQuiet,

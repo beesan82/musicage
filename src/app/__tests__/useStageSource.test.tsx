@@ -300,7 +300,9 @@ describe('useStageSource', () => {
   });
 
   describe('a recognized song the stage cannot follow (no synced lyrics)', () => {
-    const plain: LyricResult = { kind: 'plain', track, text: '夜の底で' };
+    // Plain text with nothing printable stays the nameplate (printable plain
+    // text gets the lyric sheet: see the describe below).
+    const plain: LyricResult = { kind: 'plain', track, text: ' \n\n　\n' };
     const unavailable: LyricResult = { kind: 'lyrics_unavailable', track };
     const instrumental: LyricResult = { kind: 'instrumental', track };
     const unsyncedOf = (inputs: StageInputs) => {
@@ -371,7 +373,7 @@ describe('useStageSource', () => {
       const hook = await setup({ result: plain });
 
       clockMs = 20_000;
-      const other: LyricResult = { kind: 'plain', track: { ...track, trackId: 'shazam-2', title: '別の歌' }, text: 'x' };
+      const other: LyricResult = { kind: 'lyrics_unavailable', track: { ...track, trackId: 'shazam-2', title: '別の歌' } };
       await hook.rerender({ status: 'listening', playback: playbackOff, result: other });
       const source = unsyncedOf(hook.result.current);
       expect(source.dropAtMs).toBe(20_000);
@@ -452,6 +454,113 @@ describe('useStageSource', () => {
       await act(async () => emitter.emit({ timestampMs: 890, rms: 0.1, low: 0.1, mid: 0.9, high: 0.8 }));
       expect(values.mid.value).toBeGreaterThan(0.35);
       expect(values.high.value).toBeGreaterThan(0.3);
+    });
+  });
+
+  describe('a recognized song with plain lyrics only: the lyric sheet (design spec §7, 2026-11-10)', () => {
+    // Fictional text, written for these tests.
+    const SHEET_TEXT = '灯のない部屋\n針を下ろす\n\n\n回る黒い円';
+    const plainSheet: LyricResult = { kind: 'plain', track, text: SHEET_TEXT };
+    const unavailable: LyricResult = { kind: 'lyrics_unavailable', track };
+    const plainOf = (inputs: StageInputs) => {
+      const { source } = inputs;
+      if (source.kind !== 'plain') throw new Error(`expected a plain source, got ${source.kind}`);
+      return source;
+    };
+
+    test('printable plain text is a plain source carrying the text, the track, a direction and the drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plainSheet });
+      const source = plainOf(hook.result.current);
+      expect(source.text).toBe(SHEET_TEXT);
+      expect(source.track).toEqual({ title: track.title, artist: track.artist });
+      // The text is not material for the direction: no line directions, the
+      // palette from the song's seed as for any song without synced lines.
+      expect(source.direction.lines).toHaveLength(0);
+      expect(source.direction.palette.background).toMatch(/^#/);
+      expect(source.dropAtMs).toBe(10_500);
+      expect(hook.result.current.pastOutro).toBe(false);
+    });
+
+    test('the render in which the result arrives is idle with the track; the sheet follows with the drop', async () => {
+      const hook = await setup({ result: null });
+      clockMs = 10_500;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plainSheet });
+      expect(plainOf(hook.result.current).dropAtMs).toBe(10_500);
+      const first = sources.find((s) => s.kind !== 'idle' || s.track !== null);
+      expect(first).toEqual({
+        kind: 'idle',
+        direction: expect.objectContaining({ lines: [] }),
+        track: { title: track.title, artist: track.artist },
+      });
+      for (const s of sources) if (s.kind === 'plain') expect(s.dropAtMs).toBe(10_500);
+    });
+
+    test('plain ⇄ no lyrics for the same trackId swaps sheet and nameplate without a new drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plainSheet });
+      clockMs = 20_000;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: unavailable });
+      expect(hook.result.current.source).toMatchObject({ kind: 'unsynced', reason: 'lyrics_unavailable', dropAtMs: 10_500 });
+      clockMs = 30_000;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plainSheet });
+      expect(plainOf(hook.result.current).dropAtMs).toBe(10_500);
+    });
+
+    test('a synced song replaced by another song with plain lyrics fires that song’s drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup();
+      expect(syncedOf(hook.result.current).scheduled.index).toBe(0);
+      clockMs = 20_000;
+      const other: LyricResult = { kind: 'plain', track: { ...track, trackId: 'shazam-2', title: '別の歌' }, text: '別の部屋' };
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: other });
+      const source = plainOf(hook.result.current);
+      expect(source.dropAtMs).toBe(20_000);
+      expect(source.track.title).toBe('別の歌');
+    });
+
+    test('a quiet room hands the sheet to idle with the track; sound brings it back without a new drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plainSheet });
+      const emitFor = async (fromMs: number, forMs: number, level: number) => {
+        for (let t = fromMs; t <= fromMs + forMs; t += 50) {
+          clockMs = 10_000 + t;
+          await act(async () => emitter.emit(frame(clockMs, level)));
+        }
+      };
+      await emitFor(1_000, 4_150, 0);
+      expect(hook.result.current.source).toEqual({
+        kind: 'idle',
+        direction: expect.objectContaining({ lines: [] }),
+        track: { title: track.title, artist: track.artist },
+      });
+      await emitFor(5_200, 200, 0.3);
+      expect(plainOf(hook.result.current).dropAtMs).toBe(10_500);
+    });
+
+    test('the fixture wins over the sheet while it is active', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plainSheet });
+      const playing: FixturePlayback = {
+        ...playbackOff,
+        active: true,
+        anchor: { offsetMs: 2_500, anchoredAtMonotonicMs: clockMs },
+      };
+      await hook.rerender({ status: 'listening', playback: playing, result: plainSheet });
+      expect(syncedOf(hook.result.current).track).toEqual(FIXTURE_TRACK);
+      const fixtureFrom = sources.findIndex((s) => s.kind === 'synced');
+      for (const s of sources.slice(fixtureFrom)) expect(s.kind).not.toBe('plain');
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plainSheet });
+      expect(plainOf(hook.result.current).text).toBe(SHEET_TEXT);
+    });
+
+    test('the sheet never feeds the accent line of the surge', async () => {
+      const hook = await setup({ result: plainSheet });
+      expect(hook.result.current.source.kind).toBe('plain');
+      for (let i = 0; i < 30; i += 1) {
+        await act(async () => emitter.emit(frame(i * 20, 0)));
+      }
+      expect(hook.result.current.beatValues.surge.value).toBe(0);
     });
   });
 

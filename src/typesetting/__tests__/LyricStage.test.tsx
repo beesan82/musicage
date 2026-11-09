@@ -8,7 +8,7 @@ import { lightHexFor, rgbaOf } from '../../direction/palettes';
 import { directSongByRules } from '../../direction/ruleBasedDirector';
 import { INK_TINT_MAX } from '../../direction/surge';
 import type { SongDirection } from '../../direction/types';
-import { unsyncedNote } from '../../recognition/recognitionCopy';
+import { RECOGNITION_COPY, unsyncedNote } from '../../recognition/recognitionCopy';
 import type { LyricLine, UnsyncedKind } from '../../recognition/types';
 import { IDLE_FOCUS } from '../../textures/surfaceModel';
 import * as textureBackground from '../../textures/TextureBackground';
@@ -16,12 +16,19 @@ import { dropDip, hexToRgb01 } from '../../textures/textureShader';
 import { METER_BASE_HEIGHT, METER_RULE_COUNT, METER_RULE_WIDTH } from '../bandMeter';
 import * as fonts from '../fonts';
 import * as idleComposition from '../idleComposition';
-import { composeClock } from '../idleComposition';
+import { composeClock, UNRECOGNIZED_IDLE_FACES } from '../idleComposition';
 import { layoutLine, printArea, SIZE_RATIO } from '../layout';
 import { anchoredTime, LyricStage } from '../LyricStage';
 import type { LyricStageProps } from '../LyricStage';
 import * as motion from '../motion';
 import { lineArea } from '../Ornaments';
+import {
+  composePlainSheet,
+  PLAIN_BODY_DELAY_MS,
+  PLAIN_EXIT_MS,
+  PLAIN_PAGE_FADE_MS,
+  PLAIN_PAGE_MS,
+} from '../plainSheet';
 import type { BeatSharedValues } from '../useBeatSharedValues';
 
 const METRICS = {
@@ -1623,6 +1630,410 @@ describe('transitions: synced ⇄ nameplate ⇄ idle clock ⇄ lost', () => {
     expect(view.queryByTestId('idle-caption-rule')).toBeNull();
     expect(view.queryAllByTestId(/^nameplate-artist-glyph-/)).toHaveLength(0);
     nowSpy.mockRestore();
+  });
+});
+
+describe('a recognised song with plain lyrics only: the lyric sheet (design spec §7, 2026-11-10)', () => {
+  const track = { title: '架空の歌', artist: '架空の人' };
+  const songDirection = directSongByRules([], 'p');
+  const { palette } = songDirection;
+  const S = 390 * SIZE_RATIO.s;
+  // Fictional texts, written (or generated) here: never a real song's words.
+  const SHORT = '灯のない部屋\n針を下ろす';
+  const LONG = Array.from({ length: 6 }, (_, p) =>
+    Array.from({ length: 4 }, (_, l) => `第${p}連の${l}行目です`).join('\n'),
+  ).join('\n\n');
+  const sheetOf = (text: string) =>
+    composePlainSheet(track, text, UNRECOGNIZED_IDLE_FACES, STAGE_VIEWPORT, STAGE_AREA, () => jestMeasure)!;
+  const plainSource = (text = SHORT, dropAtMs: number | null = null): LyricStageProps['source'] => ({
+    kind: 'plain',
+    track,
+    direction: songDirection,
+    text,
+    dropAtMs,
+  });
+  const idleWith = (t: { title: string; artist: string } | null): LyricStageProps['source'] => ({
+    kind: 'idle',
+    direction: t === null ? null : songDirection,
+    track: t,
+  });
+  // Another fictional song with synced lines (xl, rise, still: no context lines).
+  const songA = { title: '夜の別歌', artist: '架空の組' };
+  const aDirection: SongDirection = {
+    ...direction,
+    lines: direction.lines.map((line) => ({ ...line, size: 'xl' as const, entrance: 'rise' as const, hold: 'still' as const })),
+  };
+  const syncedA = (dropAtMs: number | null, startedAtMs: number): LyricStageProps['source'] => ({
+    kind: 'synced',
+    lines: toLines(TEXTS),
+    direction: aDirection,
+    scheduled: { index: 0, startedAtMs, isEmpty: false },
+    track: songA,
+    dropAtMs,
+  });
+  const gridValues: BeatSharedValues = { ...beatValues, nextBeatAtMs: sv(10_300), periodMs: sv(500), confidence: sv(0.9) };
+
+  // Every test here mounts the stage once and lets time pass by re-rendering
+  // it (as MusicageApp does): the fake clock advances, performance.now()
+  // follows it from START, and nowMonotonicMs is performance.now() at render.
+  //
+  // The body's fades are derived from the stage clock, which only the stage's
+  // frame callback advances, so these tests need Reanimated's jest frame loop
+  // to run. Two things in its jest runtime get in the way:
+  // - The registry (global._frameCallbackRegistry) is prepared on a real
+  //   setTimeout(0) queued when the module loads. A run that never yields a
+  //   macrotask before advancing the fake timers would register a callback
+  //   into nothing ("Cannot read properties of undefined (reading
+  //   'registerFrameCallback')"): beforeAll yields one.
+  // - The registry outlives each test's stage. Unregistering a stage unmounted
+  //   at cleanup is queued on the fake timers and dropped with them, so earlier
+  //   tests' callbacks stay "active", and the registry only starts its loop
+  //   when the first callback becomes active: a later stage's clock would never
+  //   advance (the visual overhaul's stage B note). beforeEach empties the
+  //   active set so this test's stage starts the loop.
+  // performance.now() is spied for each test and always handed back in
+  // afterEach (before the fake timers are removed), even when a test throws.
+  const START = 10_000;
+  type FrameRegistry = { activeFrameCallbacks: Set<number>; nextCallId: number; previousFrameTimestamp: number | null };
+  let nowSpy: jest.SpyInstance;
+  let jumpedMs = 0;
+  beforeAll(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  beforeEach(() => {
+    const registry = (globalThis as unknown as { _frameCallbackRegistry?: FrameRegistry })._frameCallbackRegistry;
+    if (registry === undefined) throw new Error("Reanimated's jest frame registry was not prepared");
+    registry.activeFrameCallbacks.clear();
+    registry.nextCallId += 1;
+    registry.previousFrameTimestamp = null;
+    jumpedMs = 0;
+    const t0 = Date.now();
+    nowSpy = jest.spyOn(performance, 'now').mockImplementation(() => START + jumpedMs + (Date.now() - t0));
+  });
+  afterEach(() => {
+    nowSpy.mockRestore();
+  });
+
+  const stage = (source: LyricStageProps['source'], extra: Partial<LyricStageProps> = {}) =>
+    inProvider(
+      <LyricStage beatValues={gridValues} source={source} beat={beat} nowMonotonicMs={performance.now()} {...extra} />,
+    );
+  const flushUI = () =>
+    act(async () => {
+      jest.advanceTimersByTime(0);
+    });
+  /**
+   * Lets `ms` pass on the fake clock, a second per act so each timer's
+   * re-render (a page turn, the idle clock) lands. A re-render that changes a
+   * derived value's dependencies (a page turn's timing) restarts its mapper on
+   * a setTimeout(0): the closing flush runs it, so what the test reads next is
+   * derived from the new props.
+   */
+  const pass = async (ms: number) => {
+    if (!(ms > 0)) throw new Error(`pass(${ms}): the clock only moves forward`);
+    let left = ms;
+    while (left > 0) {
+      const step = Math.min(left, 1000);
+      await act(async () => {
+        jest.advanceTimersByTime(step);
+      });
+      left -= step;
+    }
+    await flushUI();
+  };
+  /** Lets the clock pass until performance.now() reads `at`. */
+  const passTo = (at: number) => pass(at - performance.now());
+  const inputsOf = (spy: jest.SpyInstance) => spy.mock.calls.map(([input]) => input as motion.MotionInput);
+  const runTexts = (view: { getAllByTestId: (id: RegExp) => unknown[] }) =>
+    (view.getAllByTestId(/^plain-page-run-/) as Node[]).map((n) => n.props.text as string);
+  const pageOpacity = (view: { getByTestId: (id: string) => unknown }, id = 'plain-page') =>
+    (view.getByTestId(id) as Node).props.opacity.value as number;
+  // The body's own start: the sheet comes on at START in every test that does not say otherwise.
+  const BODY_START = START + PLAIN_BODY_DELAY_MS;
+
+  test('prints the small heading as the line on stage, the artist, the rule, a page of the body, the meter and the honest note', async () => {
+    const view = await render(stage(plainSource()));
+    const title = view.getAllByTestId(/^glyph-/) as unknown as Node[];
+    expect(title).toHaveLength(4);
+    for (const glyph of title) expect(textsIn(glyph)[0]!.props.font.getSize()).toBe(S);
+    expect(view.getAllByTestId(/^plain-artist-glyph-/)).toHaveLength(4);
+    expect(view.getByTestId('plain-artist').props.opacity).toBe(0.6);
+    expect(view.getByTestId('plain-rule').props).toMatchObject({ x: 24, width: 12, height: 2 });
+    expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_RULE_COUNT);
+    const note = view.getByTestId('plain-note').props;
+    expect(note.text).toBe(RECOGNITION_COPY.lyrics_plain_sheet);
+    expect(note).toMatchObject({ x: 24, y: STAGE_AREA.captionBaseline, opacity: 0.6 });
+    expect(runTexts(view)).toEqual(sheetOf(SHORT).body.pages[0]!.runs.map((r) => r.text));
+    // One page: no folio. Nothing of the nameplate or the idle clock.
+    expect(view.queryByTestId('plain-folio')).toBeNull();
+    expect(view.queryByTestId('unsynced-note')).toBeNull();
+    expect(view.queryByTestId('idle-caption')).toBeNull();
+    expect(view.queryByTestId('idle-shadow')).toBeNull();
+    expect(view.queryAllByTestId(/^exit-/)).toHaveLength(0);
+  });
+
+  test('the body is flat in the palette’s own ink (not the surge’s), unshadowed, and asks nothing of the motion', async () => {
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    const surging: BeatSharedValues = { ...gridValues, surge: sv(1), pulse: sv(1), energy: sv(1) };
+    const view = await render(stage(plainSource(), { beatValues: surging }));
+    await flushUI();
+    const expectFlat = () => {
+      const runs = view.getAllByTestId(/^plain-page-run-/) as unknown as Node[];
+      expect(runs.length).toBeGreaterThan(0);
+      for (const run of runs) {
+        expect(run.props.color).toBe(palette.ink);
+        expect(run.props.font.getSize()).toBe(S);
+      }
+      const page = view.getByTestId('plain-page') as unknown as Node;
+      expect(page.queryAll((n) => n.type === 'skLinearGradient')).toHaveLength(0);
+      const shadowed = view.getByTestId('line-shadow') as unknown as Node;
+      expect(shadowed.queryAll((n) => n.props.testID === 'plain-page')).toHaveLength(0);
+    };
+    expectFlat();
+    // Through the body's fade-in and well after, frame by frame in a surge on
+    // every beat: the body is still the same flat ink, and fully up.
+    await pass(PLAIN_BODY_DELAY_MS + PLAIN_PAGE_FADE_MS + 2_000);
+    expectFlat();
+    expect(pageOpacity(view)).toBe(1);
+    // Only the heading's title and the artist (four glyphs each) have motion,
+    // and both stand still once in: the body has no glyph motion at all.
+    const inputs = inputsOf(spy);
+    expect(inputs.length).toBeGreaterThan(0);
+    for (const i of inputs) {
+      expect(i.glyphCount).toBe(4);
+      expect(i.hold).toBe('still');
+    }
+  });
+
+  test('the body comes in PLAIN_BODY_DELAY_MS after the sheet came on, on the stage clock, and a single page stays', async () => {
+    const view = await render(stage(plainSource()));
+    await flushUI();
+    // The sheet's start: the body is not up yet…
+    expect(pageOpacity(view)).toBe(0);
+    // …nor just before the delay is over.
+    await passTo(BODY_START - 100);
+    expect(pageOpacity(view)).toBe(0);
+    // Halfway through its fade.
+    await passTo(BODY_START + PLAIN_PAGE_FADE_MS / 2);
+    expect(pageOpacity(view)).toBeGreaterThan(0);
+    expect(pageOpacity(view)).toBeLessThan(1);
+    // Past the fade: up.
+    await passTo(BODY_START + PLAIN_PAGE_FADE_MS + 500);
+    expect(pageOpacity(view)).toBe(1);
+
+    // An hour on (the app re-renders with the clock an hour later; the stage
+    // clock lands on the new anchor): still the one page, never turned, no folio.
+    jumpedMs += 3_600_000;
+    await view.rerender(stage(plainSource()));
+    await pass(100);
+    expect(pageOpacity(view)).toBe(1);
+    expect(runTexts(view)).toEqual(sheetOf(SHORT).body.pages[0]!.runs.map((r) => r.text));
+    expect(view.queryByTestId('plain-folio')).toBeNull();
+  });
+
+  test('a long text turns its pages on the fixed PLAIN_PAGE_MS interval (the beat grid notwithstanding), round and round, with the folio', async () => {
+    const sheet = sheetOf(LONG);
+    expect(sheet.body.pages).toHaveLength(3);
+    const pageRuns = (i: number) => sheet.body.pages[i]!.runs.map((r) => r.text);
+    const view = await render(stage(plainSource(LONG)));
+    const folio = () => view.getByTestId('plain-folio').props.text as string;
+    await flushUI();
+    expect(runTexts(view)).toEqual(pageRuns(0));
+    expect(folio()).toBe('1 / 3');
+
+    // Mid-page, after dozens of beats (500 ms each) on the trusted grid: the
+    // first page fully up.
+    await passTo(BODY_START + PLAIN_PAGE_MS / 2);
+    expect(runTexts(view)).toEqual(pageRuns(0));
+    expect(folio()).toBe('1 / 3');
+    expect(pageOpacity(view)).toBe(1);
+    // Just before the boundary: still the first page, fading out.
+    await passTo(BODY_START + PLAIN_PAGE_MS - 200);
+    expect(runTexts(view)).toEqual(pageRuns(0));
+    expect(folio()).toBe('1 / 3');
+    expect(pageOpacity(view)).toBeGreaterThan(0);
+    expect(pageOpacity(view)).toBeLessThan(1);
+
+    // Just past it: the second page, fading in.
+    await passTo(BODY_START + PLAIN_PAGE_MS + 200);
+    expect(runTexts(view)).toEqual(pageRuns(1));
+    expect(folio()).toBe('2 / 3');
+    expect(pageOpacity(view)).toBeGreaterThan(0);
+    expect(pageOpacity(view)).toBeLessThan(1);
+    await passTo(BODY_START + PLAIN_PAGE_MS * 1.5);
+    expect(pageOpacity(view)).toBe(1);
+
+    await passTo(BODY_START + 2 * PLAIN_PAGE_MS + 200);
+    expect(runTexts(view)).toEqual(pageRuns(2));
+    expect(folio()).toBe('3 / 3');
+
+    // Round again to the first page.
+    await passTo(BODY_START + 3 * PLAIN_PAGE_MS + 200);
+    expect(runTexts(view)).toEqual(pageRuns(0));
+    expect(folio()).toBe('1 / 3');
+  }, 30_000);
+
+  test('the lamp lies on the body (all its pages), not on the heading, and a page turn does not move it', async () => {
+    const spy = jest.spyOn(textureBackground, 'TextureBackground');
+    const focusNow = () =>
+      (spy.mock.calls.at(-1)![0] as { focus?: { value: { x: number; y: number } } }).focus!.value;
+    const view = await render(stage(plainSource(LONG)));
+    await flushUI();
+    const b = sheetOf(LONG).body.bounds;
+    const expected = { x: (b.x + b.width / 2) / 390, y: (b.y + b.height / 2) / 844 };
+    expect(focusNow().x).toBeCloseTo(expected.x, 6);
+    expect(focusNow().y).toBeCloseTo(expected.y, 6);
+
+    await passTo(BODY_START + PLAIN_PAGE_MS + 200);
+    expect(view.getByTestId('plain-folio').props.text).toBe('2 / 3');
+    expect(focusNow().x).toBeCloseTo(expected.x, 6);
+    expect(focusNow().y).toBeCloseTo(expected.y, 6);
+  }, 30_000);
+
+  test('the recognition drop: the clock scatters on the head and only the heading’s title drops; the body stays out of it', async () => {
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    const view = await render(stage(idleWith(null)));
+    await flushUI();
+    const idleCount = view.getAllByTestId(/^glyph-/).length;
+    spy.mockClear();
+
+    await view.rerender(stage(plainSource(SHORT, START)));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-idle-glyph-/)).toHaveLength(idleCount);
+    const inputs = inputsOf(spy).filter((i) => !i.exiting);
+    const title = inputs.filter((i) => i.entrance === 'drop');
+    expect(title.length).toBeGreaterThan(0);
+    for (const i of title) {
+      expect(i.anticipationMs).toBe(300);
+      expect(i.hold).toBe('still');
+    }
+    // Everything else with motion is the artist, fading in with the title.
+    for (const i of inputs.filter((i) => i.entrance !== 'drop')) expect(i.entrance).toBe('fade');
+    // At the fire the body is out, and still out past the head (START + 300)
+    // and the scatter: it does not land with the title. It comes on the wall
+    // clock, PLAIN_BODY_DELAY_MS after the sheet came on.
+    expect(pageOpacity(view)).toBe(0);
+    await passTo(START + 1_000);
+    expect(pageOpacity(view)).toBe(0);
+    await passTo(BODY_START + PLAIN_PAGE_FADE_MS + 500);
+    expect(pageOpacity(view)).toBe(1);
+  });
+
+  test('sheet → nameplate (the same song re-resolved): the title exits, the nameplate title rises, the body fades out, no drop', async () => {
+    const view = await render(stage(plainSource(SHORT, null)));
+    await flushUI();
+    // Well into the sheet: its page is fully up.
+    await passTo(START + 10_000);
+    expect(pageOpacity(view)).toBe(1);
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await view.rerender(
+      stage({ kind: 'unsynced', track, direction: songDirection, reason: 'lyrics_unavailable', dropAtMs: null }),
+    );
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    const nameplateTitle = inputsOf(spy).filter((i) => !i.exiting && i.hold === 'pulse');
+    expect(nameplateTitle.length).toBeGreaterThan(0);
+    for (const i of nameplateTitle) expect(i.entrance).toBe('rise');
+    expect(view.getByTestId('unsynced-note')).toBeTruthy();
+    expect(view.queryByTestId('plain-note')).toBeNull();
+    expect(view.queryByTestId('plain-rule')).toBeNull();
+    expect(view.queryByTestId('plain-page')).toBeNull();
+    // The leaving page holds the page that was up and fades from its opacity.
+    expect(view.getAllByTestId(/^plain-page-leaving-run-/)).toHaveLength(sheetOf(SHORT).body.pages[0]!.runs.length);
+    expect(pageOpacity(view, 'plain-page-leaving')).toBe(1);
+    // Halfway through PLAIN_EXIT_MS it is on its way out…
+    await pass(PLAIN_EXIT_MS / 2);
+    expect(pageOpacity(view, 'plain-page-leaving')).toBeGreaterThan(0);
+    expect(pageOpacity(view, 'plain-page-leaving')).toBeLessThan(1);
+    // …and soon gone, with the heading's title.
+    await pass(600 - PLAIN_EXIT_MS / 2);
+    expect(view.queryByTestId('plain-page-leaving')).toBeNull();
+    expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
+  });
+
+  test('sheet (dropped) → idle in a quiet room → the same sheet: the clock comes and goes, the title rises, the drop is not replayed', async () => {
+    const view = await render(stage(idleWith(null)));
+    await flushUI();
+    await view.rerender(stage(plainSource(SHORT, START)));
+    await flushUI();
+    await passTo(START + 10_000);
+    expect(pageOpacity(view)).toBe(1);
+
+    // The quiet spell: idle with the song's caption; the title and the body leave.
+    await view.rerender(stage(idleWith(track)));
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    expect(view.getByTestId('idle-caption').props.text).toBe('架空の人 — 架空の歌');
+    expect(view.getByTestId('plain-page-leaving')).toBeTruthy();
+    await pass(2_000);
+    expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
+    expect(view.queryByTestId('plain-page-leaving')).toBeNull();
+
+    // Sound returns: the same song, the same dropAtMs.
+    await passTo(START + 20_000);
+    const sheetBackAt = performance.now();
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await view.rerender(stage(plainSource(SHORT, START)));
+    await flushUI();
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    const title = inputsOf(spy).filter((i) => !i.exiting && i.glyphCount === 4 && i.entrance !== 'fade');
+    expect(title.length).toBeGreaterThan(0);
+    for (const i of title) {
+      expect(i.entrance).toBe('rise');
+      expect(i.anticipationMs).toBe(0);
+    }
+    // The body starts over from its first page, after the same delay.
+    expect(runTexts(view)).toEqual(sheetOf(SHORT).body.pages[0]!.runs.map((r) => r.text));
+    expect(pageOpacity(view)).toBe(0);
+    await passTo(sheetBackAt + PLAIN_BODY_DELAY_MS - 100);
+    expect(pageOpacity(view)).toBe(0);
+    await passTo(sheetBackAt + PLAIN_BODY_DELAY_MS + PLAIN_PAGE_FADE_MS + 500);
+    expect(pageOpacity(view)).toBe(1);
+  }, 30_000);
+
+  test('synced line → (one idle render) → another song’s sheet: the line exits, the title drops, no half-risen clock scatters', async () => {
+    const view = await render(stage(syncedA(null, START)));
+    await flushUI();
+    await view.rerender(stage(idleWith(track)));
+    await flushUI();
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await view.rerender(stage(plainSource(SHORT, START)));
+    await flushUI();
+    expect(view.queryAllByTestId(/^exit-idle-glyph-/)).toHaveLength(0);
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    const title = inputsOf(spy).filter((i) => !i.exiting && i.entrance === 'drop');
+    expect(title.length).toBeGreaterThan(0);
+    // No clock left on stage under the sheet: only the heading's title.
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+  });
+
+  test('sheet → (one idle render) → another song’s synced line: the title exits, the body fades out, the line drops', async () => {
+    const view = await render(stage(plainSource(SHORT, null)));
+    await flushUI();
+    await passTo(START + 10_000);
+    expect(pageOpacity(view)).toBe(1);
+    await view.rerender(stage(idleWith(songA)));
+    await flushUI();
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    const lineAt = performance.now();
+    await view.rerender(stage(syncedA(lineAt, lineAt)));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    expect(view.getByTestId('plain-page-leaving')).toBeTruthy();
+    expect(view.queryByTestId('plain-page')).toBeNull();
+    expect(view.queryByTestId('plain-note')).toBeNull();
+    expect(view.queryAllByTestId(/^band-rule-/)).toHaveLength(0);
+    const line = inputsOf(spy).filter((i) => !i.exiting);
+    expect(line.length).toBeGreaterThan(0);
+    for (const i of line) expect(i.entrance).toBe('drop');
+  });
+
+  test('under reduced motion the page is simply shown, and simply gone when the sheet leaves', async () => {
+    const view = await render(stage(plainSource(), { reducedMotion: true }));
+    expect(pageOpacity(view)).toBe(1);
+    await pass(10_000);
+    await view.rerender(stage(idleWith(null), { reducedMotion: true }));
+    expect(view.queryByTestId('plain-page')).toBeNull();
+    expect(view.queryByTestId('plain-page-leaving')).toBeNull();
   });
 });
 
