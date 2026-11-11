@@ -210,4 +210,70 @@ test('empty text yields no glyphs and zero bounds', () => {
     expect(l.bounds).toEqual({ x: 0, y: 0, width: 0, height: 0 });
     expect(l.columns).toBe(0);
   }
+  expect(layoutLine('', { ...base, placement: 'center' }, vp, measure, AREA).bounds).toEqual({
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+  });
+});
+
+describe('placement (design spec §4, 2026-11-11 evening)', () => {
+  const PLACEMENTS = ['center', 'top-left', 'top-right', 'bottom-left', 'bottom-right'] as const;
+  // Fictional lines: one short, one that wraps into two columns (rows).
+  const TEXTS = ['夜の底', '窓のむこうに朝を数えているまだ名前のない歌をひとつ'];
+
+  test('without a placement the block stays where the classic layout puts it', () => {
+    for (const direction of [base, horizontal]) {
+      for (const text of TEXTS) {
+        expect(layoutLine(text, { ...direction, placement: undefined }, vp, measure, AREA)).toEqual(
+          layoutLine(text, direction, vp, measure, AREA),
+        );
+      }
+    }
+  });
+
+  test('a placement moves the whole block, glyphs and bounds together, into its corner or the centre of the area', () => {
+    for (const direction of [base, horizontal]) {
+      for (const text of TEXTS) {
+        const classic = layoutLine(text, direction, vp, measure, AREA);
+        for (const placement of PLACEMENTS) {
+          const l = layoutLine(text, { ...direction, placement }, vp, measure, AREA);
+          const b = l.bounds;
+          const dx = b.x - classic.bounds.x;
+          const dy = b.y - classic.bounds.y;
+          expect(l.sizePx).toBe(classic.sizePx);
+          expect(l.columns).toBe(classic.columns);
+          expect(b.width).toBeCloseTo(classic.bounds.width, 6);
+          expect(b.height).toBeCloseTo(classic.bounds.height, 6);
+          l.glyphs.forEach((g, i) => {
+            const c = classic.glyphs[i]!;
+            expect({ char: g.char, index: g.index, rotateDeg: g.rotateDeg, sizePx: g.sizePx }).toEqual({
+              char: c.char,
+              index: c.index,
+              rotateDeg: c.rotateDeg,
+              sizePx: c.sizePx,
+            });
+            expect(g.x - c.x).toBeCloseTo(dx, 6);
+            expect(g.y - c.y).toBeCloseTo(dy, 6);
+          });
+          // Inside the area it was given.
+          expect(b.x).toBeGreaterThanOrEqual(AREA.left - 1e-6);
+          expect(b.x + b.width).toBeLessThanOrEqual(AREA.right + 1e-6);
+          expect(b.y).toBeGreaterThanOrEqual(AREA.top - 1e-6);
+          expect(b.y + b.height).toBeLessThanOrEqual(AREA.bottom + 1e-6);
+          // Against the edges its name says, or centred.
+          if (placement === 'center') {
+            expect(b.x + b.width / 2).toBeCloseTo((AREA.left + AREA.right) / 2, 6);
+            expect(b.y + b.height / 2).toBeCloseTo((AREA.top + AREA.bottom) / 2, 6);
+          } else {
+            if (placement.endsWith('left')) expect(b.x).toBeCloseTo(AREA.left, 6);
+            else expect(b.x + b.width).toBeCloseTo(AREA.right, 6);
+            if (placement.startsWith('top')) expect(b.y).toBeCloseTo(AREA.top, 6);
+            else expect(b.y + b.height).toBeCloseTo(AREA.bottom, 6);
+          }
+        }
+      }
+    }
+  });
 });

@@ -5,6 +5,7 @@ import type {
   LineDirection,
   Ornament,
   Palette,
+  Placement,
   Size,
   SongDirection,
   TempoFeel,
@@ -22,7 +23,18 @@ const FONTS: readonly FontKey[] = [
 const WEIGHTS: readonly FontWeight[] = ['light', 'regular', 'bold'];
 const SIZES: readonly Size[] = ['xs', 's', 'm', 'l', 'xl'];
 const ORIENTATIONS = ['vertical', 'horizontal'] as const;
-const ENTRANCES: readonly Entrance[] = ['cut', 'drop', 'rise', 'scatter', 'trace', 'fade'];
+const ENTRANCES: readonly Entrance[] = [
+  'cut',
+  'drop',
+  'rise',
+  'scatter',
+  'trace',
+  'fade',
+  'print',
+  'gather',
+  'slide',
+];
+const PLACEMENTS: readonly Placement[] = ['center', 'top-left', 'top-right', 'bottom-left', 'bottom-right'];
 const HOLDS: readonly Hold[] = ['still', 'pulse', 'drift', 'shake', 'breathe'];
 const ORNAMENTS: readonly Ornament[] = ['none', 'rule', 'frame', 'grid', 'circle', 'numeral'];
 const TEXTURES: readonly Texture[] = ['paper', 'grain', 'void', 'scan'];
@@ -43,7 +55,9 @@ function isOneOf<T extends string>(list: readonly T[], v: unknown): v is T {
 
 function parseLine(raw: unknown, text: string): LineDirection | null {
   if (!isRecord(raw)) return null;
-  const { font, weight, size, orientation, entrance, hold, emphasis, accent, ornament } = raw;
+  const { font, weight, size, orientation, entrance, hold, emphasis, accent, ornament, placement } = raw;
+  // The placement is optional; when given it must be one of the closed set.
+  if (placement !== undefined && !isOneOf(PLACEMENTS, placement)) return null;
   if (
     !isOneOf(FONTS, font) ||
     !isOneOf(WEIGHTS, weight) ||
@@ -62,7 +76,7 @@ function parseLine(raw: unknown, text: string): LineDirection | null {
   for (const i of emphasis) {
     if (!Number.isInteger(i) || i < 0 || i >= length) return null;
   }
-  return {
+  const line: LineDirection = {
     font,
     weight,
     size,
@@ -73,6 +87,8 @@ function parseLine(raw: unknown, text: string): LineDirection | null {
     accent,
     ornament,
   };
+  if (placement !== undefined) line.placement = placement;
+  return line;
 }
 
 /**

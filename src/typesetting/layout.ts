@@ -1,4 +1,4 @@
-import type { LineDirection, Size } from '../direction/types';
+import type { LineDirection, Placement, Size } from '../direction/types';
 
 // Coordinate convention (canvas pixels, y grows downward):
 // - `x`, `y` on a PlacedGlyph are the glyph's baseline origin, i.e. where Skia's
@@ -21,6 +21,8 @@ import type { LineDirection, Size } from '../direction/types';
 // - A line that needs more than two columns (rows) is retried one size smaller, down
 //   to `xs`, which wraps into as many columns (rows) as it needs.
 // - `bounds` is the union of the glyph cells (vertical) or glyph boxes (horizontal).
+// - A direction's `placement` then moves the whole block (glyphs and bounds)
+//   to the centre or a corner of the usable area (`placeBlock`).
 
 export interface Viewport {
   width: number;
@@ -168,9 +170,33 @@ export function layoutLine(
   let step = SIZE_ORDER.indexOf(direction.size);
   for (;;) {
     const layout = layoutAtSize(chars, direction, viewport, measure, area, step);
-    if (layout.columns <= MAX_WRAPPED_LINES || step === 0) return layout;
+    if (layout.columns <= MAX_WRAPPED_LINES || step === 0) return placeBlock(layout, direction.placement, area);
     step -= 1;
   }
+}
+
+/**
+ * Moves the laid-out block to its placement (design spec §4, 2026-11-11
+ * evening): its bounds into the centre or a corner of `area`. Without a
+ * placement the block stays where the classic layout put it. Along an axis
+ * where the block is larger than the area it is not moved (it already
+ * overflows; moving it would only push it further out on one side).
+ */
+function placeBlock(layout: LineLayout, placement: Placement | undefined, area: PrintArea): LineLayout {
+  if (placement === undefined || layout.glyphs.length === 0) return layout;
+  const b = layout.bounds;
+  const roomX = area.right - area.left - b.width;
+  const roomY = area.bottom - area.top - b.height;
+  const fx = placement === 'center' ? 0.5 : placement.endsWith('left') ? 0 : 1;
+  const fy = placement === 'center' ? 0.5 : placement.startsWith('top') ? 0 : 1;
+  const dx = roomX >= 0 ? area.left + fx * roomX - b.x : 0;
+  const dy = roomY >= 0 ? area.top + fy * roomY - b.y : 0;
+  if (dx === 0 && dy === 0) return layout;
+  return {
+    ...layout,
+    glyphs: layout.glyphs.map((g) => ({ ...g, x: g.x + dx, y: g.y + dy })),
+    bounds: { ...b, x: b.x + dx, y: b.y + dy },
+  };
 }
 
 function layoutAtSize(

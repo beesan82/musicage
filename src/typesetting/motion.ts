@@ -70,11 +70,33 @@ export const ENTRANCE_DURATION_MS: Record<Entrance, number> = {
   scatter: 600,
   trace: 500,
   fade: 300,
+  // Design spec §5 (2026-11-11 evening). print and slide: one glyph's ramp
+  // (the line adds its stagger); gather: the whole line at once.
+  print: 160,
+  gather: 700,
+  slide: 360,
 };
 
 const SCATTER_STAGGER_MS = 40;
 const TRACE_STAGGER_MS = 60;
 const TRACE_RAMP_MS = 120;
+/**
+ * print: each glyph presses on this long after the previous, the whole line
+ * spread over at most PRINT_SPREAD_MAX_MS. Fixed and short, never the line's
+ * sung length: it shows the print going on, not which syllable is sung.
+ */
+const PRINT_STAGGER_MS = 70;
+const PRINT_SPREAD_MAX_MS = 900;
+/** print: a glyph starts this much larger and settles to its size as it inks. */
+const PRINT_PRESS = 0.12;
+/** gather: how far from home each glyph starts, px, each in its own direction. */
+const GATHER_DISTANCE = 90;
+/** slide: per-glyph stagger, the whole spread capped, and the distance from the left, px. */
+const SLIDE_STAGGER_MS = 30;
+const SLIDE_SPREAD_MAX_MS = 600;
+const SLIDE_DISTANCE = 56;
+/** The slide exit: how far right the line slides away as it fades, px. */
+const SLIDE_EXIT_DISTANCE = 48;
 /** Lines with more glyphs than this spread their scatter over two beats. */
 const SCATTER_WIDE_GLYPH_COUNT = 8;
 
@@ -90,6 +112,21 @@ const ANTICIPATION_DEPTH = 0.02;
 const LANDING_SPRING_U = Math.PI / 18;
 /** How far the glyph crouches (scale dip) at the middle of the anticipation window. */
 const LANDING_CROUCH = 0.08;
+
+/**
+ * `step` per glyph, narrowed so the last glyph of the line waits at most `spreadMax`.
+ *
+ * Declared before `staggerMs` on purpose: the worklets Babel plugin turns each
+ * worklet declaration into a `const` that captures the functions it calls by
+ * value when it is defined, so a worklet must come after every worklet it calls
+ * (declaration hoisting does not survive the transform).
+ */
+function cappedStagger(step: number, spreadMax: number, glyphIndex: number, glyphCount: number): number {
+  'worklet';
+  const last = glyphCount > 1 ? glyphCount - 1 : 1;
+  const each = step * last > spreadMax ? spreadMax / last : step;
+  return each * glyphIndex;
+}
 
 /**
  * How long glyph `glyphIndex` waits before its entrance starts. Scatter rides
@@ -114,7 +151,16 @@ function staggerMs(
     return SCATTER_STAGGER_MS * glyphIndex;
   }
   if (entrance === 'trace') return TRACE_STAGGER_MS * glyphIndex;
+  if (entrance === 'print') return cappedStagger(PRINT_STAGGER_MS, PRINT_SPREAD_MAX_MS, glyphIndex, glyphCount);
+  if (entrance === 'slide') return cappedStagger(SLIDE_STAGGER_MS, SLIDE_SPREAD_MAX_MS, glyphIndex, glyphCount);
   return 0;
+}
+
+/** Ease-out cubic on 0..1: fast away, settling without overshoot. */
+function easeOut(t: number): number {
+  'worklet';
+  const r = 1 - t;
+  return 1 - r * r * r;
 }
 
 /** How long an entrance runs for the whole line: the duration plus the last glyph's stagger. */
@@ -186,13 +232,15 @@ function spring(t: number): number {
   return 1 - Math.exp(-6 * t) * Math.cos(9 * t);
 }
 
-export type ExitKind = 'fall' | 'rise' | 'scatter' | 'trace' | 'fade' | 'cut';
+export type ExitKind = 'fall' | 'rise' | 'scatter' | 'trace' | 'fade' | 'cut' | 'slide';
 
 /**
  * The exit is derived deterministically from how the line entered (the
- * direction vocabulary does not grow): a line that dropped in falls away, one
- * that rose leaves upward, scatter disperses, trace erases from the tail,
- * fade just fades, and cut was never really there.
+ * direction vocabulary has no exits of its own): a line that dropped in falls
+ * away, one that rose leaves upward, scatter disperses, trace erases from the
+ * tail, fade just fades, and cut was never really there. A printed line is
+ * erased from the tail like trace, a gathered one disperses like scatter, and
+ * one that slid in slides on out to the right.
  */
 export function exitForEntrance(entrance: Entrance): ExitKind {
   'worklet';
@@ -202,13 +250,17 @@ export function exitForEntrance(entrance: Entrance): ExitKind {
     case 'rise':
       return 'rise';
     case 'scatter':
+    case 'gather':
       return 'scatter';
     case 'trace':
+    case 'print':
       return 'trace';
     case 'fade':
       return 'fade';
     case 'cut':
       return 'cut';
+    case 'slide':
+      return 'slide';
   }
 }
 
@@ -229,6 +281,7 @@ export function exitDurationMs(entrance: Entrance, glyphCount: number, periodMs:
       return 0;
     case 'fall':
     case 'rise':
+    case 'slide':
       natural = 320;
       break;
     case 'scatter':
@@ -292,6 +345,9 @@ function exitTransform(input: MotionInput): GlyphTransform {
   }
   if (kind === 'rise') {
     return { ...zero, dy: -48 * p, opacity: 1 - p };
+  }
+  if (kind === 'slide') {
+    return { ...zero, dx: SLIDE_EXIT_DISTANCE * p * p, opacity: 1 - p };
   }
   if (kind === 'scatter') {
     return {
@@ -361,6 +417,28 @@ export function glyphTransform(input: MotionInput): GlyphTransform {
     opacity = clamp01((elapsedMs - delay) / TRACE_RAMP_MS);
   } else if (entrance === 'fade') {
     opacity = clamp01(elapsedMs / ENTRANCE_DURATION_MS.fade);
+  } else if (entrance === 'print') {
+    // Pressed on one after another: a little large at first, settling to its
+    // size as the ink comes up. Exactly identity once the ramp is done.
+    const delay = staggerMs(entrance, glyphIndex, input.glyphCount, input.periodMs);
+    const local = clamp01((elapsedMs - delay) / ENTRANCE_DURATION_MS.print);
+    scale = 1 + PRINT_PRESS * (1 - easeOut(local));
+    opacity = local;
+  } else if (entrance === 'gather') {
+    // All at once, each glyph from its own direction GATHER_DISTANCE away,
+    // straight in (no turn), on the same spring as drop and rise.
+    const s = spring(elapsedMs / ENTRANCE_DURATION_MS.gather);
+    const r = 1 - s;
+    const angle = Math.PI * hashSigned(input.seed, glyphIndex * 5 + 4);
+    dx = GATHER_DISTANCE * Math.cos(angle) * r;
+    dy = GATHER_DISTANCE * Math.sin(angle) * r;
+    opacity = clamp01(s);
+  } else if (entrance === 'slide') {
+    // In from the left one after another, decelerating to a stop (no overshoot).
+    const delay = staggerMs(entrance, glyphIndex, input.glyphCount, input.periodMs);
+    const e = easeOut(clamp01((elapsedMs - delay) / ENTRANCE_DURATION_MS.slide));
+    dx = -SLIDE_DISTANCE * (1 - e);
+    opacity = e;
   }
 
   if (input.hold !== 'still' && entranceDone(entrance, input.glyphCount, elapsedMs, input.periodMs)) {

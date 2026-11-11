@@ -29,6 +29,8 @@ export interface BandMeterProps {
   ink: SharedValue<string>;
   reducedMotion: boolean;
   count?: number;
+  /** testID of each rule is `${testIDPrefix}-${index}`. */
+  testIDPrefix?: string;
 }
 
 /**
@@ -47,6 +49,7 @@ export const BandMeter = memo(function BandMeter({
   ink,
   reducedMotion,
   count = METER_RULE_COUNT,
+  testIDPrefix = 'band-rule',
 }: BandMeterProps) {
   const lowNow = useSharedValue(0);
   const midNow = useSharedValue(0);
@@ -87,6 +90,7 @@ export const BandMeter = memo(function BandMeter({
           mid={midNow}
           high={highNow}
           ink={ink}
+          testID={`${testIDPrefix}-${index}`}
         />
       ))}
     </>
@@ -102,9 +106,10 @@ interface MeterRuleProps {
   mid: SharedValue<number>;
   high: SharedValue<number>;
   ink: SharedValue<string>;
+  testID: string;
 }
 
-function MeterRule({ index, count, x, baseline, low, mid, high, ink }: MeterRuleProps) {
+function MeterRule({ index, count, x, baseline, low, mid, high, ink, testID }: MeterRuleProps) {
   const p = count <= 1 ? 0 : index / (count - 1);
   const shape = meterShape(index, count);
   const rect = useDerivedValue(() => {
@@ -112,6 +117,6 @@ function MeterRule({ index, count, x, baseline, low, mid, high, ink }: MeterRule
     return { x, y: baseline - height, width: METER_RULE_WIDTH, height };
   }, [p, shape, x, baseline]);
   // Skia's Rect types omit testID; it is only read by tests under the Skia mock.
-  const testProps = { testID: `band-rule-${index}` } as object;
+  const testProps = { testID } as object;
   return <Rect rect={rect} color={ink} opacity={METER_OPACITY} {...testProps} />;
 }

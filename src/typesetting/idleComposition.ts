@@ -1,4 +1,5 @@
 import type { SongDirection } from '../direction/types';
+import { METER_MAX_HEIGHT } from './bandMeter';
 import type { FontKey, FontWeight } from './fonts';
 import { printArea, SIZE_RATIO } from './layout';
 import type { GlyphMeasure, PlacedGlyph, Viewport } from './layout';
@@ -27,6 +28,12 @@ import type { GlyphMeasure, PlacedGlyph, Viewport } from './layout';
 //   whatever the song (the song's faces are for the nameplate).
 // - `focus` is the centre of the HH:MM box: the lamp rests on the time.
 //
+// - The band meter (bandMeter.ts) stands on the foot of the print area, where
+//   the nameplate and the lyric sheet put theirs (spec §5, 2026-11-11 evening:
+//   the owner asked where the visualizer had gone while the clock listens).
+//   The date row keeps CLOCK_METER_GAP above the meter's full height, so a
+//   short stage never sets the date over the rules.
+//
 // Reserved bands: the print area (layout.ts `printArea`, shared with the
 // context lines of LyricStage). The caption's baseline sits a small gap above
 // the controls, at the left margin; the caption line is reserved even when
@@ -39,6 +46,8 @@ export interface IdleComposition {
   caption: { text: string; x: number; y: number; sizePx: number } | null;
   /** The lamp's centre in px: the centre of the time row's HH:MM. */
   focus?: { x: number; y: number };
+  /** The band meter's row: its rules stand on `baseline` and grow up to `maxHeight`. */
+  meter: { x: number; width: number; baseline: number; maxHeight: number };
 }
 
 /** The caption's text for a recognized track: artist, an em dash, title. */
@@ -64,6 +73,8 @@ const DATE_SIZE_RATIO = 0.066;
 const DATE_ALPHA = 0.75;
 const DATE_GAP_RATIO = 0.55;
 const DATE_GAP_PX = 28;
+/** Between the date's descent and the top of the meter's room (the nameplate's METER_GAP). */
+export const CLOCK_METER_GAP = 20;
 /** Measured at this size and scaled: advances are linear in the size. */
 const REFERENCE_PX = 100;
 
@@ -162,8 +173,12 @@ export function composeClock(
     alpha: SECONDS_ALPHA,
   });
 
-  // The date row, centred by its own width (it changes once a day). Its foot
-  // never drops below the print area's bottom.
+  // The meter on the foot of the print area, as on the nameplate.
+  const meter = { x: area.left, width: area.right - area.left, baseline: area.bottom, maxHeight: METER_MAX_HEIGHT };
+
+  // The date row, centred by its own width (it changes once a day), each
+  // character advancing by its advance width (a full-width bracket's em box,
+  // not its narrow ink). Its foot never drops into the meter's room.
   const datePx = viewport.width * DATE_SIZE_RATIO;
   const weekday = WEEKDAYS[now.getDay()]!;
   const dateText = `${now.getMonth() + 1}月${now.getDate()}日（${weekday}）`;
@@ -172,7 +187,7 @@ export function composeClock(
   const advances = dateChars.map((char) => measure(char, datePx).advance);
   const dateBaseline = Math.min(
     timeBaseline + DATE_GAP_RATIO * timePx + DATE_GAP_PX,
-    area.bottom - measure('0', datePx).descent,
+    meter.baseline - meter.maxHeight - CLOCK_METER_GAP - measure('0', datePx).descent,
   );
   let dateX = centreX - advances.reduce((sum, a) => sum + a, 0) / 2;
   const date = dateChars.map((char, i): PlacedGlyph => {
@@ -204,6 +219,7 @@ export function composeClock(
       x: left + timeWidth / 2,
       y: timeBaseline + (timeMetrics.ascent + timeMetrics.descent) / 2,
     },
+    meter,
   };
 }
 

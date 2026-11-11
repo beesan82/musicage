@@ -5,6 +5,7 @@ import {
   dropHeadMs,
   ENTRANCE_DURATION_MS,
   entranceDone,
+  entranceDurationMs,
   exitDurationMs,
   exitForEntrance,
   glyphTransform,
@@ -92,8 +93,95 @@ test('fade is opacity-only', () => {
   expect(at({ entrance: 'fade', elapsedMs: 300 })).toEqual(identity);
 });
 
+describe('print, gather and slide (design spec §5, 2026-11-11 evening)', () => {
+  test('print presses the glyphs on one after another, 70 ms apart, a little large until they settle', () => {
+    const p = (glyphIndex: number, elapsedMs: number) => at({ entrance: 'print', glyphIndex, glyphCount: 5, elapsedMs });
+    expect(p(0, 0)).toMatchObject({ opacity: 0, dx: 0, dy: 0, rotateDeg: 0 });
+    expect(p(0, 0).scale).toBeCloseTo(1.12, 10);
+    // Glyph 2 starts at 140 ms; half way through its 160 ms ramp it is half inked and still pressed large.
+    expect(p(2, 139).opacity).toBe(0);
+    expect(p(2, 220).opacity).toBeCloseTo(0.5, 10);
+    expect(p(2, 220).scale).toBeGreaterThan(1);
+    expect(p(2, 220).scale).toBeLessThan(1.12);
+    expect(p(2, 300)).toEqual(identity);
+    // Never anything but a settle: no turn, no travel, no scale below 1.
+    for (let ms = 0; ms <= 600; ms += 10) {
+      const t = p(3, ms);
+      expect(t.scale).toBeGreaterThanOrEqual(1);
+      expect(t.dx).toBe(0);
+      expect(t.dy).toBe(0);
+      expect(t.rotateDeg).toBe(0);
+    }
+  });
+
+  test('print spreads a long line over at most 900 ms, whatever its length (no per-syllable timing)', () => {
+    for (const glyphCount of [5, 13, 30, 60]) {
+      expect(entranceDurationMs('print', glyphCount) - ENTRANCE_DURATION_MS.print).toBeLessThanOrEqual(900 + 1e-9);
+      const last = at({ entrance: 'print', glyphIndex: glyphCount - 1, glyphCount, elapsedMs: 900 + 160 + 1 });
+      expect(last).toEqual(identity);
+    }
+    expect(entranceDurationMs('print', 5)).toBe(4 * 70 + 160);
+  });
+
+  test('gather brings every glyph at once from 90 px away, straight in (no turn), each from its own direction', () => {
+    const g = (glyphIndex: number, elapsedMs: number) =>
+      at({ entrance: 'gather', glyphIndex, glyphCount: 6, elapsedMs, seed: 3 });
+    const starts = [0, 1, 2, 3, 4, 5].map((i) => g(i, 0));
+    for (const t of starts) {
+      expect(Math.hypot(t.dx, t.dy)).toBeCloseTo(90, 6);
+      expect(t.rotateDeg).toBe(0);
+      expect(t.opacity).toBe(0);
+    }
+    expect(new Set(starts.map((t) => Math.round(Math.atan2(t.dy, t.dx) * 100))).size).toBeGreaterThan(3);
+    // All glyphs move together: the same distance left at the same time.
+    const mid = [0, 1, 2, 3, 4, 5].map((i) => Math.hypot(g(i, 200).dx, g(i, 200).dy));
+    for (const d of mid) expect(d).toBeCloseTo(mid[0]!, 6);
+    expect(mid[0]!).toBeLessThan(90);
+    expect(g(4, ENTRANCE_DURATION_MS.gather)).toEqual(identity);
+  });
+
+  test('slide comes in from the left without overshooting, 30 ms apart, the spread capped at 600 ms', () => {
+    const s = (glyphIndex: number, elapsedMs: number, glyphCount = 5) =>
+      at({ entrance: 'slide', glyphIndex, glyphCount, elapsedMs });
+    expect(s(0, 0)).toMatchObject({ dx: -56, dy: 0, opacity: 0, scale: 1, rotateDeg: 0 });
+    expect(s(2, 59).dx).toBe(-56);
+    let previous = -Infinity;
+    for (let ms = 0; ms <= 500; ms += 10) {
+      const { dx } = s(1, ms);
+      expect(dx).toBeLessThanOrEqual(0);
+      expect(dx).toBeGreaterThanOrEqual(previous);
+      previous = dx;
+    }
+    expect(s(4, 4 * 30 + 360)).toEqual(identity);
+    expect(entranceDurationMs('slide', 60) - ENTRANCE_DURATION_MS.slide).toBeLessThanOrEqual(600 + 1e-9);
+  });
+
+  test('exits: print erases from the tail, gather disperses, slide slides off to the right', () => {
+    expect(exitForEntrance('print')).toBe('trace');
+    expect(exitForEntrance('gather')).toBe('scatter');
+    expect(exitForEntrance('slide')).toBe('slide');
+    const mid = at({ entrance: 'slide', exiting: true, elapsedMs: 160, periodMs: 1000 });
+    expect(mid.dx).toBeGreaterThan(0);
+    expect(mid.dy).toBe(0);
+    expect(mid.opacity).toBeCloseTo(0.5, 5);
+    expect(at({ entrance: 'slide', exiting: true, elapsedMs: 320, periodMs: 1000 }).opacity).toBe(0);
+  });
+
+  test('none of them ever lights the line beyond full ink', () => {
+    for (const entrance of ['print', 'gather', 'slide'] as const) {
+      for (let ms = -100; ms <= 1500; ms += 25) {
+        for (const glyphIndex of [0, 3, 7]) {
+          const t = at({ entrance, glyphIndex, glyphCount: 8, elapsedMs: ms });
+          expect(t.opacity).toBeGreaterThanOrEqual(0);
+          expect(t.opacity).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+  });
+});
+
 test('reducedMotion returns identity regardless of elapsed', () => {
-  for (const entrance of ['drop', 'rise', 'scatter', 'trace', 'fade'] as const) {
+  for (const entrance of ['drop', 'rise', 'scatter', 'trace', 'fade', 'print', 'gather', 'slide'] as const) {
     expect(
       at({ entrance, elapsedMs: 0, reducedMotion: true, hold: 'pulse', ...withOnset() }),
     ).toEqual(identity);
@@ -447,7 +535,7 @@ describe('exits (derived from the entrance)', () => {
   });
 
   test('every exit converges within one beat when a grid exists', () => {
-    for (const entrance of ['drop', 'rise', 'scatter', 'trace', 'fade'] as const) {
+    for (const entrance of ['drop', 'rise', 'scatter', 'trace', 'fade', 'print', 'gather', 'slide'] as const) {
       expect(exitDurationMs(entrance, 12, 400)).toBeLessThanOrEqual(400);
       expect(exitDurationMs(entrance, 12, 400)).toBeGreaterThan(0);
     }

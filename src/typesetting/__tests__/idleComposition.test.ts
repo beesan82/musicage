@@ -1,7 +1,11 @@
 import type { LineDirection, SongDirection } from '../../direction/types';
+import { METER_MAX_HEIGHT } from '../bandMeter';
+import { advanceMeasure } from '../fontMeasure';
+import type { MeasuredFont } from '../fontMeasure';
 import type { FontKey } from '../fonts';
 import {
   CLOCK_MAX_PX,
+  CLOCK_METER_GAP,
   CLOCK_MIN_PX,
   composeClock,
   idleFaces,
@@ -209,6 +213,114 @@ test('caption is "artist — title" at the left margin just above the controls, 
   expect(withTrack.glyphs).toEqual(compose(SUNDAY_MORNING).glyphs);
   expect(withTrack.focus).toEqual(compose(SUNDAY_MORNING).focus);
   expect(compose(SUNDAY_MORNING).caption).toBeNull();
+});
+
+describe('the date row against a font whose ink is not its advance (the 2026-11-11 weekday defect)', () => {
+  // As in a real face: a full-width bracket is a narrow stroke at one side of
+  // its 1 em box, a kanji fills most of its box, a digit is narrower than its
+  // advance. Em units; the ink runs from `left` to `right` of the origin.
+  const glyphOf = (ch: string) =>
+    ch === '（'
+      ? { advance: 1, left: 0.6, right: 0.9 }
+      : ch === '）'
+        ? { advance: 1, left: 0.1, right: 0.4 }
+        : /[0-9]/.test(ch)
+          ? { advance: 0.6, left: 0.08, right: 0.52 }
+          : ch === ':'
+            ? { advance: 0.3, left: 0.1, right: 0.2 }
+            : { advance: 1, left: 0.06, right: 0.94 };
+  // An SkFont stand-in: advances by glyph id (the code point), and measureText
+  // as Skia's, the ink's bounding box.
+  const fontAt = (size: number): MeasuredFont & { measureText: (t: string) => { x: number; width: number } } => ({
+    getGlyphIDs: (t) => [...t].map((c) => c.codePointAt(0)!),
+    getGlyphWidths: (ids) => ids.map((id) => glyphOf(String.fromCodePoint(id)).advance * size),
+    getMetrics: () => ({ ascent: -size * 0.88, descent: size * 0.12 }),
+    measureText: (t) => {
+      const g = glyphOf(t);
+      return { x: g.left * size, width: (g.right - g.left) * size };
+    },
+  });
+  const realMeasure = advanceMeasure(fontAt);
+  // What the stage measured with before: the ink's width as the advance.
+  const inkWidthMeasure: GlyphMeasure = (ch, size) => ({
+    advance: fontAt(size).measureText(ch).width,
+    ascent: -size * 0.88,
+    descent: size * 0.12,
+  });
+  const inkOf = (g: PlacedGlyph) => ({
+    left: g.x + glyphOf(g.char).left * g.sizePx,
+    right: g.x + glyphOf(g.char).right * g.sizePx,
+  });
+  // 2026-11-08 is a Sunday: one date for each weekday 日月火水木金土.
+  const WEEK = [8, 9, 10, 11, 12, 13, 14].map((day) => new Date(2026, 10, day, 9, 5, 7));
+  const dateRow = (now: Date, m: GlyphMeasure) => band(composeClock(now, vp, null, m, m).glyphs, 0);
+
+  test('advanceMeasure takes the glyph advances and the metrics, not the ink box', () => {
+    expect(realMeasure('（', 20)).toEqual({
+      advance: 20,
+      ascent: expect.closeTo(-17.6, 10),
+      descent: expect.closeTo(2.4, 10),
+    });
+    expect(realMeasure('1', 10).advance).toBeCloseTo(6, 10);
+    expect(fontAt(20).measureText('（').width).toBeCloseTo(6, 10);
+  });
+
+  test('on every weekday no two glyphs of the date row overlap, the weekday least of all', () => {
+    const weekdays = new Set<string>();
+    for (const now of WEEK) {
+      const date = dateRow(now, realMeasure);
+      const weekday = date.at(-2)!;
+      weekdays.add(weekday.char);
+      expect(date.at(-3)!.char).toBe('（');
+      expect(date.at(-1)!.char).toBe('）');
+      for (let i = 1; i < date.length; i++) {
+        expect(inkOf(date[i - 1]!).right).toBeLessThanOrEqual(inkOf(date[i]!).left + 1e-6);
+      }
+      // The brackets sit at a natural distance from the weekday: clear of it,
+      // but not further off than half a character.
+      const size = weekday.sizePx;
+      const before = inkOf(weekday).left - inkOf(date.at(-3)!).right;
+      const after = inkOf(date.at(-1)!).left - inkOf(weekday).right;
+      for (const gap of [before, after]) {
+        expect(gap).toBeGreaterThanOrEqual(0.1 * size);
+        expect(gap).toBeLessThanOrEqual(0.5 * size);
+      }
+      expect(before).toBeCloseTo(after, 6);
+    }
+    expect([...weekdays].sort()).toEqual([...'日月火水木金土'].sort());
+  });
+
+  test('measured by the ink box (the old way) the weekday runs into its opening bracket', () => {
+    const date = dateRow(WEEK[3]!, inkWidthMeasure);
+    expect(inkOf(date.at(-3)!).right).toBeGreaterThan(inkOf(date.at(-2)!).left);
+  });
+});
+
+describe('the band meter row under the clock (design spec §5, 2026-11-11 evening)', () => {
+  test("the meter stands on the foot of the print area, the full width of it, the nameplate's height", () => {
+    for (const now of TIMES) {
+      expect(compose(now).meter).toEqual({
+        x: AREA.left,
+        width: AREA.right - AREA.left,
+        baseline: expect.closeTo(AREA.bottom, 6),
+        maxHeight: METER_MAX_HEIGHT,
+      });
+    }
+  });
+
+  test('the date keeps clear above the meter at its full height, on a tall stage and on a short one', () => {
+    const short = { width: 390, height: 560, insetTop: 59, insetBottom: 34 };
+    for (const viewport of [vp, short]) {
+      for (const now of TIMES) {
+        const clock = composeClock(now, viewport, null, measure, timeMeasure);
+        const meterTop = clock.meter.baseline - clock.meter.maxHeight;
+        const date = band(clock.glyphs, 0);
+        for (const g of date) expect(boxOf(g).bottom).toBeLessThanOrEqual(meterTop - CLOCK_METER_GAP + 1e-6);
+      }
+    }
+    // On the tall stage the date is where it always was (the meter did not move it).
+    for (const g of rows(SUNDAY_MORNING).date) expect(g.y).toBeCloseTo(TIME_BASELINE + 0.55 * TIME_PX + 28, 6);
+  });
 });
 
 describe('idleFaces (visual overhaul spec §3e; now the nameplate faces)', () => {

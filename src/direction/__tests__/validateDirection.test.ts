@@ -58,6 +58,21 @@ describe('validateSongDirection', () => {
     expect(validateSongDirection(direction([s, line(), s]), TEXTS)).not.toBeNull();
   });
 
+  test('accepts the entrances print, gather and slide (2026-11-11 evening)', () => {
+    const input = direction([line({ entrance: 'print' }), line({ entrance: 'gather' }), line({ entrance: 'slide' })]);
+    expect(validateSongDirection(input, TEXTS)).toEqual(input);
+    const unknown = direction([line({ entrance: 'spin' as never }), line(), line()]);
+    expect(validateSongDirection(unknown, TEXTS)).toBeNull();
+  });
+
+  test('placement is optional; when given it must be one of the five', () => {
+    const placed = direction([line({ placement: 'top-right' }), line({ placement: 'center' }), line()]);
+    const clean = validateSongDirection(placed, TEXTS);
+    expect(clean).toEqual(placed);
+    expect('placement' in clean!.lines[2]!).toBe(false);
+    expect(validateSongDirection(direction([line({ placement: 'middle' as never }), line(), line()]), TEXTS)).toBeNull();
+  });
+
   test('rejects shake followed directly by shake', () => {
     const s = line({ hold: 'shake' });
     expect(validateSongDirection(direction([s, s, line()]), TEXTS)).toBeNull();

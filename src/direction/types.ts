@@ -1,7 +1,24 @@
 import type { FontKey, FontWeight } from '../typesetting/fonts';
 
 export type Size = 'xs' | 's' | 'm' | 'l' | 'xl';
-export type Entrance = 'cut' | 'drop' | 'rise' | 'scatter' | 'trace' | 'fade';
+export type Entrance =
+  | 'cut'
+  | 'drop'
+  | 'rise'
+  | 'scatter'
+  | 'trace'
+  | 'fade'
+  // Design spec §4, §5 (2026-11-11 evening): printed on glyph by glyph,
+  // gathered in from afar, slid in from the side.
+  | 'print'
+  | 'gather'
+  | 'slide';
+/**
+ * Where the line's block sits in its area (design spec §4, 2026-11-11
+ * evening). Absent: the classic placement (vertical top-aligned in the centre
+ * column, horizontal left-aligned and centred top to bottom).
+ */
+export type Placement = 'center' | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
 export type Hold = 'still' | 'pulse' | 'drift' | 'shake' | 'breathe';
 export type Ornament = 'none' | 'rule' | 'frame' | 'grid' | 'circle' | 'numeral';
 export type Texture = 'paper' | 'grain' | 'void' | 'scan';
@@ -17,6 +34,7 @@ export interface LineDirection {
   emphasis: number[];
   accent: boolean;
   ornament: Ornament;
+  placement?: Placement;
 }
 
 export interface Palette {

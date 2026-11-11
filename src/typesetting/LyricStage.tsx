@@ -18,6 +18,7 @@ import { IDLE_FOCUS } from '../textures/surfaceModel';
 import type { Uv } from '../textures/surfaceModel';
 import { TextureBackground } from '../textures/TextureBackground';
 import { BandMeter } from './BandMeter';
+import { advanceMeasure } from './fontMeasure';
 import { createStageFont, FONT_SOURCES, useStageTypefaces } from './fonts';
 import type { FontKey, FontWeight } from './fonts';
 import { GlowLayer } from './GlowLayer';
@@ -184,12 +185,9 @@ function useStageFonts(): StageFonts | null {
   }, faces);
 }
 
+/** Measures by advance width (fontMeasure.ts), never by the ink's bounding box. */
 function measureWith(fonts: StageFonts, key: FontKey, weight: FontWeight): GlyphMeasure {
-  return (char, sizePx) => {
-    const font = fonts(key, weight, sizePx);
-    const { ascent, descent } = font.getMetrics();
-    return { advance: font.measureText(char).width, ascent, descent };
-  };
+  return advanceMeasure((sizePx) => fonts(key, weight, sizePx));
 }
 
 interface ContextRow {
@@ -1237,6 +1235,20 @@ export function LyricStage({
                   />
                 ))}
               </Group>
+              {/* The clock's band meter (spec §5, 2026-11-11 evening): the
+                  nameplate's meter in the nameplate's place, lying at its base
+                  in silence. It belongs to the clock, so it leaves with it:
+                  when a drop brings a song's stage on, only that stage's own
+                  meter (if any) stands there. */}
+              <BandMeter
+                x={idle.meter.x}
+                width={idle.meter.width}
+                baseline={idle.meter.baseline}
+                beat={beatValues}
+                ink={inkNow}
+                reducedMotion={reducedMotion}
+                testIDPrefix="idle-band-rule"
+              />
               {idle.caption !== null ? (
                 <Rect
                   x={idle.caption.x}

@@ -7,13 +7,14 @@ import type { BeatState } from '../../beat/types';
 import { lightHexFor, rgbaOf } from '../../direction/palettes';
 import { directSongByRules } from '../../direction/ruleBasedDirector';
 import { INK_TINT_MAX } from '../../direction/surge';
+import { DEFAULT_PALETTE } from '../../direction/types';
 import type { SongDirection } from '../../direction/types';
 import { RECOGNITION_COPY, unsyncedNote } from '../../recognition/recognitionCopy';
 import type { LyricLine, UnsyncedKind } from '../../recognition/types';
 import { IDLE_FOCUS } from '../../textures/surfaceModel';
 import * as textureBackground from '../../textures/TextureBackground';
 import { dropDip, hexToRgb01 } from '../../textures/textureShader';
-import { METER_BASE_HEIGHT, METER_RULE_COUNT, METER_RULE_WIDTH } from '../bandMeter';
+import { METER_BASE_HEIGHT, METER_MAX_HEIGHT, METER_RULE_COUNT, METER_RULE_WIDTH } from '../bandMeter';
 import * as fonts from '../fonts';
 import * as idleComposition from '../idleComposition';
 import { composeClock, UNRECOGNIZED_IDLE_FACES } from '../idleComposition';
@@ -458,9 +459,14 @@ describe('context lines beside the line on stage (visual overhaul spec §3c.3)',
   const AREA = STAGE_AREA;
   // Fictional lines; the middle one is on stage.
   const texts = ['遠い灯の下で', '窓のむこうに朝を数えている', '名前のない歌'];
+  // The classic placement (no `placement`): these tests measure the context
+  // lines against the line where the classic layout puts it.
   const withLines = (overrides: Partial<SongDirection['lines'][number]>): SongDirection => {
     const base = directSongByRules(texts, 's');
-    return { ...base, lines: base.lines.map((line) => ({ ...line, size: 'm' as const, emphasis: [], ...overrides })) };
+    return {
+      ...base,
+      lines: base.lines.map((line) => ({ ...line, size: 'm' as const, emphasis: [], placement: undefined, ...overrides })),
+    };
   };
   const boxOf = (node: Node) => {
     const glyphs = textsIn(node).map((n) => ({ x: n.props.x as number, y: n.props.y as number }));
@@ -632,7 +638,16 @@ describe('ornaments are printed marks, and everything keeps to the print area (v
     const base = directSongByRules(lineTexts, 's');
     return {
       ...base,
-      lines: base.lines.map((line) => ({ ...line, size: 'm' as const, emphasis: [], accent: false, ...overrides })),
+      // The classic placement: the circle's radius cap and the "everything
+      // inside" sweep below are about the ornaments, not about placement.
+      lines: base.lines.map((line) => ({
+        ...line,
+        size: 'm' as const,
+        emphasis: [],
+        accent: false,
+        placement: undefined,
+        ...overrides,
+      })),
     };
   };
   const stageWith = (songDirection: SongDirection, lineTexts: string[] = texts, bar = beat.bar) =>
@@ -1181,6 +1196,8 @@ describe('the idle clock: faces, accent and the caption rule', () => {
     );
     jest.spyOn(fonts, 'createStageFont').mockImplementation(((typeface: { key: string; file: string }, size: number) => ({
       measureText: (t: string) => ({ width: size * [...t].length, height: size }),
+      getGlyphIDs: (t: string) => [...t].map((c) => c.codePointAt(0)!),
+      getGlyphWidths: (ids: number[]) => ids.map(() => size),
       getMetrics: () => ({ ascent: -size * 0.88, descent: size * 0.12 }),
       getSize: () => size,
       face: `${typeface.key}:${typeface.file}`,
@@ -1255,6 +1272,97 @@ describe('the idle clock: faces, accent and the caption rule', () => {
   test('no caption rule without a track', async () => {
     const view = await renderStage({ source: { kind: 'idle', direction: null, track: null }, beat, nowMonotonicMs: 0 });
     expect(view.queryByTestId('idle-caption-rule')).toBeNull();
+  });
+});
+
+describe('the idle clock listens: its band meter (design spec §5, 2026-11-11 evening)', () => {
+  type Box = { x: number; y: number; width: number; height: number };
+  const rectOf = (node: { props: Record<string, any> }) => node.props.rect.value as Box;
+  const idle = { kind: 'idle', direction: null, track: null } as const;
+  const track = { title: '架空の歌', artist: '架空の人' };
+  const at = (source: LyricStageProps['source'], nowMonotonicMs: number, extra: Partial<LyricStageProps> = {}) =>
+    inProvider(<LyricStage beatValues={beatValues} source={source} beat={beat} nowMonotonicMs={nowMonotonicMs} {...extra} />);
+
+  test('24 two-pixel rules on the foot of the print area, in the ink at 0.7, at the printed base before any sound', async () => {
+    const view = await renderStage({ source: idle, beat, nowMonotonicMs: 0 });
+    const rules = view.getAllByTestId(/^idle-band-rule-/);
+    expect(rules).toHaveLength(METER_RULE_COUNT);
+    const xs = rules.map((rule) => rectOf(rule).x);
+    for (const rule of rules) {
+      const rect = rectOf(rule);
+      expect(rect.width).toBe(METER_RULE_WIDTH);
+      expect(rect.height).toBe(METER_BASE_HEIGHT);
+      expect(rect.y + rect.height).toBeCloseTo(STAGE_AREA.bottom, 6);
+      expect(rule.props.color.value).toBe(DEFAULT_PALETTE.ink);
+      expect(rule.props.opacity).toBe(0.7);
+    }
+    expect(Math.min(...xs)).toBe(STAGE_AREA.left);
+    expect(Math.max(...xs)).toBeCloseTo(STAGE_AREA.right - METER_RULE_WIDTH, 6);
+    // The clock's own meter only: no second row from another stage.
+    expect(view.queryAllByTestId(/^band-rule-/)).toHaveLength(0);
+  });
+
+  test('the date row stands clear above the meter at its full height', async () => {
+    jest.setSystemTime(CLOCK_NOW);
+    const view = await renderStage({ source: idle, beat, nowMonotonicMs: 0 });
+    const date = (view.getAllByTestId(/^glyph-/) as unknown as Node[]).filter(
+      (g) => Number(String(g.props.testID).replace('glyph-', '')) < 100,
+    );
+    expect(date.length).toBeGreaterThan(0);
+    const meterTop = STAGE_AREA.bottom - METER_MAX_HEIGHT;
+    for (const glyph of date) {
+      for (const text of textsIn(glyph)) {
+        const size = text.props.font.getSize() as number;
+        expect(text.props.y + size * 0.12).toBeLessThanOrEqual(meterTop - idleComposition.CLOCK_METER_GAP + 1e-6);
+      }
+    }
+  });
+
+  test('under reduced motion the meter is the still base scale', async () => {
+    const view = await renderStage({ source: idle, beat, nowMonotonicMs: 0, reducedMotion: true });
+    const rules = view.getAllByTestId(/^idle-band-rule-/);
+    expect(rules).toHaveLength(METER_RULE_COUNT);
+    for (const rule of rules) expect(rectOf(rule).height).toBe(METER_BASE_HEIGHT);
+  });
+
+  test('a drop onto a synced line takes the meter away with the clock, and it does not come back while the line is on', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const view = await render(at(idle, 10_000));
+    expect(view.getAllByTestId(/^idle-band-rule-/)).toHaveLength(METER_RULE_COUNT);
+
+    const line: LyricStageProps['source'] = {
+      kind: 'synced',
+      lines: toLines(TEXTS),
+      direction,
+      scheduled: { index: 0, startedAtMs: 10_000, isEmpty: false },
+      track,
+      dropAtMs: 10_000,
+    };
+    await view.rerender(at(line, 10_000));
+    expect(view.queryAllByTestId(/^idle-band-rule-/)).toHaveLength(0);
+    expect(view.queryAllByTestId(/^band-rule-/)).toHaveLength(0);
+    await act(async () => {
+      jest.advanceTimersByTime(1000);
+    });
+    expect(view.queryAllByTestId(/^idle-band-rule-/)).toHaveLength(0);
+    expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
+    nowSpy.mockRestore();
+  });
+
+  test('a drop onto a nameplate leaves one meter only: the nameplate’s', async () => {
+    const nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+    const view = await render(at(idle, 10_000));
+    const plate: LyricStageProps['source'] = {
+      kind: 'unsynced',
+      track,
+      direction: directSongByRules([], 'u'),
+      reason: 'lyrics_unavailable',
+      dropAtMs: 10_000,
+    };
+    await view.rerender(at(plate, 10_000));
+    expect(view.queryAllByTestId(/^idle-band-rule-/)).toHaveLength(0);
+    expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_RULE_COUNT);
+    nowSpy.mockRestore();
   });
 });
 

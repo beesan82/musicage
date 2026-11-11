@@ -17,6 +17,9 @@ jest.mock('@shopify/react-native-skia', () => {
       ...mock.Skia,
       Font: (typeface, size) => ({
         measureText: (t) => ({ width: size * [...t].length, height: size }),
+        // Advances: one glyph per code point, each sizePx wide (as measureText).
+        getGlyphIDs: (t) => [...t].map((c) => c.codePointAt(0)),
+        getGlyphWidths: (ids) => ids.map(() => size),
         getMetrics: () => ({ ascent: -size * 0.88, descent: size * 0.12 }),
         getSize: () => size,
       }),

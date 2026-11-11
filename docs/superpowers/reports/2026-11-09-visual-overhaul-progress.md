@@ -630,3 +630,98 @@
 - 本文が少ないとき、本文は従来どおり領域の上（縦組みは右上）から組み、領域の中央には寄せない。余白の多い見え方が気になれば検討する。
 - 横組みの本文は 1 行を 1 つの `Text` で描くので、実フォントのカーニングで測った幅とわずかに違いうる（2026-11-10 版から変わらず）。
 - **未検証**: この環境ではエージェントのシェルからのテスト・typecheck を実行していない（呼び出し側で実行が必要）。実機も未確認。
+
+## 時計の曜日・時計のメーター・歌詞の出方（2026-11-11 夕、ブランチ `feat/stage-patterns`、686e99d の上）
+
+### A. 時計の日付行で曜日が括弧に重なる（バグ修正）
+
+**所有者の所見**: 実機のスクリーンショットで、アイドル時計の日付行「11月11日（水）」の赤い曜日字が前後の括弧に重なってはみ出している。
+
+**原因**: 舞台の字の測り方（`LyricStage.tsx` の `measureWith`）が、字送りに `SkFont.measureText(char).width` を使っていた。react-native-skia の `measureText` は送り幅ではなく**字面（インク）の外接矩形**を返す（`node_modules/@shopify/react-native-skia/cpp/api/JsiSkFont.h` の `measureText` は `SkFont::measureText` の bounds だけを返し、送り幅の戻り値を捨てている）。全角括弧「（」「）」の字面は 1 字の枠の片側に寄った細い線なので、字送りが 0.3 字ほどに縮み、曜日が「（」の字面に、「）」が曜日に食い込んでいた。`composeClock` の組み方（幅の合計で中央寄せし、字送りずつ並べる）自体は正しく、入力の実寸がずれていた。
+
+**修正**: 字送りを送り幅（`getGlyphIDs` → `getGlyphWidths` の合計）で測る `advanceMeasure`（新規 `src/typesetting/fontMeasure.ts`）にし、`measureWith` をそれに置き換えた。`measureWith` は時計だけでなく歌詞の行・前後行・銘板・歌詞カードの組版すべてで使っているので、**舞台の字送り全体が実寸になる**（横組みの行・前後行・銘板のアーティスト・歌詞カードの字送りが少し広がる。縦組みの直立字の左右中央寄せも送り幅基準になる）。jest の Skia モック（`jest/setupSkia.js`、`LyricStage.test.tsx` のタグ付きフォント）に `getGlyphIDs` / `getGlyphWidths` を足した（幅は従来どおり 1 字 = sizePx なので既存テストの数値は変わらない）。
+
+**判断**: 装飾 `numeral` の右寄せ（`Ornaments.tsx` の `numeralFont.measureText(text).width`）は字面の幅のままにした（右端を字面で揃える用途で、重なりの問題は無い）。
+
+**テスト**（`idleComposition.test.ts`）: 字面と送り幅が違う架空のフォント（括弧は 1 字枠の片側に細い字面、漢字は枠の大半、数字は送りより細い）を `advanceMeasure` に通して `composeClock` を組み、日〜土の 7 曜日すべてで日付行の隣り合う字の字面が重ならないこと、括弧と曜日の隙間が 0.1〜0.5 字で前後対称なことを確かめる。あわせて、字面の幅で測る旧方式では曜日が「（」に食い込むことを確かめ、テストが不具合を検出できることを示す。
+
+### B. アイドル時計にもサウンドメーター
+
+**所有者の所見**: 「サウンドビジュアライザ機能なかったっけ？」。バンドメーターは銘板と歌詞カードにしか出ず、時計のまま聴いている間は音への反応が見えなかった。
+
+**変更**: `composeClock` が `meter`（印刷エリアの足元、全幅、高さの上限 `METER_MAX_HEIGHT`。銘板・歌詞カードと同じ位置）を返し、`LyricStage` が時計のブロック内に `BandMeter` を置く（testID は `idle-band-rule-*`。`BandMeter` に `testIDPrefix` を足した）。無音時の基線・減速表示時の静止・色（surge 込みの ink）・不透明度 0.7・1 フレームの変化量の上限は `BandMeter` 自体の挙動なので、銘板・歌詞カードと同じになる。日付行の足は「メーターの最大高さ＋20px（`CLOCK_METER_GAP`、銘板の `METER_GAP` と同じ）」より上に収める（背の低い画面でだけ効くクランプ。通常の画面では日付の位置は変わらない）。メーターは時計の一部なので、ドロップで曲の舞台に移ると時計と同時に外れる（散る時計の字の退場レイヤーにメーターは含めない）。銘板・歌詞カードでは同じ場所にそれぞれのメーターが出るので、見た目は途切れずに続く。設計書 §5 に追記した。
+
+**テスト**: `idleComposition.test.ts`（メーターの位置と寸法、通常の画面と背の低い画面で日付がメーターの最大高さ＋間隔より上にあること、通常の画面では日付の位置が変わらないこと）、`LyricStage.test.tsx`（時計に 24 本・基線・ink 0.7・別のメーターは無い、日付がメーターの上に収まる、減速表示で静止、時計 → 同期歌詞のドロップで時計のメーターが消え戻らない、時計 → 銘板のドロップでメーターが銘板の 1 列だけになる）。
+
+### C. 歌詞の出方のパターンを広げる
+
+**所有者の所見**: 「歌詞の出方にパターンが全然なさすぎて面白みがない」。
+
+**設計（先に設計書 §4・§5 を改定、改定履歴 2026-11-11 夕）**:
+- 入り方の語彙に `print`（一文字ずつ版を押すように 1.12 倍から等倍へ収まりつつ刷り上がる。字ごと 70ms、行全体の広がりは 900ms まで）、`gather`（字ごとに決まった方向へ 90px 離れた位置から、回転なしで一斉にスプリングで寄る、700ms）、`slide`（左 56px から行き過ぎない減速で順に滑り込む。字ごと 30ms、広がり 600ms まで）を足した。退場は `print` → 末尾から消える（trace）、`gather` → 散る（scatter）、`slide` → 右へ 48px 滑り去る（新しい退場）。字ごとの遅れは固定で行の歌唱時間に合わせないので、擬似的な音節同期にはならない。
+- 行の置き場所 `placement`（`center` と四隅、省略時は従来の置き方）を語彙に足した。`layoutLine` が組み上がった塊を、装飾の分を除いた印刷エリアの中で丸ごと動かす（はみ出さない）。前後の行・装飾・灯は塊の外接矩形に追従する。
+- ルールベースの選択規則（`directSongByRules` を書き直し）:
+  - 反復行（同じ本文が 2 回以上）は全出現で `accent: true`（従来どおり）。**再登場（2 回目以降）を格上げ**: 大きさ 1 段上（`xl` は予算内だけ）、装飾は本文から決まる「その行の印」（`frame` か `circle`、同じ本文なら毎回同じ）、滞留 `pulse`、置き場所 `center`、強調文字を最大 3 文字（最初・中ほど・最後の漢字）に、入り方は「決め」（`drop` / `gather` / `print`）から。
+  - `xl` の予算（曲中 3 行）は、反復の塊の先頭（構造的な山）の再登場 → ほかの再登場 → 短い行の順に配る。
+  - 大小の対比: 普通の行が直前の表示行と同じ大きさなら 1 段ずらす（上げられれば上、`xl` には上げず、`s` より下げない）。
+  - 縦横: 英字主体と 20 字超は横（従来どおり）、それ以外は縦。ただし直前 2 行が縦なら 14 字以内の行は横にして 3 行連続を避ける。
+  - 同じ出方を続けない: 入り方は直前 2 行と同じものを選ばない。滞留・置き場所は直前の行と変える（再登場の `pulse` / `center` を除く）。候補は本文の性格（感嘆・長い・英字・漢字）から先に並べ、その後ろに語彙全体を seed と行番号のハッシュで回した順。20 字超の行は `scatter` / `gather` を使わない。
+  - すべて本文・並び・seed（`アーティスト/曲名`）から決まり、乱数・音量・拍を使わない（決定的）。音量→字の大きさの直結はしていない。
+- 検証器（`validateDirection.ts`）は新しい入り方と任意の `placement` を受け付ける（Claude API の出力にも使える）。
+
+**判断**:
+- 「似た組み合わせを避ける」は、入り方の直近 2 行の不一致・滞留と置き場所の直前との不一致・大きさの対比・縦の 3 連続回避の組み合わせで実現し、（入り方, 大きさ, 向き）の組を直接比べる規則は置かなかった。入り方が 3 行の窓で必ず違うので、組としても 3 行連続で同じにはならない。
+- 再登場の格上げで `xl` が足りないとき（予算切れ）は大きさは据え置き、装飾・滞留・置き場所・強調で格上げする。「再登場は初出以上の大きさ」は保証する（初出が短い行の `xl` を取るのは、`xl` に組める再登場がすべて `xl` を取った後だけなので）。
+- 円の装飾は塊の中心から印刷エリアの端までに半径が制限されるので、四隅に寄せた行には小さくなる。ルールベースでは円は再登場（中央）にだけ付くので問題にならない。Claude API の演出が隅の行に円を付けた場合は小さな円になる（不具合ではないが見え方は実機で確認）。
+- 開発用フィクスチャ（`fixtureSong.ts`）の演出は変えていない（新しい入り方は含まない）。フィクスチャで新しい入り方を見たい場合は別途足す。
+- 既存の舞台テストのうち、前後行・装飾の幾何を従来の置き方で測るもの（`LyricStage.test.tsx` の該当 describe の `withLines`）は `placement: undefined` を明示した。置き場所そのものは `layout.test.ts` で確かめる。
+
+**テスト**: `ruleBasedDirector.test.ts`（架空の 2 番＋サビの曲で: 決定性、入り方が 3 行の窓で重複しない・1 種が 1/3 を超えない、本文の性格からの入り方（漢字 3 行で print/trace/fade、感嘆 3 行で drop/cut/slide、英字 3 行で slide/cut/rise）、長い行は scatter/gather なし、滞留・置き場所が直前と変わる、普通の行の大小対比、縦の 3 連続回避と縦横の混在、再登場の格上げ（大きさ ≥・印の装飾・pulse・中央・強調 ≥・決めの入り方）とサビ 2 番の頭が初出より大きいこと、検証器を通ること。既存のテストはそのまま通る想定）、`motion.test.ts`（print / gather / slide の動き・終わりが恒等・広がりの上限・不透明度が 0〜1 を出ない・退場・減速表示で恒等・1 拍以内の退場）、`layout.test.ts`（置き場所なしは従来と同一、各置き場所で塊が丸ごと動き、印刷エリア内で名前どおりの辺・中央に付く）、`validateDirection.test.ts`（新しい入り方、`placement` の任意・不正値の拒否）。
+
+### 変更ファイル
+
+- `src/typesetting/fontMeasure.ts`（新規。`advanceMeasure`）
+- `src/typesetting/LyricStage.tsx`（`measureWith` を送り幅に、時計のメーター）
+- `src/typesetting/idleComposition.ts`（`meter`、日付のメーター回避クランプ、`CLOCK_METER_GAP`）
+- `src/typesetting/BandMeter.tsx`（`testIDPrefix`）
+- `src/typesetting/motion.ts`（print / gather / slide、slide の退場）
+- `src/typesetting/layout.ts`（`placement` の適用 `placeBlock`）
+- `src/direction/types.ts`（`Entrance` に 3 種、`Placement`、`LineDirection.placement?`）
+- `src/direction/validateDirection.ts`（新しい入り方と `placement`）
+- `src/direction/ruleBasedDirector.ts`（選択規則の書き直し）
+- `jest/setupSkia.js`（フォントモックに送り幅）
+- テスト: `src/typesetting/__tests__/idleComposition.test.ts`、`src/typesetting/__tests__/LyricStage.test.tsx`、`src/typesetting/__tests__/motion.test.ts`、`src/typesetting/__tests__/layout.test.ts`、`src/direction/__tests__/ruleBasedDirector.test.ts`、`src/direction/__tests__/validateDirection.test.ts`
+- `docs/superpowers/specs/2026-10-18-lyric-typography-object-design.md`（改定履歴、§4 語彙・ルールベース、§5 入り方・時計のメーター）
+- `docs/superpowers/reports/2026-11-09-visual-overhaul-progress.md`（この節）
+
+### 実機で確認すること（時計の曜日・時計のメーター・歌詞の出方）
+
+- 時計の日付行「M月D日（曜）」で、曜日（赤）が括弧に重ならず、括弧との間隔が自然。日〜土の全曜日（日付を待つか端末の日付を変えて）。
+- 送り幅で測るようになったことで、横組みの歌詞行・前後行・銘板のアーティスト・歌詞カードの字間が不自然に広がっていない（特に英字・括弧・句読点）。時計の時刻の桁が詰まり過ぎ・空き過ぎでない。縦組みの直立字が列の中央に立っている。
+- 時計のまま音楽を流すと足元のメーターが反応し、無音で基線に伏せる。日付・caption・操作列と重ならない。iPhone SE 相当の背の低い画面でも日付がメーターに掛からない。
+- 時計 → 同期歌詞の曲（ドロップ）で時計のメーターが残らない。時計 → 銘板・歌詞カードでメーターが 1 列のまま途切れずに続く（二重にならない）。
+- 歌詞の入り方 `print`（刷り上がり）・`gather`（寄せ集め）・`slide`（滑り込み）が、縦組み・横組みの両方で崩れない。長い行の `print` / `slide` が間延びしない。退場（slide は右へ）が次の行と喧嘩しない。
+- 行の置き場所（四隅・中央）で、前後行・装飾（rule / frame）・灯が行に追従し、ワードマーク・caption・操作列に掛からない。
+- 同期歌詞の曲で、出方が単調でなく、それでいて置物としてうるさくない。サビの再登場（中央・枠か円・pulse・大きく）が「決め」として効いている。拍頭で全面が光る・点滅する見え方が無い。
+- fps 55 以上（gather / print の行の入り、メーターつきの時計）。
+
+### 据え置き・申し送り
+
+- 新しい入り方の数値（print 70ms・900ms・1.12 倍、gather 90px・700ms、slide 30ms・600ms・56px）、縦の 3 連続回避の 14 字、対比の上限は実機の見え方で調整する（定数は `motion.ts` と `ruleBasedDirector.ts` の先頭）。
+- フェーズ 3（Claude API の演出）のシステムプロンプトには、新しい語彙と「同じ出方を続けない」「再登場の格上げ」を書き足す必要がある（未実装のため今回は設計書の語彙だけ）。
+- **未検証**: この環境ではエージェントのシェルからのテスト・typecheck を実行していない（呼び出し側で実行が必要）。実機も未確認。
+
+### ビルド14の検証で落ちた 7 件の判定と修正（2026-11-11）
+
+相棒の検証: typecheck 通過、830 件中 823 件通過。落ちたのは `LyricStage.test.tsx` 2 件（「context lines stay inside the print area…」「the line, its context lines and its ornament stay inside the print area, for every ornament」）、`motion.test.ts` 4 件（print の字ごと 70ms、print の広がり 900ms、slide の行き過ぎなし・30ms・600ms、full ink を超えない）、ほか 1 件（実行条件で揺れる。下記）。
+
+**判定: 6 件とも本番の不具合で、原因は 1 つ。** `motion.ts` の `staggerMs`（worklet）が、ファイル内で**後ろに**宣言した worklet `cappedStagger` を呼んでいた。react-native-worklets 0.10 の Babel プラグイン（`babel-preset-expo` が jest でも自動で入れる）は、`'worklet'` の関数宣言を `const staggerMs = (factory)({ cappedStagger, … })` に書き換え、呼ぶ関数を**定義の時点の値で**取り込む。関数宣言の巻き上げはこの変換で失われるので、`staggerMs` が取り込む `cappedStagger` はまだ初期化されておらず、print と slide の字ごとの遅れを計算した時点で落ちる（JS スレッドでも UI スレッドでも同じ）。実機でも print / slide の行が出た瞬間に同じ例外になっていたはず。
+- motion の 4 件: どれも print または slide の遅れを通る（`glyphTransform` / `entranceDurationMs`）。gather は `staggerMs` を通らないので、gather だけのテスト・退場・減速表示・1 拍以内の退場のテストは通っていた。この切り分けと結果が合う。
+- LyricStage の 2 件: どちらも中の行が 25 字の「窓のむこうに朝を数えているまだ名前のない歌をひとつ」。20 字超の行の入り方の候補は `slide` / `print` / `fade` の順（`ruleBasedDirector.ts`）なので、主役の行の動きの導出（`GlyphLayer` の `useDerivedValue` → `glyphTransform`）が描画中に落ちていた。短い行のテストは別の入り方になるので落ちない。**組版の不具合ではない**: `contextLine` は塊を `area` に左右・上下でクランプしており（下端を優先）、送り幅で測って広がった塊にも、`placement` で動いた主役の行にも効く。テストの期待は変えていない。
+- テストの前提はどれも設計書 §5 と一致しており（print: 字ごと 70ms・広がり 900ms まで・1.12 倍から等倍、slide: 行き過ぎなし・30ms・600ms まで、不透明度 0〜1）、変更前の式もこの数値どおりだった（手で追って確認: print の 5 字は 4×70+160 = 440ms、60 字は 900/59 ms ずつ、slide は easeOut で単調に 0 へ）。テストは変えていない。
+
+**修正**: `motion.ts` で `cappedStagger` を `staggerMs` の前に移した（中身は無変更）。worklet は呼ぶ worklet より後ろに置く必要があることをその関数のコメントに残した。ほかの worklet の並びも確かめた（`glyphTransform` / `exitTransform` / `entranceDurationMs` が呼ぶ `easeOut` / `clamp01` / `spring` / `hashSigned` / `anticipation` / `staggerMs` などはすべて呼ぶ側より前）。今回触ったほかのファイル（`BandMeter.tsx` / `fontMeasure.ts` / `idleComposition.ts` / `layout.ts`）には、後ろの worklet を呼ぶ worklet は無い。
+
+**残りの 1 件**: 2 スイートだけの実行では出ず、どのテストかの記録も無いので、この環境では特定できていない。同じ原因（print / slide の行を描く別スイート）なら今回の修正で消える。消えなければ、AGENTS.md 既知のタイムアウトのフレーク（`useBurnInDrift.test.tsx` の 5000ms）を疑い、テスト名を記録して単独で再実行する。
+
+**未検証**: エージェントのシェルはブロックされているので、修正後のテストは実行していない。呼び出し側で `npm test -- --watchman=false` と `npm run typecheck` を実行して結果を記録する。
