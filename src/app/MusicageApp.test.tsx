@@ -248,7 +248,7 @@ describe('MusicageApp', () => {
       track: { title: track.title, artist: track.artist },
     });
     expect(screen.getByTestId('plain-note').props.text).toBe(RECOGNITION_COPY.lyrics_plain_sheet);
-    expect(screen.getByTestId('plain-page')).toBeTruthy();
+    expect(screen.getByTestId('plain-body')).toBeTruthy();
     expect(screen.queryByTestId('unsynced-note')).toBeNull();
     expect(screen.queryByTestId('idle-caption')).toBeNull();
     // The chrome takes the song's palette, as for a synced song.

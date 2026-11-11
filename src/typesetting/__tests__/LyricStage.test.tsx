@@ -25,9 +25,8 @@ import { lineArea } from '../Ornaments';
 import {
   composePlainSheet,
   PLAIN_BODY_DELAY_MS,
+  PLAIN_BODY_FADE_MS,
   PLAIN_EXIT_MS,
-  PLAIN_PAGE_FADE_MS,
-  PLAIN_PAGE_MS,
 } from '../plainSheet';
 import type { BeatSharedValues } from '../useBeatSharedValues';
 
@@ -1633,7 +1632,7 @@ describe('transitions: synced ⇄ nameplate ⇄ idle clock ⇄ lost', () => {
   });
 });
 
-describe('a recognised song with plain lyrics only: the lyric sheet (design spec §7, 2026-11-10)', () => {
+describe('a recognised song with plain lyrics only: the lyric sheet, the whole text on one sheet (design spec §7, 2026-11-11)', () => {
   const track = { title: '架空の歌', artist: '架空の人' };
   const songDirection = directSongByRules([], 'p');
   const { palette } = songDirection;
@@ -1652,6 +1651,14 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     text,
     dropAtMs,
   });
+  /** The same song's nameplate (a re-resolution without the text). */
+  const nameplateSource: LyricStageProps['source'] = {
+    kind: 'unsynced',
+    track,
+    direction: songDirection,
+    reason: 'lyrics_unavailable',
+    dropAtMs: null,
+  };
   const idleWith = (t: { title: string; artist: string } | null): LyricStageProps['source'] => ({
     kind: 'idle',
     direction: t === null ? null : songDirection,
@@ -1724,9 +1731,9 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     });
   /**
    * Lets `ms` pass on the fake clock, a second per act so each timer's
-   * re-render (a page turn, the idle clock) lands. A re-render that changes a
-   * derived value's dependencies (a page turn's timing) restarts its mapper on
-   * a setTimeout(0): the closing flush runs it, so what the test reads next is
+   * re-render (the idle clock, an exit's removal) lands. A re-render that
+   * changes a derived value's dependencies restarts its mapper on a
+   * setTimeout(0): the closing flush runs it, so what the test reads next is
    * derived from the new props.
    */
   const pass = async (ms: number) => {
@@ -1745,13 +1752,15 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
   const passTo = (at: number) => pass(at - performance.now());
   const inputsOf = (spy: jest.SpyInstance) => spy.mock.calls.map(([input]) => input as motion.MotionInput);
   const runTexts = (view: { getAllByTestId: (id: RegExp) => unknown[] }) =>
-    (view.getAllByTestId(/^plain-page-run-/) as Node[]).map((n) => n.props.text as string);
-  const pageOpacity = (view: { getByTestId: (id: string) => unknown }, id = 'plain-page') =>
+    (view.getAllByTestId(/^plain-body-run-/) as Node[]).map((n) => n.props.text as string);
+  const bodyOpacity = (view: { getByTestId: (id: string) => unknown }, id = 'plain-body') =>
     (view.getByTestId(id) as Node).props.opacity.value as number;
+  /** Every run of the whole text, as the sheet sets it. */
+  const allRuns = (text: string) => sheetOf(text).body.runs.map((r) => r.text);
   // The body's own start: the sheet comes on at START in every test that does not say otherwise.
   const BODY_START = START + PLAIN_BODY_DELAY_MS;
 
-  test('prints the small heading as the line on stage, the artist, the rule, a page of the body, the meter and the honest note', async () => {
+  test('prints the small heading as the line on stage, the artist, the rule, the whole body, the meter and the honest note', async () => {
     const view = await render(stage(plainSource()));
     const title = view.getAllByTestId(/^glyph-/) as unknown as Node[];
     expect(title).toHaveLength(4);
@@ -1763,8 +1772,8 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     const note = view.getByTestId('plain-note').props;
     expect(note.text).toBe(RECOGNITION_COPY.lyrics_plain_sheet);
     expect(note).toMatchObject({ x: 24, y: STAGE_AREA.captionBaseline, opacity: 0.6 });
-    expect(runTexts(view)).toEqual(sheetOf(SHORT).body.pages[0]!.runs.map((r) => r.text));
-    // One page: no folio. Nothing of the nameplate or the idle clock.
+    expect(runTexts(view)).toEqual(allRuns(SHORT));
+    // No folio (there are no pages). Nothing of the nameplate or the idle clock.
     expect(view.queryByTestId('plain-folio')).toBeNull();
     expect(view.queryByTestId('unsynced-note')).toBeNull();
     expect(view.queryByTestId('idle-caption')).toBeNull();
@@ -1778,23 +1787,23 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     const view = await render(stage(plainSource(), { beatValues: surging }));
     await flushUI();
     const expectFlat = () => {
-      const runs = view.getAllByTestId(/^plain-page-run-/) as unknown as Node[];
+      const runs = view.getAllByTestId(/^plain-body-run-/) as unknown as Node[];
       expect(runs.length).toBeGreaterThan(0);
       for (const run of runs) {
         expect(run.props.color).toBe(palette.ink);
         expect(run.props.font.getSize()).toBe(S);
       }
-      const page = view.getByTestId('plain-page') as unknown as Node;
-      expect(page.queryAll((n) => n.type === 'skLinearGradient')).toHaveLength(0);
+      const body = view.getByTestId('plain-body') as unknown as Node;
+      expect(body.queryAll((n) => n.type === 'skLinearGradient')).toHaveLength(0);
       const shadowed = view.getByTestId('line-shadow') as unknown as Node;
-      expect(shadowed.queryAll((n) => n.props.testID === 'plain-page')).toHaveLength(0);
+      expect(shadowed.queryAll((n) => n.props.testID === 'plain-body')).toHaveLength(0);
     };
     expectFlat();
     // Through the body's fade-in and well after, frame by frame in a surge on
     // every beat: the body is still the same flat ink, and fully up.
-    await pass(PLAIN_BODY_DELAY_MS + PLAIN_PAGE_FADE_MS + 2_000);
+    await pass(PLAIN_BODY_DELAY_MS + PLAIN_BODY_FADE_MS + 2_000);
     expectFlat();
-    expect(pageOpacity(view)).toBe(1);
+    expect(bodyOpacity(view)).toBe(1);
     // Only the heading's title and the artist (four glyphs each) have motion,
     // and both stand still once in: the body has no glyph motion at all.
     const inputs = inputsOf(spy);
@@ -1805,75 +1814,65 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     }
   });
 
-  test('the body comes in PLAIN_BODY_DELAY_MS after the sheet came on, on the stage clock, and a single page stays', async () => {
+  test('the body comes in PLAIN_BODY_DELAY_MS after the sheet came on, on the stage clock, and then stays as it is', async () => {
     const view = await render(stage(plainSource()));
     await flushUI();
     // The sheet's start: the body is not up yet…
-    expect(pageOpacity(view)).toBe(0);
+    expect(bodyOpacity(view)).toBe(0);
     // …nor just before the delay is over.
     await passTo(BODY_START - 100);
-    expect(pageOpacity(view)).toBe(0);
+    expect(bodyOpacity(view)).toBe(0);
     // Halfway through its fade.
-    await passTo(BODY_START + PLAIN_PAGE_FADE_MS / 2);
-    expect(pageOpacity(view)).toBeGreaterThan(0);
-    expect(pageOpacity(view)).toBeLessThan(1);
+    await passTo(BODY_START + PLAIN_BODY_FADE_MS / 2);
+    expect(bodyOpacity(view)).toBeGreaterThan(0);
+    expect(bodyOpacity(view)).toBeLessThan(1);
     // Past the fade: up.
-    await passTo(BODY_START + PLAIN_PAGE_FADE_MS + 500);
-    expect(pageOpacity(view)).toBe(1);
+    await passTo(BODY_START + PLAIN_BODY_FADE_MS + 500);
+    expect(bodyOpacity(view)).toBe(1);
 
     // An hour on (the app re-renders with the clock an hour later; the stage
-    // clock lands on the new anchor): still the one page, never turned, no folio.
+    // clock lands on the new anchor): the same whole body, still up, no folio.
     jumpedMs += 3_600_000;
     await view.rerender(stage(plainSource()));
     await pass(100);
-    expect(pageOpacity(view)).toBe(1);
-    expect(runTexts(view)).toEqual(sheetOf(SHORT).body.pages[0]!.runs.map((r) => r.text));
+    expect(bodyOpacity(view)).toBe(1);
+    expect(runTexts(view)).toEqual(allRuns(SHORT));
     expect(view.queryByTestId('plain-folio')).toBeNull();
   });
 
-  test('a long text turns its pages on the fixed PLAIN_PAGE_MS interval (the beat grid notwithstanding), round and round, with the folio', async () => {
+  test('a long text is drawn whole at once, set a step smaller, and nothing in it changes as time passes (the beat grid notwithstanding)', async () => {
     const sheet = sheetOf(LONG);
-    expect(sheet.body.pages).toHaveLength(3);
-    const pageRuns = (i: number) => sheet.body.pages[i]!.runs.map((r) => r.text);
+    // Six paragraphs of four lines do not fit at s: the sheet steps the size down.
+    expect(sheet.body.step).toBeGreaterThan(0);
+    expect(sheet.body.sizePx).toBeLessThan(S);
     const view = await render(stage(plainSource(LONG)));
-    const folio = () => view.getByTestId('plain-folio').props.text as string;
     await flushUI();
-    expect(runTexts(view)).toEqual(pageRuns(0));
-    expect(folio()).toBe('1 / 3');
+    // Every run of the text is on stage together, in the body's own size,
+    // and every character of the text is among them.
+    const expectWhole = () => {
+      expect(runTexts(view)).toEqual(allRuns(LONG));
+      expect(runTexts(view).join('')).toBe(LONG.replace(/\s/g, ''));
+      for (const run of view.getAllByTestId(/^plain-body-run-/) as unknown as Node[]) {
+        expect(run.props.font.getSize()).toBeCloseTo(sheet.body.sizePx, 9);
+      }
+    };
+    expectWhole();
+    expect(view.queryByTestId('plain-folio')).toBeNull();
 
-    // Mid-page, after dozens of beats (500 ms each) on the trusted grid: the
-    // first page fully up.
-    await passTo(BODY_START + PLAIN_PAGE_MS / 2);
-    expect(runTexts(view)).toEqual(pageRuns(0));
-    expect(folio()).toBe('1 / 3');
-    expect(pageOpacity(view)).toBe(1);
-    // Just before the boundary: still the first page, fading out.
-    await passTo(BODY_START + PLAIN_PAGE_MS - 200);
-    expect(runTexts(view)).toEqual(pageRuns(0));
-    expect(folio()).toBe('1 / 3');
-    expect(pageOpacity(view)).toBeGreaterThan(0);
-    expect(pageOpacity(view)).toBeLessThan(1);
-
-    // Just past it: the second page, fading in.
-    await passTo(BODY_START + PLAIN_PAGE_MS + 200);
-    expect(runTexts(view)).toEqual(pageRuns(1));
-    expect(folio()).toBe('2 / 3');
-    expect(pageOpacity(view)).toBeGreaterThan(0);
-    expect(pageOpacity(view)).toBeLessThan(1);
-    await passTo(BODY_START + PLAIN_PAGE_MS * 1.5);
-    expect(pageOpacity(view)).toBe(1);
-
-    await passTo(BODY_START + 2 * PLAIN_PAGE_MS + 200);
-    expect(runTexts(view)).toEqual(pageRuns(2));
-    expect(folio()).toBe('3 / 3');
-
-    // Round again to the first page.
-    await passTo(BODY_START + 3 * PLAIN_PAGE_MS + 200);
-    expect(runTexts(view)).toEqual(pageRuns(0));
-    expect(folio()).toBe('1 / 3');
+    // Past the fade, then past where the retired page turn used to fall
+    // (16 s) and well beyond, dozens of beats (500 ms each) on the trusted
+    // grid later: the same whole body, fully up, nothing turned.
+    await passTo(BODY_START + PLAIN_BODY_FADE_MS + 500);
+    expect(bodyOpacity(view)).toBe(1);
+    for (const at of [BODY_START + 16_200, BODY_START + 33_000]) {
+      await passTo(at);
+      expectWhole();
+      expect(bodyOpacity(view)).toBe(1);
+      expect(view.queryByTestId('plain-folio')).toBeNull();
+    }
   }, 30_000);
 
-  test('the lamp lies on the body (all its pages), not on the heading, and a page turn does not move it', async () => {
+  test('the lamp lies on the whole body, not on the heading, and does not move as time passes', async () => {
     const spy = jest.spyOn(textureBackground, 'TextureBackground');
     const focusNow = () =>
       (spy.mock.calls.at(-1)![0] as { focus?: { value: { x: number; y: number } } }).focus!.value;
@@ -1884,8 +1883,8 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     expect(focusNow().x).toBeCloseTo(expected.x, 6);
     expect(focusNow().y).toBeCloseTo(expected.y, 6);
 
-    await passTo(BODY_START + PLAIN_PAGE_MS + 200);
-    expect(view.getByTestId('plain-folio').props.text).toBe('2 / 3');
+    await passTo(BODY_START + 16_200);
+    expect(view.getByTestId('plain-body')).toBeTruthy();
     expect(focusNow().x).toBeCloseTo(expected.x, 6);
     expect(focusNow().y).toBeCloseTo(expected.y, 6);
   }, 30_000);
@@ -1912,23 +1911,21 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     // At the fire the body is out, and still out past the head (START + 300)
     // and the scatter: it does not land with the title. It comes on the wall
     // clock, PLAIN_BODY_DELAY_MS after the sheet came on.
-    expect(pageOpacity(view)).toBe(0);
+    expect(bodyOpacity(view)).toBe(0);
     await passTo(START + 1_000);
-    expect(pageOpacity(view)).toBe(0);
-    await passTo(BODY_START + PLAIN_PAGE_FADE_MS + 500);
-    expect(pageOpacity(view)).toBe(1);
+    expect(bodyOpacity(view)).toBe(0);
+    await passTo(BODY_START + PLAIN_BODY_FADE_MS + 500);
+    expect(bodyOpacity(view)).toBe(1);
   });
 
   test('sheet → nameplate (the same song re-resolved): the title exits, the nameplate title rises, the body fades out, no drop', async () => {
     const view = await render(stage(plainSource(SHORT, null)));
     await flushUI();
-    // Well into the sheet: its page is fully up.
+    // Well into the sheet: its body is fully up.
     await passTo(START + 10_000);
-    expect(pageOpacity(view)).toBe(1);
+    expect(bodyOpacity(view)).toBe(1);
     const spy = jest.spyOn(motion, 'glyphTransform');
-    await view.rerender(
-      stage({ kind: 'unsynced', track, direction: songDirection, reason: 'lyrics_unavailable', dropAtMs: null }),
-    );
+    await view.rerender(stage(nameplateSource));
     await flushUI();
     expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
     const nameplateTitle = inputsOf(spy).filter((i) => !i.exiting && i.hold === 'pulse');
@@ -1937,17 +1934,43 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     expect(view.getByTestId('unsynced-note')).toBeTruthy();
     expect(view.queryByTestId('plain-note')).toBeNull();
     expect(view.queryByTestId('plain-rule')).toBeNull();
-    expect(view.queryByTestId('plain-page')).toBeNull();
-    // The leaving page holds the page that was up and fades from its opacity.
-    expect(view.getAllByTestId(/^plain-page-leaving-run-/)).toHaveLength(sheetOf(SHORT).body.pages[0]!.runs.length);
-    expect(pageOpacity(view, 'plain-page-leaving')).toBe(1);
+    expect(view.queryByTestId('plain-body')).toBeNull();
+    // The leaving body holds the whole text that was up and fades from its opacity.
+    expect(view.getAllByTestId(/^plain-body-leaving-run-/)).toHaveLength(sheetOf(SHORT).body.runs.length);
+    expect(bodyOpacity(view, 'plain-body-leaving')).toBe(1);
     // Halfway through PLAIN_EXIT_MS it is on its way out…
     await pass(PLAIN_EXIT_MS / 2);
-    expect(pageOpacity(view, 'plain-page-leaving')).toBeGreaterThan(0);
-    expect(pageOpacity(view, 'plain-page-leaving')).toBeLessThan(1);
+    expect(bodyOpacity(view, 'plain-body-leaving')).toBeGreaterThan(0);
+    expect(bodyOpacity(view, 'plain-body-leaving')).toBeLessThan(1);
     // …and soon gone, with the heading's title.
     await pass(600 - PLAIN_EXIT_MS / 2);
-    expect(view.queryByTestId('plain-page-leaving')).toBeNull();
+    expect(view.queryByTestId('plain-body-leaving')).toBeNull();
+    expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
+  });
+
+  test('nameplate → sheet (the same song re-resolved): the nameplate title exits, the sheet title rises, no drop, and the whole body comes in after the delay', async () => {
+    const view = await render(stage(nameplateSource));
+    await flushUI();
+    await passTo(START + 5_000);
+    expect(view.getByTestId('unsynced-note')).toBeTruthy();
+    const sheetAt = performance.now();
+    const spy = jest.spyOn(motion, 'glyphTransform');
+    await view.rerender(stage(plainSource(SHORT, null)));
+    await flushUI();
+    expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
+    expect(view.queryByTestId('unsynced-note')).toBeNull();
+    expect(view.getByTestId('plain-note')).toBeTruthy();
+    const title = inputsOf(spy).filter((i) => !i.exiting && i.glyphCount === 4 && i.entrance !== 'fade');
+    expect(title.length).toBeGreaterThan(0);
+    for (const i of title) {
+      expect(i.entrance).toBe('rise');
+      expect(i.hold).toBe('still');
+    }
+    // Every run of the body at once, out until the delay is over, then up for good.
+    expect(runTexts(view)).toEqual(allRuns(SHORT));
+    expect(bodyOpacity(view)).toBe(0);
+    await passTo(sheetAt + PLAIN_BODY_DELAY_MS + PLAIN_BODY_FADE_MS + 500);
+    expect(bodyOpacity(view)).toBe(1);
     expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
   });
 
@@ -1957,16 +1980,16 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     await view.rerender(stage(plainSource(SHORT, START)));
     await flushUI();
     await passTo(START + 10_000);
-    expect(pageOpacity(view)).toBe(1);
+    expect(bodyOpacity(view)).toBe(1);
 
     // The quiet spell: idle with the song's caption; the title and the body leave.
     await view.rerender(stage(idleWith(track)));
     expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
     expect(view.getByTestId('idle-caption').props.text).toBe('架空の人 — 架空の歌');
-    expect(view.getByTestId('plain-page-leaving')).toBeTruthy();
+    expect(view.getByTestId('plain-body-leaving')).toBeTruthy();
     await pass(2_000);
     expect(view.queryAllByTestId(/^exit-glyph-/)).toHaveLength(0);
-    expect(view.queryByTestId('plain-page-leaving')).toBeNull();
+    expect(view.queryByTestId('plain-body-leaving')).toBeNull();
 
     // Sound returns: the same song, the same dropAtMs.
     await passTo(START + 20_000);
@@ -1981,13 +2004,13 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
       expect(i.entrance).toBe('rise');
       expect(i.anticipationMs).toBe(0);
     }
-    // The body starts over from its first page, after the same delay.
-    expect(runTexts(view)).toEqual(sheetOf(SHORT).body.pages[0]!.runs.map((r) => r.text));
-    expect(pageOpacity(view)).toBe(0);
+    // The whole body comes in again, after the same delay.
+    expect(runTexts(view)).toEqual(allRuns(SHORT));
+    expect(bodyOpacity(view)).toBe(0);
     await passTo(sheetBackAt + PLAIN_BODY_DELAY_MS - 100);
-    expect(pageOpacity(view)).toBe(0);
-    await passTo(sheetBackAt + PLAIN_BODY_DELAY_MS + PLAIN_PAGE_FADE_MS + 500);
-    expect(pageOpacity(view)).toBe(1);
+    expect(bodyOpacity(view)).toBe(0);
+    await passTo(sheetBackAt + PLAIN_BODY_DELAY_MS + PLAIN_BODY_FADE_MS + 500);
+    expect(bodyOpacity(view)).toBe(1);
   }, 30_000);
 
   test('synced line → (one idle render) → another song’s sheet: the line exits, the title drops, no half-risen clock scatters', async () => {
@@ -2006,11 +2029,11 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     expect(view.getAllByTestId(/^glyph-/)).toHaveLength(4);
   });
 
-  test('sheet → (one idle render) → another song’s synced line: the title exits, the body fades out, the line drops', async () => {
-    const view = await render(stage(plainSource(SHORT, null)));
+  test('sheet (a long text) → (one idle render) → another song’s synced line: the title exits, the whole body fades out, the line drops', async () => {
+    const view = await render(stage(plainSource(LONG, null)));
     await flushUI();
     await passTo(START + 10_000);
-    expect(pageOpacity(view)).toBe(1);
+    expect(bodyOpacity(view)).toBe(1);
     await view.rerender(stage(idleWith(songA)));
     await flushUI();
     const spy = jest.spyOn(motion, 'glyphTransform');
@@ -2018,8 +2041,9 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     await view.rerender(stage(syncedA(lineAt, lineAt)));
     await flushUI();
     expect(view.getAllByTestId(/^exit-glyph-/)).toHaveLength(4);
-    expect(view.getByTestId('plain-page-leaving')).toBeTruthy();
-    expect(view.queryByTestId('plain-page')).toBeNull();
+    expect(view.getAllByTestId(/^plain-body-leaving-run-/)).toHaveLength(sheetOf(LONG).body.runs.length);
+    expect(bodyOpacity(view, 'plain-body-leaving')).toBe(1);
+    expect(view.queryByTestId('plain-body')).toBeNull();
     expect(view.queryByTestId('plain-note')).toBeNull();
     expect(view.queryAllByTestId(/^band-rule-/)).toHaveLength(0);
     const line = inputsOf(spy).filter((i) => !i.exiting);
@@ -2027,13 +2051,13 @@ describe('a recognised song with plain lyrics only: the lyric sheet (design spec
     for (const i of line) expect(i.entrance).toBe('drop');
   });
 
-  test('under reduced motion the page is simply shown, and simply gone when the sheet leaves', async () => {
+  test('under reduced motion the body is simply shown, and simply gone when the sheet leaves', async () => {
     const view = await render(stage(plainSource(), { reducedMotion: true }));
-    expect(pageOpacity(view)).toBe(1);
+    expect(bodyOpacity(view)).toBe(1);
     await pass(10_000);
     await view.rerender(stage(idleWith(null), { reducedMotion: true }));
-    expect(view.queryByTestId('plain-page')).toBeNull();
-    expect(view.queryByTestId('plain-page-leaving')).toBeNull();
+    expect(view.queryByTestId('plain-body')).toBeNull();
+    expect(view.queryByTestId('plain-body-leaving')).toBeNull();
   });
 });
 

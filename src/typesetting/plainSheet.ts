@@ -6,53 +6,75 @@ import { SIZE_RATIO, verticalOrigin } from './layout';
 import type { GlyphMeasure, LineLayout, PlacedGlyph, PrintArea, Viewport } from './layout';
 import { fitRow, NAMEPLATE_RULE_HEIGHT, NAMEPLATE_RULE_WIDTH, rowGlyphs, rowWidth, titleOrientation } from './nameplate';
 
-// The lyric sheet (design spec §7, 2026-11-10): what the stage prints for a
-// recognised song whose lyrics LRCLIB has only as plain text, without times.
-// The stage does not know which line is being sung, so it does not pretend
-// to: the text is set as one printed sheet, like the lyric card in a record
-// sleeve, and turned page by page on a fixed, slow interval that nothing in
-// the music (beat, bar, energy, bands, surge, song position) feeds into.
-// Nothing in the body is ever highlighted, and it does not move.
+// The lyric sheet (design spec §7, 2026-11-10; whole text on one sheet,
+// 2026-11-11): what the stage prints for a recognised song whose lyrics
+// LRCLIB has only as plain text, without times. The stage does not know which
+// line is being sung, so it does not pretend to: the whole text is set as one
+// printed sheet, like the lyric card in a record sleeve, and all of it stays
+// on view. Nothing in the body changes with time once it is in (no pages, no
+// turning, no scrolling), nothing in it is ever highlighted, and nothing in
+// the music (beat, bar, energy, bands, surge, song position) reaches it.
 //
 // Vertical bands inside the print area, top to bottom:
 //   the heading: the title (primary face, s, one row), TITLE_ARTIST_GAP,
 //     the artist (secondary face, xs, one row); each cut with the ellipsis
 //   HEADING_RULE_GAP, the accent rule 12×2, BODY_GAP
-//   the body (one page of it)
+//   the body (the whole text)
 //   METER_GAP
 //   the band meter (METER_MAX_HEIGHT tall, standing on area.bottom)
-// and on the caption row, the note at the left and, with two pages or more,
-// the folio (`2 / 3`) at the right.
+// and on the caption row, the note at the left.
 //
-// The body (plainParagraphs, then wrapping and pagination):
+// The body (plainParagraphs, then wrapping and fitting):
 // - Lines are split at line breaks, trimmed, inner runs of blanks collapsed.
 //   Blank lines separate paragraphs (any number of them is one break).
 // - Vertical when the text has any kana or kanji (titleOrientation), set
 //   column by column from the right, each glyph placed as layoutLine places
-//   it (verticalOrigin); horizontal otherwise.
-// - s in the primary face, regular, on every page; rows (columns) are
-//   sizePx · PLAIN_LEADING apart.
+//   it (verticalOrigin); horizontal otherwise, row by row down.
 // - A line too long for a row wraps; its further rows are indented one em.
 //   A Latin word is not broken unless it is longer than a row. A row never
 //   starts with closing punctuation: the previous row's last token moves down
 //   with it.
-// - One empty row (column) between paragraphs. A paragraph that fits on a
-//   page is never split across pages: it starts a new page instead. A
-//   paragraph longer than a page breaks between its lines; a line longer than
-//   a page between its rows. A page never starts with the empty row.
+// - One empty row (column) between paragraphs; a tier never starts or ends
+//   with it.
+// - Fitting (fitPlainBody), the first that holds the whole text wins:
+//   1. one tier at each of PLAIN_SIZE_STEPS in turn (s first, the floor last);
+//   2. at the floor, 2, 3, … tiers (段組み: vertical tiers stacked down the
+//      room, horizontal ones side by side), each tier's rows (columns) at
+//      least PLAIN_MIN_TIER_EM long;
+//   3. the last resort: below the floor, the size shrinks by
+//      PLAIN_SQUEEZE_FACTOR (at the floor's leading), trying 1, 2, … tiers at
+//      each size, until the whole text fits.
+//   Within a tier count, a paragraph that fits in a tier is kept in one
+//   (fillTiers, keeping paragraphs); failing that the text flows from tier to
+//   tier, breaking anywhere. The text is never cut short and never turned.
 
-/** The body's size. */
-export const PLAIN_BODY_SIZE = 's' as const;
-/** Rows (columns) of the body are this many sizePx apart. */
-export const PLAIN_LEADING = 1.7;
+/**
+ * The body's sizes, largest first: a share of the viewport width (as
+ * SIZE_RATIO) and the leading (rows or columns are sizePx · leading apart).
+ * The first is s; the last is the floor.
+ */
+export const PLAIN_SIZE_STEPS: readonly { readonly ratio: number; readonly leading: number }[] = [
+  { ratio: SIZE_RATIO.s, leading: 1.7 },
+  { ratio: 0.053, leading: 1.65 },
+  { ratio: 0.047, leading: 1.6 },
+  { ratio: 0.041, leading: 1.55 },
+  { ratio: 0.036, leading: 1.5 },
+  { ratio: 0.032, leading: 1.45 },
+];
+/** At the floor and below it, a tier's rows (columns) are at least this many sizePx long. */
+export const PLAIN_MIN_TIER_EM = 8;
+/** Between tiers, in sizePx. */
+export const PLAIN_TIER_GAP = 1.5;
+/** The last resort: below the floor, the size shrinks by this factor at a time until the whole text fits. */
+export const PLAIN_SQUEEZE_FACTOR = 0.9;
+/** A guard on the last resort (no lyric comes near it): past it the text is set whole at that size, even over the room. */
+export const PLAIN_SQUEEZE_LIMIT = 60;
 /** The indent of a wrapped line's further rows, in sizePx. */
 export const PLAIN_WRAP_INDENT = 1;
 /** The body first shows this long after the sheet comes on (wall clock; longer than a drop's wait and scatter). */
 export const PLAIN_BODY_DELAY_MS = 1_500;
-/** Each page is up for this long, fades included. A fixed interval: never derived from the song. */
-export const PLAIN_PAGE_MS = 16_000;
-/** A page fades in over this, and out over this before the next one. */
-export const PLAIN_PAGE_FADE_MS = 1_200;
+/** The body fades in over this, once; then it stays as it is. */
+export const PLAIN_BODY_FADE_MS = 1_200;
 /** The body fades out over this when the sheet leaves the stage. */
 export const PLAIN_EXIT_MS = 400;
 
@@ -75,7 +97,15 @@ export interface PlainSheetTrack {
 
 type Box = { x: number; y: number; width: number; height: number };
 
-/** One drawn piece of a page: a whole row (horizontal) or one glyph (vertical). */
+/** The room the body is set in. */
+export interface PlainRoom {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+/** One drawn piece of the body: a whole row (horizontal) or one glyph (vertical). */
 export interface PlainRun {
   text: string;
   /** Baseline origin, as for a PlacedGlyph. */
@@ -85,7 +115,15 @@ export interface PlainRun {
   rotateDeg: 0 | 90;
 }
 
-export interface PlainPage {
+/** The whole body as set (fitPlainBody). */
+export interface PlainBodyFit {
+  sizePx: number;
+  leading: number;
+  /** The index into PLAIN_SIZE_STEPS; PLAIN_SIZE_STEPS.length when squeezed below the floor (the last resort). */
+  step: number;
+  /** How many tiers the room is split into (1: none). */
+  tiers: number;
+  /** Every run of the text, all drawn at once. */
   runs: PlainRun[];
   bounds: Box;
 }
@@ -96,19 +134,13 @@ export interface PlainSheet {
   artist: { text: string; glyphs: PlacedGlyph[]; sizePx: number };
   /** The accent rule between the heading and the body. */
   rule: Box;
-  body: {
+  body: PlainBodyFit & {
     orientation: LineDirection['orientation'];
     font: FontKey;
-    sizePx: number;
-    pages: PlainPage[];
-    /** All the pages together: the lamp's centre, which page turns do not move. */
-    bounds: Box;
   };
   meter: { x: number; width: number; baseline: number; maxHeight: number };
   /** The note's baseline origin and size (gothic xs, caption row, left). */
   note: { x: number; y: number; sizePx: number };
-  /** One per page when there are two or more (none for a single page): right-aligned on the caption row. */
-  folios: { text: string; x: number; y: number; sizePx: number }[];
 }
 
 /**
@@ -215,40 +247,48 @@ export function wrapPlainLine(
   return rows.map((tokens) => tokens.join('')).filter((text) => text !== '');
 }
 
-interface Slot {
+export interface Slot {
   text: string;
   /** A wrapped line's further row: indented. */
   continued: boolean;
 }
 
 /**
- * Pages of at most `capacity` slots each. Paragraphs are separated by one
- * empty slot (null); see the rules at the top of this file.
+ * The wrapped text in tiers of at most `capacity` slots each, in reading
+ * order; paragraphs are separated by one empty slot (null), which never
+ * starts or ends a tier. Keeping paragraphs: a paragraph that fits in a tier
+ * is not split across two (it starts the next one instead); one longer than a
+ * tier breaks between its lines, a line longer than a tier between its rows.
+ * Flowing: the slots fill each tier in turn, breaking anywhere.
  */
-export function paginatePlain(paragraphs: readonly (readonly (readonly Slot[])[])[], capacity: number): (Slot | null)[][] {
+export function fillTiers(
+  paragraphs: readonly (readonly (readonly Slot[])[])[],
+  capacity: number,
+  keepParagraphs: boolean,
+): (Slot | null)[][] {
   const cap = Math.max(1, capacity);
-  const pages: (Slot | null)[][] = [];
-  let page: (Slot | null)[] = [];
+  const tiers: (Slot | null)[][] = [];
+  let tier: (Slot | null)[] = [];
   const flush = () => {
-    if (page.length > 0) pages.push(page);
-    page = [];
+    if (tier.length > 0) tiers.push(tier);
+    tier = [];
   };
   for (const lines of paragraphs) {
     const size = lines.reduce((n, rows) => n + rows.length, 0);
-    if (page.length > 0) {
-      if (page.length + 1 + size <= cap) page.push(null);
+    if (tier.length > 0) {
+      if (keepParagraphs ? tier.length + 1 + size <= cap : tier.length + 1 < cap) tier.push(null);
       else flush();
     }
     for (const rows of lines) {
-      if (page.length > 0 && page.length + rows.length > cap && rows.length <= cap) flush();
+      if (keepParagraphs && tier.length > 0 && tier.length + rows.length > cap && rows.length <= cap) flush();
       for (const row of rows) {
-        if (page.length >= cap) flush();
-        page.push(row);
+        if (tier.length >= cap) flush();
+        tier.push(row);
       }
     }
   }
   flush();
-  return pages;
+  return tiers;
 }
 
 function union(boxes: readonly Box[]): Box {
@@ -279,6 +319,126 @@ function extents(texts: readonly string[], sizePx: number, measure: GlyphMeasure
     return { ascent: m.ascent, descent: m.descent };
   }
   return { ascent, descent };
+}
+
+/** The most tiers of at least PLAIN_MIN_TIER_EM that `span` holds at `sizePx` (at least 1). */
+function maxTiers(span: number, sizePx: number): number {
+  const gap = sizePx * PLAIN_TIER_GAP;
+  return Math.max(1, Math.floor((span + gap) / (sizePx * PLAIN_MIN_TIER_EM + gap) + EPSILON));
+}
+
+/**
+ * Sets the whole text at `sizePx` in `tiers` tiers of the room; null when it
+ * does not all fit (unless `force`, the last resort's guard, which sets it
+ * whole regardless, flowing, even over the room).
+ */
+function setBody(
+  paragraphs: readonly (readonly string[])[],
+  vertical: boolean,
+  room: PlainRoom,
+  measure: GlyphMeasure,
+  sizePx: number,
+  leading: number,
+  tiers: number,
+  force = false,
+): { runs: PlainRun[]; bounds: Box } | null {
+  const width = room.right - room.left;
+  const height = Math.max(0, room.bottom - room.top);
+  const pitch = sizePx * leading;
+  const indent = sizePx * PLAIN_WRAP_INDENT;
+  const gap = sizePx * PLAIN_TIER_GAP;
+  // Vertical tiers are stacked down the room, horizontal ones side by side.
+  const tierSpan = Math.max(0, ((vertical ? height : width) - (tiers - 1) * gap) / tiers);
+  const minSpan = (tiers > 1 ? PLAIN_MIN_TIER_EM : 1) * sizePx;
+  if (!force && tierSpan < minSpan - EPSILON) return null;
+  // A vertical row is a column of square cells; a horizontal one advances glyph by glyph.
+  const extentOf: (char: string) => number = vertical ? () => sizePx : (char) => measure(char, sizePx).advance;
+  const wrapped = paragraphs.map((lines) =>
+    lines.map((line) =>
+      wrapPlainLine(line, tierSpan, indent, extentOf).map((row, i): Slot => ({ text: row, continued: i > 0 })),
+    ),
+  );
+  const bodyExtent = extents(paragraphs.flat(), sizePx, measure);
+  const lineHeight = bodyExtent.descent - bodyExtent.ascent;
+  const across = vertical ? width - sizePx : height - lineHeight;
+  if (!force && across < -EPSILON) return null;
+  const capacity = Math.floor(Math.max(0, across) / pitch + EPSILON) + 1;
+  let slotted = fillTiers(wrapped, capacity, true);
+  if (slotted.length > tiers) slotted = fillTiers(wrapped, capacity, false);
+  if (!force && slotted.length > tiers) return null;
+
+  const runs: PlainRun[] = [];
+  const boxes: Box[] = [];
+  for (const [k, slots] of slotted.entries()) {
+    const tierStart = (vertical ? room.top : room.left) + k * (tierSpan + gap);
+    for (const [i, slot] of slots.entries()) {
+      if (slot === null) continue;
+      const lead = slot.continued ? indent : 0;
+      if (vertical) {
+        const centerX = room.right - sizePx / 2 - i * pitch;
+        const top = tierStart + lead;
+        const chars = [...slot.text];
+        // A glyph wider than its tier (only in a degenerate room): it does not fit.
+        if (!force && lead + chars.length * sizePx > tierSpan + EPSILON) return null;
+        chars.forEach((char, j) => {
+          if (char.trim() === '') return;
+          const { x, y, rotateDeg } = verticalOrigin(char, measure(char, sizePx), sizePx, centerX, top + j * sizePx);
+          runs.push({ text: char, x, y, rotateDeg });
+        });
+        boxes.push({ x: centerX - sizePx / 2, y: top, width: sizePx, height: chars.length * sizePx });
+      } else {
+        const x = tierStart + lead;
+        const y = room.top - bodyExtent.ascent + i * pitch;
+        const rowExtent = rowWidth(slot.text, sizePx, measure);
+        if (!force && lead + rowExtent > tierSpan + EPSILON) return null;
+        runs.push({ text: slot.text, x, y, rotateDeg: 0 });
+        boxes.push({ x, y: y + bodyExtent.ascent, width: rowExtent, height: lineHeight });
+      }
+    }
+  }
+  return { runs, bounds: union(boxes) };
+}
+
+/**
+ * The whole text set in `room`, as large as it will go (see the fitting rules
+ * at the top of this file). Never drops a character and never needs a second
+ * sheet: everything comes back in one set of runs.
+ */
+export function fitPlainBody(
+  paragraphs: readonly (readonly string[])[],
+  orientation: LineDirection['orientation'],
+  room: PlainRoom,
+  measure: GlyphMeasure,
+  viewportWidth: number,
+): PlainBodyFit {
+  const vertical = orientation === 'vertical';
+  const span = vertical ? Math.max(0, room.bottom - room.top) : room.right - room.left;
+  const floor = PLAIN_SIZE_STEPS.length - 1;
+  // 1. One tier, at each size step in turn.
+  for (const [step, { ratio, leading }] of PLAIN_SIZE_STEPS.entries()) {
+    const sizePx = viewportWidth * ratio;
+    const set = setBody(paragraphs, vertical, room, measure, sizePx, leading, 1);
+    if (set !== null) return { sizePx, leading, step, tiers: 1, ...set };
+  }
+  // 2. At the floor, in tiers.
+  const { ratio: floorRatio, leading: floorLeading } = PLAIN_SIZE_STEPS[floor]!;
+  const floorPx = viewportWidth * floorRatio;
+  for (let tiers = 2; tiers <= maxTiers(span, floorPx); tiers += 1) {
+    const set = setBody(paragraphs, vertical, room, measure, floorPx, floorLeading, tiers);
+    if (set !== null) return { sizePx: floorPx, leading: floorLeading, step: floor, tiers, ...set };
+  }
+  // 3. The last resort: smaller than the floor, until the whole text fits.
+  let sizePx = floorPx;
+  for (let n = 0; n < PLAIN_SQUEEZE_LIMIT; n += 1) {
+    sizePx *= PLAIN_SQUEEZE_FACTOR;
+    for (let tiers = 1; tiers <= maxTiers(span, sizePx); tiers += 1) {
+      const set = setBody(paragraphs, vertical, room, measure, sizePx, floorLeading, tiers);
+      if (set !== null) return { sizePx, leading: floorLeading, step: PLAIN_SIZE_STEPS.length, tiers, ...set };
+    }
+  }
+  const tiers = maxTiers(span, sizePx);
+  const set = setBody(paragraphs, vertical, room, measure, sizePx, floorLeading, tiers, true)!;
+  return { sizePx, leading: floorLeading, step: PLAIN_SIZE_STEPS.length, tiers, ...set };
 }
 
 export function plainTitleDirection(faces: IdleFaces): LineDirection {
@@ -349,105 +509,29 @@ export function composePlainSheet(
 
   // The meter on the foot of the print area, the body between.
   const meter = { x: area.left, width, baseline: area.bottom, maxHeight: METER_MAX_HEIGHT };
-  const bodyTop = rule.y + rule.height + BODY_GAP;
-  const bodyBottom = area.bottom - METER_MAX_HEIGHT - METER_GAP;
-  const bodyHeight = Math.max(0, bodyBottom - bodyTop);
-
+  const room: PlainRoom = {
+    left: area.left,
+    right: area.right,
+    top: rule.y + rule.height + BODY_GAP,
+    bottom: area.bottom - METER_MAX_HEIGHT - METER_GAP,
+  };
   const orientation = titleOrientation(paragraphs.flat().join(''));
-  const vertical = orientation === 'vertical';
   const font = faces.primary;
-  const bodyMeasure = measureFor(font, 'regular');
-  const sizePx = viewport.width * SIZE_RATIO[PLAIN_BODY_SIZE];
-  const pitch = sizePx * PLAIN_LEADING;
-  const indent = sizePx * PLAIN_WRAP_INDENT;
-  // A vertical row is a column of square cells; a horizontal one advances glyph by glyph.
-  const extentOf: (char: string) => number = vertical ? () => sizePx : (char) => bodyMeasure(char, sizePx).advance;
-  const rowLimit = vertical ? bodyHeight : width;
-  const wrapped = paragraphs.map((lines) =>
-    lines.map((line) =>
-      wrapPlainLine(line, rowLimit, indent, extentOf).map((row, i): Slot => ({ text: row, continued: i > 0 })),
-    ),
-  );
-  const bodyExtent = extents(paragraphs.flat(), sizePx, bodyMeasure);
-  const capacity = vertical
-    ? Math.floor((width - sizePx) / pitch + EPSILON) + 1
-    : Math.floor((bodyHeight - (bodyExtent.descent - bodyExtent.ascent)) / pitch + EPSILON) + 1;
-  const slotted = paginatePlain(wrapped, capacity);
-
-  const pages = slotted.map((slots): PlainPage => {
-    const runs: PlainRun[] = [];
-    const boxes: Box[] = [];
-    slots.forEach((slot, i) => {
-      if (slot === null) return;
-      const lead = slot.continued ? indent : 0;
-      if (vertical) {
-        const centerX = area.right - sizePx / 2 - i * pitch;
-        const top = bodyTop + lead;
-        const chars = [...slot.text];
-        chars.forEach((char, j) => {
-          if (char.trim() === '') return;
-          const { x, y, rotateDeg } = verticalOrigin(char, bodyMeasure(char, sizePx), sizePx, centerX, top + j * sizePx);
-          runs.push({ text: char, x, y, rotateDeg });
-        });
-        boxes.push({ x: centerX - sizePx / 2, y: top, width: sizePx, height: chars.length * sizePx });
-      } else {
-        const x = area.left + lead;
-        const y = bodyTop - bodyExtent.ascent + i * pitch;
-        runs.push({ text: slot.text, x, y, rotateDeg: 0 });
-        boxes.push({
-          x,
-          y: y + bodyExtent.ascent,
-          width: rowWidth(slot.text, sizePx, bodyMeasure),
-          height: bodyExtent.descent - bodyExtent.ascent,
-        });
-      }
-    });
-    return { runs, bounds: union(boxes) };
-  });
-
-  const gothic = measureFor('gothic', 'regular');
-  const folios =
-    pages.length < 2
-      ? []
-      : pages.map((_, i) => {
-          const folio = `${i + 1} / ${pages.length}`;
-          return { text: folio, x: area.right - rowWidth(folio, xsPx, gothic), y: area.captionBaseline, sizePx: xsPx };
-        });
+  const body = fitPlainBody(paragraphs, orientation, room, measureFor(font, 'regular'), viewport.width);
 
   return {
     title: { text: titleText, direction, layout },
     artist: { text: artistText, glyphs: artistGlyphs, sizePx: xsPx },
     rule,
-    body: { orientation, font, sizePx, pages, bounds: union(pages.map((p) => p.bounds)) },
+    body: { orientation, font, ...body },
     meter,
     note: { x: area.left, y: area.captionBaseline, sizePx: xsPx },
-    folios,
   };
 }
 
-/** Which page is up `elapsedMs` after the body's start: page 0 until then, then one per PLAIN_PAGE_MS, round and round. */
-export function plainPageIndex(elapsedMs: number, pageCount: number): number {
-  'worklet';
-  if (pageCount <= 1 || !(elapsedMs > 0)) return 0;
-  return Math.floor(elapsedMs / PLAIN_PAGE_MS) % pageCount;
-}
-
-/**
- * The body's opacity `elapsedMs` after its start: 0 before it; a single page
- * fades in once and stays; with more, each page fades in at the start of its
- * PLAIN_PAGE_MS and out at its end (one page never overlaps the next).
- */
-export function plainPageOpacity(elapsedMs: number, pageCount: number): number {
+/** The body's opacity `elapsedMs` after its start: 0 before it, then one fade in over PLAIN_BODY_FADE_MS, then 1 for good. */
+export function plainBodyOpacity(elapsedMs: number): number {
   'worklet';
   if (!(elapsedMs > 0)) return 0;
-  if (pageCount <= 1) return Math.min(1, elapsedMs / PLAIN_PAGE_FADE_MS);
-  const within = elapsedMs % PLAIN_PAGE_MS;
-  return Math.max(0, Math.min(1, within / PLAIN_PAGE_FADE_MS, (PLAIN_PAGE_MS - within) / PLAIN_PAGE_FADE_MS));
-}
-
-/** How long from `elapsedMs` until the page changes; null when it never does (a single page). */
-export function plainNextTurnInMs(elapsedMs: number, pageCount: number): number | null {
-  if (pageCount <= 1) return null;
-  if (!(elapsedMs > 0)) return PLAIN_PAGE_MS - elapsedMs;
-  return PLAIN_PAGE_MS - (elapsedMs % PLAIN_PAGE_MS);
+  return Math.min(1, elapsedMs / PLAIN_BODY_FADE_MS);
 }

@@ -5,21 +5,21 @@ import type { GlyphMeasure } from '../layout';
 import { NAMEPLATE_ELLIPSIS } from '../nameplate';
 import {
   composePlainSheet,
-  paginatePlain,
-  PLAIN_LEADING,
-  PLAIN_PAGE_FADE_MS,
-  PLAIN_PAGE_MS,
-  plainNextTurnInMs,
-  plainPageIndex,
-  plainPageOpacity,
+  fillTiers,
+  fitPlainBody,
+  PLAIN_BODY_FADE_MS,
+  PLAIN_MIN_TIER_EM,
+  PLAIN_SIZE_STEPS,
+  PLAIN_TIER_GAP,
+  plainBodyOpacity,
   plainParagraphs,
   plainTitleDirection,
   wrapPlainLine,
 } from '../plainSheet';
-import type { PlainSheet } from '../plainSheet';
+import type { PlainBodyFit, PlainRoom, PlainSheet } from '../plainSheet';
 
 // The jest Font: every glyph sizePx wide, ascent −0.88, descent 0.12.
-// Every text here is fictional, written for these tests.
+// Every text here is fictional, written (or generated) for these tests.
 const VIEWPORT = { width: 390, height: 844, insetTop: 47, insetBottom: 34 };
 const measure: GlyphMeasure = (_char, sizePx) => ({ advance: sizePx, ascent: -sizePx * 0.88, descent: sizePx * 0.12 });
 const measureFor = () => measure;
@@ -28,7 +28,10 @@ const S = 390 * SIZE_RATIO.s;
 const AREA = printArea(VIEWPORT, -XS * 0.88);
 const faces = UNRECOGNIZED_IDLE_FACES;
 const song = { title: '架空の歌', artist: '架空の人' };
-const PITCH = S * PLAIN_LEADING;
+const PITCH = S * PLAIN_SIZE_STEPS[0]!.leading;
+const FLOOR = PLAIN_SIZE_STEPS.length - 1;
+const FLOOR_PX = 390 * PLAIN_SIZE_STEPS[FLOOR]!.ratio;
+const SQUEEZED = PLAIN_SIZE_STEPS.length;
 const EPS = 1e-6;
 
 const compose = (text: string, track = song, viewport = VIEWPORT, area = AREA): PlainSheet => {
@@ -37,10 +40,28 @@ const compose = (text: string, track = song, viewport = VIEWPORT, area = AREA): 
   return sheet;
 };
 
-/** The top of the body's room: under the heading's rule. */
-const bodyTopOf = (sheet: PlainSheet) => sheet.rule.y + sheet.rule.height;
+/** The top of the body's room: under the heading's rule and BODY_GAP. */
+const bodyTopOf = (sheet: PlainSheet) => sheet.rule.y + sheet.rule.height + 20;
 /** The foot of the body's room: above the meter's room. */
-const BODY_FOOT = AREA.bottom - METER_MAX_HEIGHT;
+const BODY_FOOT = AREA.bottom - METER_MAX_HEIGHT - 20;
+
+// A room for fitPlainBody of its own: 342 wide, 392 tall (about the stage's).
+const ROOM: PlainRoom = { left: AREA.left, right: AREA.right, top: 180, bottom: 572 };
+const fit = (text: string, room = ROOM) => {
+  const paragraphs = plainParagraphs(text);
+  return fitPlainBody(paragraphs, /[぀-ヿ一-鿿]/.test(text) ? 'vertical' : 'horizontal', room, measure, 390);
+};
+/** Every printed character of the body, in drawing order (spaces dropped). */
+const printedOf = (body: PlainBodyFit) => body.runs.map((r) => r.text).join('').replace(/ /g, '');
+const textOf = (text: string) => text.replace(/\s/g, '');
+/** The body's own box lies inside the room. */
+const expectWithin = (body: PlainBodyFit, room: PlainRoom) => {
+  const b = body.bounds;
+  expect(b.x).toBeGreaterThanOrEqual(room.left - EPS);
+  expect(b.x + b.width).toBeLessThanOrEqual(room.right + EPS);
+  expect(b.y).toBeGreaterThanOrEqual(room.top - EPS);
+  expect(b.y + b.height).toBeLessThanOrEqual(room.bottom + EPS);
+};
 
 describe('plainParagraphs', () => {
   test('splits at line breaks, trims, collapses blanks; any run of blank lines is one paragraph break', () => {
@@ -91,13 +112,14 @@ describe('wrapPlainLine (unit extents: limit 5, indent 1)', () => {
   });
 });
 
-describe('paginatePlain', () => {
+describe('fillTiers', () => {
   let n = 0;
   const row = () => ({ text: `r${(n += 1)}`, continued: false });
   /** A paragraph of `lines` one-row lines. */
   const para = (lines: number) => Array.from({ length: lines }, () => [row()]);
-  const flat = (pages: ReturnType<typeof paginatePlain>) =>
-    pages
+  const texts = (tiers: ReturnType<typeof fillTiers>) => tiers.map((t) => t.map((s) => s?.text ?? null));
+  const flat = (tiers: ReturnType<typeof fillTiers>) =>
+    tiers
       .flat()
       .filter((s): s is NonNullable<typeof s> => s !== null)
       .map((s) => s.text);
@@ -105,47 +127,180 @@ describe('paginatePlain', () => {
     n = 0;
   });
 
-  test('paragraphs that fit share a page with one empty slot between them', () => {
-    const pages = paginatePlain([para(3), para(3)], 10);
-    expect(pages).toHaveLength(1);
-    expect(pages[0]!.map((s) => s?.text ?? null)).toEqual(['r1', 'r2', 'r3', null, 'r4', 'r5', 'r6']);
+  describe('keeping paragraphs', () => {
+    test('paragraphs that fit share a tier with one empty slot between them', () => {
+      const tiers = fillTiers([para(3), para(3)], 10, true);
+      expect(texts(tiers)).toEqual([['r1', 'r2', 'r3', null, 'r4', 'r5', 'r6']]);
+    });
+
+    test('a paragraph that does not fit on the rest of a tier starts the next one', () => {
+      const tiers = fillTiers([para(8), para(4)], 10, true);
+      expect(tiers.map((t) => t.length)).toEqual([8, 4]);
+    });
+
+    test('a paragraph longer than a tier breaks between its lines; a line longer than a tier between its rows', () => {
+      expect(fillTiers([para(25)], 10, true).map((t) => t.length)).toEqual([10, 10, 5]);
+      const longLine = [Array.from({ length: 12 }, (_, i) => ({ text: `w${i}`, continued: i > 0 }))];
+      expect(fillTiers([longLine], 10, true).map((t) => t.length)).toEqual([10, 2]);
+    });
+
+    test('a wrapped line is kept in one tier when it fits in a fresh one', () => {
+      const twoRows = [{ text: 'a', continued: false }, { text: 'b', continued: true }];
+      expect(texts(fillTiers([[...para(9), twoRows]], 10, true))).toEqual([
+        ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8', 'r9'],
+        ['a', 'b'],
+      ]);
+    });
   });
 
-  test('a paragraph that does not fit on the rest of a page starts the next one; no page starts or ends empty', () => {
-    const pages = paginatePlain([para(8), para(4)], 10);
-    expect(pages.map((p) => p.length)).toEqual([8, 4]);
-    for (const page of pages) {
-      expect(page[0]).not.toBeNull();
-      expect(page[page.length - 1]).not.toBeNull();
-    }
+  describe('flowing', () => {
+    test('fills each tier in turn, splitting paragraphs, where keeping them would take one more tier', () => {
+      const paragraphs = [para(6), para(6), para(6)];
+      expect(fillTiers(paragraphs, 10, true)).toHaveLength(3);
+      n = 0;
+      expect(texts(fillTiers([para(6), para(6), para(6)], 10, false))).toEqual([
+        ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', null, 'r7', 'r8', 'r9'],
+        ['r10', 'r11', 'r12', null, 'r13', 'r14', 'r15', 'r16', 'r17', 'r18'],
+      ]);
+    });
+
+    test('the empty slot between paragraphs never ends a tier', () => {
+      expect(texts(fillTiers([para(9), para(2)], 10, false))).toEqual([
+        ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8', 'r9'],
+        ['r10', 'r11'],
+      ]);
+    });
   });
 
-  test('a paragraph longer than a page breaks between its lines; a line longer than a page between its rows', () => {
-    expect(paginatePlain([para(25)], 10).map((p) => p.length)).toEqual([10, 10, 5]);
-    const longLine = [Array.from({ length: 12 }, (_, i) => ({ text: `w${i}`, continued: i > 0 }))];
-    expect(paginatePlain([longLine], 10).map((p) => p.length)).toEqual([10, 2]);
-  });
-
-  test('a wrapped line is kept on one page when it fits on a fresh one', () => {
-    const twoRows = [{ text: 'a', continued: false }, { text: 'b', continued: true }];
-    const pages = paginatePlain([[...para(9), twoRows]], 10);
-    expect(pages.map((p) => p.map((s) => s?.text))).toEqual([
-      ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8', 'r9'],
-      ['a', 'b'],
-    ]);
-  });
-
-  test('every row appears exactly once, in order, whatever the capacity (even a degenerate one)', () => {
-    const paragraphs = [para(2), para(7), para(1), para(13), para(4)];
-    const all = paragraphs.flat(2).map((s) => s.text);
-    for (const cap of [0, 1, 2, 3, 5, 10, 40]) {
-      const pages = paginatePlain(paragraphs, cap);
-      expect(flat(pages)).toEqual(all);
-      for (const page of pages) {
-        expect(page.length).toBeLessThanOrEqual(Math.max(1, cap));
-        expect(page[0]).not.toBeNull();
+  test.each([true, false])(
+    'every row appears exactly once, in order, whatever the capacity (even a degenerate one); keep %s',
+    (keep) => {
+      const paragraphs = [para(2), para(7), para(1), para(13), para(4)];
+      const all = paragraphs.flat(2).map((s) => s.text);
+      for (const cap of [0, 1, 2, 3, 5, 10, 40]) {
+        const tiers = fillTiers(paragraphs, cap, keep);
+        expect(flat(tiers)).toEqual(all);
+        for (const tier of tiers) {
+          expect(tier.length).toBeLessThanOrEqual(Math.max(1, cap));
+          expect(tier[0]).not.toBeNull();
+          expect(tier[tier.length - 1]).not.toBeNull();
+        }
       }
+    },
+  );
+});
+
+describe('fitPlainBody: the whole text on one sheet, as large as it will go', () => {
+  test('a short text is set at s in one tier', () => {
+    const body = fit('灯のない部屋\n針を下ろす');
+    expect(body).toMatchObject({ step: 0, tiers: 1, sizePx: S, leading: PLAIN_SIZE_STEPS[0]!.leading });
+    expect(printedOf(body)).toBe('灯のない部屋針を下ろす');
+  });
+
+  test('a text too long for s steps down to the first size that holds it all', () => {
+    // Twelve columns: s holds 9 across the room, the next step 10, the one after 12.
+    const text = Array.from({ length: 12 }, () => 'あいうえおかき').join('\n');
+    const body = fit(text);
+    expect(body.step).toBe(2);
+    expect(body.tiers).toBe(1);
+    expect(body.sizePx).toBeCloseTo(390 * PLAIN_SIZE_STEPS[2]!.ratio, 9);
+    expect(body.leading).toBe(PLAIN_SIZE_STEPS[2]!.leading);
+    expect(printedOf(body)).toBe(textOf(text));
+    expectWithin(body, ROOM);
+  });
+
+  test('the size steps go down and their leading tightens; the first is s', () => {
+    expect(PLAIN_SIZE_STEPS[0]!.ratio).toBe(SIZE_RATIO.s);
+    for (let i = 1; i < PLAIN_SIZE_STEPS.length; i += 1) {
+      expect(PLAIN_SIZE_STEPS[i]!.ratio).toBeLessThan(PLAIN_SIZE_STEPS[i - 1]!.ratio);
+      expect(PLAIN_SIZE_STEPS[i]!.leading).toBeLessThanOrEqual(PLAIN_SIZE_STEPS[i - 1]!.leading);
     }
+  });
+
+  test('vertical, past the floor: tiers stacked down the room, each read right to left, paragraphs kept whole', () => {
+    // 26 columns (three paragraphs of eight, two empty columns): the floor holds 19 across.
+    const text = Array.from({ length: 3 }, (_, p) => Array.from({ length: 8 }, () => `あいう${p}え`).join('\n')).join(
+      '\n\n',
+    );
+    const body = fit(text);
+    expect(body).toMatchObject({ step: FLOOR, tiers: 2 });
+    expect(body.sizePx).toBeCloseTo(FLOOR_PX, 9);
+    expect(printedOf(body)).toBe(textOf(text));
+    expectWithin(body, ROOM);
+    const gap = FLOOR_PX * PLAIN_TIER_GAP;
+    const tierSpan = (ROOM.bottom - ROOM.top - gap) / 2;
+    // The third paragraph starts the lower tier, in its rightmost column.
+    const thirdStart = body.runs.findIndex((r) => r.text === '2');
+    const third = body.runs[thirdStart - 3]!;
+    expect(third.text).toBe('あ');
+    expect(third.x + FLOOR_PX / 2).toBeCloseTo(ROOM.right - FLOOR_PX / 2, 6);
+    expect(third.y).toBeGreaterThan(ROOM.top + tierSpan + gap);
+    // The first two share the upper tier.
+    const second = body.runs[body.runs.findIndex((r) => r.text === '1') - 3]!;
+    expect(second.y).toBeLessThan(ROOM.top + tierSpan);
+    expect(second.x).toBeLessThan(body.runs[0]!.x);
+  });
+
+  test('horizontal, past the floor: tiers side by side, rows down each', () => {
+    // 30 rows: the floor holds 21 down the room.
+    const text = Array.from({ length: 30 }, () => 'abc def').join('\n');
+    const body = fit(text);
+    expect(body).toMatchObject({ step: FLOOR, tiers: 2 });
+    expect(body.runs).toHaveLength(30);
+    const gap = FLOOR_PX * PLAIN_TIER_GAP;
+    const tierSpan = (ROOM.right - ROOM.left - gap) / 2;
+    expect(tierSpan).toBeGreaterThanOrEqual(PLAIN_MIN_TIER_EM * FLOOR_PX);
+    const lefts = [...new Set(body.runs.map((r) => r.x))];
+    expect(lefts).toHaveLength(2);
+    expect(lefts[0]).toBeCloseTo(ROOM.left, 6);
+    expect(lefts[1]).toBeCloseTo(ROOM.left + tierSpan + gap, 6);
+    // The second tier starts again at the top.
+    const firstOfSecond = body.runs.find((r) => r.x === lefts[1])!;
+    expect(firstOfSecond.y).toBeCloseTo(body.runs[0]!.y, 6);
+    expectWithin(body, ROOM);
+  });
+
+  test('when keeping paragraphs whole would take another tier, the text flows across tiers instead', () => {
+    // Three paragraphs of twelve columns: kept whole they need three tiers of 19, flowing they fill two.
+    const text = Array.from({ length: 3 }, () => Array.from({ length: 12 }, () => 'あいう').join('\n')).join('\n\n');
+    const body = fit(text);
+    expect(body).toMatchObject({ step: FLOOR, tiers: 2 });
+    expect(printedOf(body)).toBe(textOf(text));
+    expectWithin(body, ROOM);
+  });
+
+  test.each([
+    ['many lines', Array.from({ length: 100 }, () => 'あいうえおかきくけこ').join('\n')],
+    ['one extremely long line', 'あいうえお'.repeat(400)],
+    ['a long Latin text', Array.from({ length: 120 }, (_, i) => `line ${i} of the fictional verse`).join('\n')],
+  ])('the last resort, %s: smaller than the floor until all of it fits, nothing dropped', (_, text) => {
+    const body = fit(text);
+    expect(body.step).toBe(SQUEEZED);
+    expect(body.sizePx).toBeLessThan(FLOOR_PX);
+    expect(body.sizePx).toBeGreaterThan(1);
+    expect(printedOf(body)).toBe(textOf(text));
+    expectWithin(body, ROOM);
+  });
+
+  test('a degenerate room (no height) still sets every character, in order', () => {
+    const flatRoom = { ...ROOM, bottom: ROOM.top };
+    for (const text of ['あいう\n\nえお', 'abc\ndef']) {
+      expect(printedOf(fit(text, flatRoom))).toBe(textOf(text));
+    }
+  });
+
+  test('a text of blank lines around a few characters is set at s, a blank column between its paragraphs', () => {
+    const body = fit('\n\n\n\n　\n\nあ\n\n\n\n\n\nい\n\n');
+    expect(body).toMatchObject({ step: 0, tiers: 1 });
+    expect(body.runs.map((r) => r.text)).toEqual(['あ', 'い']);
+    expect(body.runs[0]!.x - body.runs[1]!.x).toBeCloseTo(2 * PITCH, 6);
+  });
+
+  test('one Latin word longer than a row breaks into rows, still at s', () => {
+    const body = fit('x'.repeat(40));
+    expect(body.step).toBe(0);
+    expect(printedOf(body)).toBe('x'.repeat(40));
+    expectWithin(body, ROOM);
   });
 });
 
@@ -184,32 +339,31 @@ describe('composePlainSheet', () => {
     expect(lastArtist.x + XS).toBeLessThanOrEqual(AREA.right + EPS);
   });
 
-  test('the meter stands on the foot of the print area; the note and the folio share the caption row', () => {
+  test('the meter stands on the foot of the print area; the note alone on the caption row (no folio)', () => {
     const sheet = compose('あ');
     expect(sheet.meter).toEqual({ x: AREA.left, width: AREA.right - AREA.left, baseline: AREA.bottom, maxHeight: METER_MAX_HEIGHT });
     expect(sheet.note).toEqual({ x: AREA.left, y: AREA.captionBaseline, sizePx: XS });
+    expect(sheet).not.toHaveProperty('folios');
+    expect(sheet.body).not.toHaveProperty('pages');
   });
 
-  test('a Latin text lies horizontal: one row run per line, s, PLAIN_LEADING apart, from the left edge', () => {
+  test('a Latin text lies horizontal: one row run per line, s, the first step’s leading apart, from the left edge', () => {
     const sheet = compose('Lamp low\nNeedle down');
     expect(sheet.body.orientation).toBe('horizontal');
-    expect(sheet.body.sizePx).toBe(S);
-    expect(sheet.body.font).toBe(faces.primary);
-    expect(sheet.body.pages).toHaveLength(1);
-    const runs = sheet.body.pages[0]!.runs;
+    expect(sheet.body).toMatchObject({ sizePx: S, step: 0, tiers: 1, font: faces.primary });
+    const runs = sheet.body.runs;
     expect(runs.map((r) => r.text)).toEqual(['Lamp low', 'Needle down']);
     for (const r of runs) {
       expect(r.x).toBe(AREA.left);
       expect(r.rotateDeg).toBe(0);
     }
     expect(runs[1]!.y - runs[0]!.y).toBeCloseTo(PITCH, 6);
-    expect(runs[0]!.y - S * 0.88).toBeCloseTo(bodyTopOf(sheet) + 20, 6);
-    expect(sheet.folios).toEqual([]);
+    expect(runs[0]!.y - S * 0.88).toBeCloseTo(bodyTopOf(sheet), 6);
   });
 
   test('a wrapped horizontal line indents its further rows by one em and keeps its words whole', () => {
     const sheet = compose('aaaa bbbb cccc dddd eeee');
-    const runs = sheet.body.pages[0]!.runs;
+    const runs = sheet.body.runs;
     // 14 glyphs of S fit in a row of 342px, 13 in an indented one.
     expect(runs.map((r) => r.text)).toEqual(['aaaa bbbb cccc', 'dddd eeee']);
     expect(runs[0]!.x).toBe(AREA.left);
@@ -219,7 +373,7 @@ describe('composePlainSheet', () => {
   test('kana or kanji set the body vertical: a glyph per run, columns from the right, a blank column between paragraphs', () => {
     const sheet = compose('\n\n\nあい\n\n\n\n\nうA\n\n');
     expect(sheet.body.orientation).toBe('vertical');
-    const runs = sheet.body.pages[0]!.runs;
+    const runs = sheet.body.runs;
     expect(runs.map((r) => r.text)).toEqual(['あ', 'い', 'う', 'A']);
     const firstCenter = AREA.right - S / 2;
     expect(runs[0]!.x + S / 2).toBeCloseTo(firstCenter, 6);
@@ -231,58 +385,27 @@ describe('composePlainSheet', () => {
     expect(runs[0]!.rotateDeg).toBe(0);
   });
 
-  test('a single line is a single page without a folio', () => {
+  test('a single line is set whole at s', () => {
     const sheet = compose('ひとつだけの行');
-    expect(sheet.body.pages).toHaveLength(1);
-    expect(sheet.body.pages[0]!.runs).toHaveLength(7);
-    expect(sheet.folios).toEqual([]);
+    expect(sheet.body).toMatchObject({ step: 0, tiers: 1, sizePx: S });
+    expect(sheet.body.runs).toHaveLength(7);
   });
 
   test.each([
     ['vertical', 'あいうえおかきくけこ'],
     ['horizontal', 'abc defg hijk lmno pqrs'],
-  ])('a long %s text pages, every page within the body room and the side margins, with a folio per page', (_, line) => {
+  ])('a long %s text is set whole on the one sheet, smaller, within the body room and the side margins', (_, line) => {
     const text = Array.from({ length: 12 }, () => Array.from({ length: 4 }, () => line).join('\n')).join('\n\n');
     const sheet = compose(text);
-    const pages = sheet.body.pages;
-    expect(pages.length).toBeGreaterThan(2);
-    for (const page of pages) {
-      expect(page.runs.length).toBeGreaterThan(0);
-      const b = page.bounds;
-      expect(b.x).toBeGreaterThanOrEqual(AREA.left - EPS);
-      expect(b.x + b.width).toBeLessThanOrEqual(AREA.right + EPS);
-      expect(b.y).toBeGreaterThan(bodyTopOf(sheet));
-      expect(b.y + b.height).toBeLessThanOrEqual(BODY_FOOT + EPS);
-    }
-    expect(sheet.folios.map((f) => f.text)).toEqual(pages.map((_, i) => `${i + 1} / ${pages.length}`));
-    for (const f of sheet.folios) {
-      expect(f.y).toBe(AREA.captionBaseline);
-      expect(f.sizePx).toBe(XS);
-      expect(f.x + [...f.text].length * XS).toBeCloseTo(AREA.right, 6);
-    }
-    // The folio and the note do not meet.
-    const noteRight = AREA.left + '同期情報のない歌詞です'.length * XS;
-    for (const f of sheet.folios) expect(f.x).toBeGreaterThan(noteRight);
-    // One size on every page, and every character of the text printed once.
-    const printed = pages.flatMap((p) => p.runs.map((r) => r.text)).join('').replace(/ /g, '');
-    expect(printed).toBe(text.replace(/\s/g, ''));
-  });
-
-  test('a text of blank lines around one character is a one-glyph page', () => {
-    const sheet = compose('\n\n\n\n　\n\nあ\n\n\n\n');
-    expect(sheet.body.pages).toHaveLength(1);
-    expect(sheet.body.pages[0]!.runs.map((r) => r.text)).toEqual(['あ']);
-  });
-
-  test('the body bounds cover every page (the lamp centre, which page turns do not move)', () => {
-    const sheet = compose(Array.from({ length: 30 }, () => 'あいうえお').join('\n\n'));
+    expect(sheet.body.step).toBeGreaterThan(0);
+    expect(sheet.body.sizePx).toBeLessThan(S);
     const b = sheet.body.bounds;
-    for (const page of sheet.body.pages) {
-      expect(page.bounds.x).toBeGreaterThanOrEqual(b.x - EPS);
-      expect(page.bounds.y).toBeGreaterThanOrEqual(b.y - EPS);
-      expect(page.bounds.x + page.bounds.width).toBeLessThanOrEqual(b.x + b.width + EPS);
-      expect(page.bounds.y + page.bounds.height).toBeLessThanOrEqual(b.y + b.height + EPS);
-    }
+    expect(b.x).toBeGreaterThanOrEqual(AREA.left - EPS);
+    expect(b.x + b.width).toBeLessThanOrEqual(AREA.right + EPS);
+    expect(b.y).toBeGreaterThanOrEqual(bodyTopOf(sheet) - EPS);
+    expect(b.y + b.height).toBeLessThanOrEqual(BODY_FOOT + EPS);
+    // Every character of the text printed once, in order.
+    expect(printedOf(sheet.body)).toBe(textOf(text));
   });
 
   test('the same text always sets the same sheet', () => {
@@ -291,43 +414,13 @@ describe('composePlainSheet', () => {
   });
 });
 
-describe('the page timing: a fixed interval, nothing from the music', () => {
-  test('page 0 until the body starts, then one page per PLAIN_PAGE_MS, round and round', () => {
-    expect(plainPageIndex(-1_500, 3)).toBe(0);
-    expect(plainPageIndex(0, 3)).toBe(0);
-    expect(plainPageIndex(PLAIN_PAGE_MS - 1, 3)).toBe(0);
-    expect(plainPageIndex(PLAIN_PAGE_MS, 3)).toBe(1);
-    expect(plainPageIndex(2 * PLAIN_PAGE_MS + 5, 3)).toBe(2);
-    expect(plainPageIndex(3 * PLAIN_PAGE_MS + 5, 3)).toBe(0);
-    expect(plainPageIndex(10 * PLAIN_PAGE_MS, 1)).toBe(0);
-  });
-
-  test('a single page fades in once and stays; it never turns', () => {
-    expect(plainPageOpacity(-1, 1)).toBe(0);
-    expect(plainPageOpacity(PLAIN_PAGE_FADE_MS / 2, 1)).toBeCloseTo(0.5, 6);
-    expect(plainPageOpacity(PLAIN_PAGE_FADE_MS, 1)).toBe(1);
-    expect(plainPageOpacity(3_600_000, 1)).toBe(1);
-    expect(plainNextTurnInMs(0, 1)).toBeNull();
-    expect(plainNextTurnInMs(50_000, 1)).toBeNull();
-  });
-
-  test('with more pages each fades in, holds, and fades out before the next; they never overlap', () => {
-    const fade = PLAIN_PAGE_FADE_MS;
-    expect(plainPageOpacity(0, 2)).toBe(0);
-    expect(plainPageOpacity(fade / 2, 2)).toBeCloseTo(0.5, 6);
-    expect(plainPageOpacity(PLAIN_PAGE_MS / 2, 2)).toBe(1);
-    expect(plainPageOpacity(PLAIN_PAGE_MS - fade / 2, 2)).toBeCloseTo(0.5, 6);
-    expect(plainPageOpacity(PLAIN_PAGE_MS, 2)).toBe(0);
-    for (let t = -2_000; t < 5 * PLAIN_PAGE_MS; t += 37) {
-      const o = plainPageOpacity(t, 4);
-      expect(o).toBeGreaterThanOrEqual(0);
-      expect(o).toBeLessThanOrEqual(1);
-    }
-  });
-
-  test('the next turn is at the next PLAIN_PAGE_MS boundary of the body clock', () => {
-    expect(plainNextTurnInMs(-1_500, 3)).toBe(PLAIN_PAGE_MS + 1_500);
-    expect(plainNextTurnInMs(100, 3)).toBe(PLAIN_PAGE_MS - 100);
-    expect(plainNextTurnInMs(PLAIN_PAGE_MS + 1, 3)).toBe(PLAIN_PAGE_MS - 1);
+describe('the body’s opacity: one fade in, then it stays', () => {
+  test('0 until the body starts, a fade over PLAIN_BODY_FADE_MS, then 1 for good', () => {
+    expect(plainBodyOpacity(-1_500)).toBe(0);
+    expect(plainBodyOpacity(0)).toBe(0);
+    expect(plainBodyOpacity(Number.NaN)).toBe(0);
+    expect(plainBodyOpacity(PLAIN_BODY_FADE_MS / 2)).toBeCloseTo(0.5, 6);
+    expect(plainBodyOpacity(PLAIN_BODY_FADE_MS)).toBe(1);
+    for (let t = PLAIN_BODY_FADE_MS; t < 3_600_000; t += 7_919) expect(plainBodyOpacity(t)).toBe(1);
   });
 });

@@ -37,11 +37,9 @@ import {
   composePlainSheet,
   PLAIN_BODY_DELAY_MS,
   PLAIN_EXIT_MS,
-  plainNextTurnInMs,
-  plainPageIndex,
-  plainPageOpacity,
+  plainBodyOpacity,
 } from './plainSheet';
-import type { PlainPage, PlainSheet } from './plainSheet';
+import type { PlainRun, PlainSheet } from './plainSheet';
 import { accentBody, contextInk, inkBody, surgeAccent, surgeInk } from './surgeColors';
 import type { BeatSharedValues } from './useBeatSharedValues';
 
@@ -79,10 +77,9 @@ export type StageSource =
   | {
       /**
        * A recognized song whose lyrics are plain text without times (design
-       * spec §7, 2026-11-10). The stage prints them as a lyric sheet
-       * (plainSheet.ts) that never follows the song: a small heading, the
-       * body a page at a time on a fixed interval, the band meter, an honest
-       * note. Only text with something printable comes as this kind.
+       * spec §7, 2026-11-10, 2026-11-11). The stage prints them as a lyric
+       * sheet (plainSheet.ts) that never follows the song: a small heading,
+       * the whole body at once on one sheet, the band meter, an honest note. Only text with something printable comes as this kind.
        */
       kind: 'plain';
       track: NonNullable<IdleTrack>;
@@ -346,15 +343,11 @@ const DROP_LINE_DONE = 'drop:done';
 const EXIT_SLACK_MS = 80;
 /** The idle clock ticks this long after each second boundary, so a timer firing early still lands in the new second. */
 const CLOCK_TICK_SLACK_MS = 15;
-/** Likewise for the lyric sheet's page turns. */
-const PAGE_TICK_SLACK_MS = 15;
 
-/** The lyric sheet's page on stage, as the body last drew it (what a leaving body fades from). */
+/** The lyric sheet's body on stage, as it was last drawn (what a leaving body fades from). */
 interface ShownBody {
   key: string;
-  page: PlainPage;
-  pageIndex: number;
-  pageCount: number;
+  runs: readonly PlainRun[];
   startMs: number;
   font: FontKey;
   sizePx: number;
@@ -390,8 +383,7 @@ interface DropPlay {
  * glyphs (or the idle composition) on a second Canvas stacked above it.
  *
  * Layout runs on the JS thread only when the source, viewport or typefaces
- * change (the idle clock also once a second, the lyric sheet once a page
- * turn); all motion is derived on the UI
+ * change (the idle clock also once a second); all motion is derived on the UI
  * thread from the `time` shared value and the beat shared values.
  */
 export function LyricStage({
@@ -716,55 +708,32 @@ export function LyricStage({
     return () => clearTimeout(id);
   }, [exiting, beatValues]);
 
-  // The lyric sheet's body (design spec §7, 2026-11-10): from
-  // PLAIN_BODY_DELAY_MS after the sheet came on, one page at a time on the
-  // fixed PLAIN_PAGE_MS interval, on the wall clock. Nothing the music does
-  // reaches it (not the beat, the bands, the surge, nor the drop's head). The
-  // page index is state, set by a timer at each page boundary, where the
-  // opacity is 0, so the swap is unseen; the fades are derived on the UI
-  // thread from the stage clock. React re-renders once per page turn.
+  // The lyric sheet's body (design spec §7, 2026-11-11): the whole text at
+  // once, fading in from PLAIN_BODY_DELAY_MS after the sheet came on (wall
+  // clock) and then staying as it is. Nothing switches it on a timer, and
+  // nothing the music does reaches it (not the beat, the bands, the surge,
+  // nor the drop's head). The fade is derived on the UI thread from the stage
+  // clock; React does not re-render for the body after it is laid out.
   const bodyStartMs = sheet !== null && plateKey !== null ? plateStartedAtRef.current + PLAIN_BODY_DELAY_MS : null;
-  const pageCount = sheet?.body.pages.length ?? 0;
-  const [plainPage, setPlainPage] = useState(0);
-  useLayoutEffect(() => {
-    if (bodyStartMs === null) return undefined;
-    let id: ReturnType<typeof setTimeout> | undefined;
-    const tick = () => {
-      const elapsed = performance.now() - bodyStartMs;
-      setPlainPage(plainPageIndex(elapsed, pageCount));
-      const wait = plainNextTurnInMs(elapsed, pageCount);
-      if (wait !== null) id = setTimeout(tick, wait + PAGE_TICK_SLACK_MS);
-    };
-    tick();
-    return () => clearTimeout(id);
-  }, [bodyStartMs, pageCount]);
-  const pageIndex = Math.min(plainPage, Math.max(0, pageCount - 1));
-  // The folio says which leaf of the sheet is up, never where the song is.
-  const folio = sheet?.folios[pageIndex] ?? null;
   const shownBody = useMemo<ShownBody | null>(
     () =>
       sheet === null || plateKey === null || bodyStartMs === null
         ? null
         : {
             key: plateKey,
-            page: sheet.body.pages[pageIndex]!,
-            pageIndex,
-            pageCount,
+            runs: sheet.body.runs,
             startMs: bodyStartMs,
             font: sheet.body.font,
             sizePx: sheet.body.sizePx,
           },
-    [bodyStartMs, pageCount, pageIndex, plateKey, sheet],
+    [bodyStartMs, plateKey, sheet],
   );
   const bodyTiming = useMemo<PlainBodyProps['timing'] | null>(
-    () =>
-      shownBody === null
-        ? null
-        : { kind: 'page', startMs: shownBody.startMs, pageCount: shownBody.pageCount, pageIndex: shownBody.pageIndex },
+    () => (shownBody === null ? null : { kind: 'shown', startMs: shownBody.startMs }),
     [shownBody],
   );
   // The leaving body: when the sheet leaves the stage (or gives way to
-  // another song's sheet), its page fades out over the fixed PLAIN_EXIT_MS
+  // another song's sheet), its body fades out over the fixed PLAIN_EXIT_MS
   // from the opacity it had, then is removed. Not under reduced motion.
   const [leavingBody, setLeavingBody] = useState<{
     body: ShownBody;
@@ -776,9 +745,7 @@ export function LyricStage({
     lastBodyRef.current = shownBody;
     if (prev === null || (shownBody !== null && shownBody.key === prev.key)) return;
     const now = performance.now();
-    const elapsed = now - prev.startMs;
-    const fromOpacity =
-      plainPageIndex(elapsed, prev.pageCount) === prev.pageIndex ? plainPageOpacity(elapsed, prev.pageCount) : 0;
+    const fromOpacity = plainBodyOpacity(now - prev.startMs);
     if (reducedMotion || fromOpacity <= 0) {
       setLeavingBody(null);
       return;
@@ -871,8 +838,8 @@ export function LyricStage({
   // viewport; the clock's focus does not move with the seconds); the
   // background slides the lamp there on the UI thread.
   const focusTarget = useSharedValue<Uv>(IDLE_FOCUS);
-  // On the lyric sheet the lamp lies on the body (all its pages together, so
-  // a page turn does not move it), not on the small heading.
+  // On the lyric sheet the lamp lies on the body (the whole text), not on the
+  // small heading.
   const sheetBounds = sheet !== null && scene !== null ? sheet.body.bounds : null;
   const sceneBounds = scene?.layout.bounds ?? null;
   const idleFocus = idle?.focus ?? null;
@@ -1175,32 +1142,32 @@ export function LyricStage({
           ) : null}
           {leavingBody !== null ? (
             <PlainBody
-              page={leavingBody.body.page}
+              runs={leavingBody.body.runs}
               font={fonts(leavingBody.body.font, 'regular', leavingBody.body.sizePx)}
               color={palette.ink}
               time={time}
               timing={leavingBody.timing}
               reducedMotion={reducedMotion}
-              testID="plain-page-leaving"
+              testID="plain-body-leaving"
             />
           ) : null}
           {plain !== null && sheet !== null && scene !== null ? (
             <>
               {/* The lyric sheet (plainSheet.ts), beside its heading's title
-                  that the block above draws as the line on stage: the body a
-                  page at a time in the palette's own ink (flat, no shadow, no
-                  motion, never highlighted), the artist small and flat, the
-                  accent rule under the heading, the band meter on the foot of
-                  the print area, the note and the folio on the caption row. */}
+                  that the block above draws as the line on stage: the whole
+                  body at once in the palette's own ink (flat, no shadow, no
+                  motion, never highlighted, never turned), the artist small
+                  and flat, the accent rule under the heading, the band meter
+                  on the foot of the print area, the note on the caption row. */}
               {shownBody !== null && bodyTiming !== null ? (
                 <PlainBody
-                  page={shownBody.page}
+                  runs={shownBody.runs}
                   font={fonts(shownBody.font, 'regular', shownBody.sizePx)}
                   color={palette.ink}
                   time={time}
                   timing={bodyTiming}
                   reducedMotion={reducedMotion}
-                  testID="plain-page"
+                  testID="plain-body"
                 />
               ) : null}
               {sheet.artist.glyphs.length > 0 ? (
@@ -1238,17 +1205,6 @@ export function LyricStage({
                 opacity={CAPTION_OPACITY}
                 {...({ testID: 'plain-note' } as object)}
               />
-              {folio !== null ? (
-                <Text
-                  x={folio.x}
-                  y={folio.y}
-                  text={folio.text}
-                  font={gothic(folio.sizePx)}
-                  color={inkNow}
-                  opacity={CAPTION_OPACITY}
-                  {...({ testID: 'plain-folio' } as object)}
-                />
-              ) : null}
             </>
           ) : null}
           {idle !== null && idleBase !== null ? (
