@@ -41,6 +41,7 @@ const playbackOff: FixturePlayback = {
   playPause: noop,
   seek: noop,
   reloadDirection: noop,
+  cyclePalette: noop,
 };
 
 const frame = (timestampMs: number, level: number): EarFeatures => ({
@@ -292,18 +293,275 @@ describe('useStageSource', () => {
     expect(syncedOf(hook.result.current).track).toEqual({ title: track.title, artist: track.artist });
   });
 
-  test('a plain-lyrics result or no result is an idle source', async () => {
-    const plain: LyricResult = { kind: 'plain', track, text: '夜の底で' };
-    const hook = await setup({ result: plain });
-    expect(hook.result.current.source).toEqual({
-      kind: 'idle',
-      direction: null,
-      track: { title: track.title, artist: track.artist },
-    });
-
-    await hook.rerender({ status: 'listening', playback: playbackOff, result: null });
+  test('no result is an idle source without a track', async () => {
+    const hook = await setup({ result: null });
     expect(hook.result.current.source).toEqual({ kind: 'idle', direction: null, track: null });
     expect(hook.result.current.pastOutro).toBe(false);
+  });
+
+  describe('a recognized song the stage cannot follow (no synced lyrics)', () => {
+    // Plain text with nothing printable stays the nameplate (printable plain
+    // text gets the lyric sheet: see the describe below).
+    const plain: LyricResult = { kind: 'plain', track, text: ' \n\n　\n' };
+    const unavailable: LyricResult = { kind: 'lyrics_unavailable', track };
+    const instrumental: LyricResult = { kind: 'instrumental', track };
+    const unsyncedOf = (inputs: StageInputs) => {
+      const { source } = inputs;
+      if (source.kind !== 'unsynced') throw new Error(`expected an unsynced source, got ${source.kind}`);
+      return source;
+    };
+
+    test.each([
+      ['plain', plain],
+      ['lyrics_unavailable', unavailable],
+      ['instrumental', instrumental],
+    ] as const)('a %s result is an unsynced source: the nameplate with its reason', async (reason, result) => {
+      clockMs = 10_500;
+      const hook = await setup({ result });
+      const source = unsyncedOf(hook.result.current);
+      expect(source.reason).toBe(reason);
+      expect(source.track).toEqual({ title: track.title, artist: track.artist });
+      // A song without lines still gets a direction (palette, texture) from its seed.
+      expect(source.direction.lines).toHaveLength(0);
+      expect(source.direction.palette.background).toMatch(/^#/);
+      expect(source.dropAtMs).toBe(10_500);
+      expect(hook.result.current.pastOutro).toBe(false);
+    });
+
+    test('the render in which the result arrives is idle with the track; the nameplate follows with the drop', async () => {
+      const hook = await setup({ result: null });
+      expect(hook.result.current.source.kind).toBe('idle');
+
+      clockMs = 10_500;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plain });
+      expect(unsyncedOf(hook.result.current).dropAtMs).toBe(10_500);
+
+      // The first source for the song is idle (the stage takes the idle glyphs
+      // a drop scatters from that render); no unsynced source ever lacks the drop.
+      const first = sources.find((s) => s.kind !== 'idle' || s.track !== null);
+      expect(first).toEqual({
+        kind: 'idle',
+        direction: expect.objectContaining({ lines: [] }),
+        track: { title: track.title, artist: track.artist },
+      });
+      for (const s of sources) {
+        if (s.kind === 'unsynced') expect(s.dropAtMs).toBe(10_500);
+      }
+    });
+
+    test('the same trackId recognized again (or re-resolved) does not fire the drop again', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plain });
+      expect(unsyncedOf(hook.result.current).dropAtMs).toBe(10_500);
+
+      clockMs = 20_000;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: unavailable });
+      expect(unsyncedOf(hook.result.current).dropAtMs).toBe(10_500);
+      expect(unsyncedOf(hook.result.current).reason).toBe('lyrics_unavailable');
+
+      // Losing the song and finding the same one again: still no new drop.
+      clockMs = 30_000;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: { kind: 'not_recognized' } });
+      expect(hook.result.current.source).toEqual({ kind: 'idle', direction: null, track: null });
+      clockMs = 40_000;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plain });
+      expect(unsyncedOf(hook.result.current).dropAtMs).toBe(10_500);
+    });
+
+    test('a different song without lyrics fires its own drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plain });
+
+      clockMs = 20_000;
+      const other: LyricResult = { kind: 'lyrics_unavailable', track: { ...track, trackId: 'shazam-2', title: '別の歌' } };
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: other });
+      const source = unsyncedOf(hook.result.current);
+      expect(source.dropAtMs).toBe(20_000);
+      expect(source.track).toEqual({ title: '別の歌', artist: track.artist });
+    });
+
+    test('the fixture wins over the nameplate while it is active, and the nameplate returns when it stops', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plain });
+      expect(hook.result.current.source.kind).toBe('unsynced');
+
+      const playing: FixturePlayback = {
+        ...playbackOff,
+        active: true,
+        anchor: { offsetMs: 2_500, anchoredAtMonotonicMs: clockMs },
+      };
+      await hook.rerender({ status: 'listening', playback: playing, result: plain });
+      expect(syncedOf(hook.result.current).track).toEqual(FIXTURE_TRACK);
+      // Never the nameplate under the fixture, not even before its first tick:
+      // from the fixture's start on, every source is the fixture's or idle.
+      const fixtureFrom = sources.findIndex((s) => s.kind === 'synced');
+      expect(fixtureFrom).toBeGreaterThan(0);
+      for (const s of sources.slice(fixtureFrom)) expect(s.kind).not.toBe('unsynced');
+      // Between the nameplate and the fixture's first line there is at most an idle render.
+      expect(sources[fixtureFrom - 1]!.kind === 'unsynced' || sources[fixtureFrom - 1]!.kind === 'idle').toBe(true);
+
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plain });
+      expect(unsyncedOf(hook.result.current).reason).toBe('plain');
+    });
+
+    test('a room quiet for SILENCE_REARM_MS hands the nameplate to idle with the track; sound brings it back without a new drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plain });
+      expect(unsyncedOf(hook.result.current).dropAtMs).toBe(10_500);
+      /** Frames every 50 ms on the mocked clock (10_000 + t), from `fromMs` for `forMs`. */
+      const emitFor = async (fromMs: number, forMs: number, level: number) => {
+        for (let t = fromMs; t <= fromMs + forMs; t += 50) {
+          clockMs = 10_000 + t;
+          await act(async () => emitter.emit(frame(clockMs, level)));
+        }
+      };
+
+      // 3.5 s of silence: the nameplate stays (its meter lies at the base and
+      // its title stands still on the stage side).
+      await emitFor(1_000, 3_500, 0);
+      expect(unsyncedOf(hook.result.current).reason).toBe('plain');
+
+      // Past SILENCE_REARM_MS: idle, still captioned with the song.
+      await emitFor(4_550, 600, 0);
+      expect(hook.result.current.source).toEqual({
+        kind: 'idle',
+        direction: expect.objectContaining({ lines: [] }),
+        track: { title: track.title, artist: track.artist },
+      });
+
+      // Sound returns: the same song's nameplate, with the drop it already had.
+      await emitFor(5_200, 200, 0.3);
+      const back = unsyncedOf(hook.result.current);
+      expect(back.reason).toBe('plain');
+      expect(back.dropAtMs).toBe(10_500);
+    });
+
+    test('leaving listening never hides the nameplate (the quiet rule needs the ear)', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plain });
+      await hook.rerender({ status: 'idle', playback: playbackOff, result: plain });
+      expect(unsyncedOf(hook.result.current).reason).toBe('plain');
+    });
+
+    test('the band values keep flowing to the shared values while the nameplate is on stage', async () => {
+      const hook = await setup({ result: plain });
+      expect(hook.result.current.source.kind).toBe('unsynced');
+      const values = hook.result.current.beatValues;
+      for (let i = 0; i < 45; i += 1) {
+        await act(async () => emitter.emit(frame(i * 20, 0.1)));
+      }
+      expect(values.low.value).toBeCloseTo(0.1, 5);
+      await act(async () => emitter.emit({ timestampMs: 890, rms: 0.1, low: 0.1, mid: 0.9, high: 0.8 }));
+      expect(values.mid.value).toBeGreaterThan(0.35);
+      expect(values.high.value).toBeGreaterThan(0.3);
+    });
+  });
+
+  describe('a recognized song with plain lyrics only: the lyric sheet (design spec §7, 2026-11-10)', () => {
+    // Fictional text, written for these tests.
+    const SHEET_TEXT = '灯のない部屋\n針を下ろす\n\n\n回る黒い円';
+    const plainSheet: LyricResult = { kind: 'plain', track, text: SHEET_TEXT };
+    const unavailable: LyricResult = { kind: 'lyrics_unavailable', track };
+    const plainOf = (inputs: StageInputs) => {
+      const { source } = inputs;
+      if (source.kind !== 'plain') throw new Error(`expected a plain source, got ${source.kind}`);
+      return source;
+    };
+
+    test('printable plain text is a plain source carrying the text, the track, a direction and the drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plainSheet });
+      const source = plainOf(hook.result.current);
+      expect(source.text).toBe(SHEET_TEXT);
+      expect(source.track).toEqual({ title: track.title, artist: track.artist });
+      // The text is not material for the direction: no line directions, the
+      // palette from the song's seed as for any song without synced lines.
+      expect(source.direction.lines).toHaveLength(0);
+      expect(source.direction.palette.background).toMatch(/^#/);
+      expect(source.dropAtMs).toBe(10_500);
+      expect(hook.result.current.pastOutro).toBe(false);
+    });
+
+    test('the render in which the result arrives is idle with the track; the sheet follows with the drop', async () => {
+      const hook = await setup({ result: null });
+      clockMs = 10_500;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plainSheet });
+      expect(plainOf(hook.result.current).dropAtMs).toBe(10_500);
+      const first = sources.find((s) => s.kind !== 'idle' || s.track !== null);
+      expect(first).toEqual({
+        kind: 'idle',
+        direction: expect.objectContaining({ lines: [] }),
+        track: { title: track.title, artist: track.artist },
+      });
+      for (const s of sources) if (s.kind === 'plain') expect(s.dropAtMs).toBe(10_500);
+    });
+
+    test('plain ⇄ no lyrics for the same trackId swaps sheet and nameplate without a new drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plainSheet });
+      clockMs = 20_000;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: unavailable });
+      expect(hook.result.current.source).toMatchObject({ kind: 'unsynced', reason: 'lyrics_unavailable', dropAtMs: 10_500 });
+      clockMs = 30_000;
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plainSheet });
+      expect(plainOf(hook.result.current).dropAtMs).toBe(10_500);
+    });
+
+    test('a synced song replaced by another song with plain lyrics fires that song’s drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup();
+      expect(syncedOf(hook.result.current).scheduled.index).toBe(0);
+      clockMs = 20_000;
+      const other: LyricResult = { kind: 'plain', track: { ...track, trackId: 'shazam-2', title: '別の歌' }, text: '別の部屋' };
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: other });
+      const source = plainOf(hook.result.current);
+      expect(source.dropAtMs).toBe(20_000);
+      expect(source.track.title).toBe('別の歌');
+    });
+
+    test('a quiet room hands the sheet to idle with the track; sound brings it back without a new drop', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plainSheet });
+      const emitFor = async (fromMs: number, forMs: number, level: number) => {
+        for (let t = fromMs; t <= fromMs + forMs; t += 50) {
+          clockMs = 10_000 + t;
+          await act(async () => emitter.emit(frame(clockMs, level)));
+        }
+      };
+      await emitFor(1_000, 4_150, 0);
+      expect(hook.result.current.source).toEqual({
+        kind: 'idle',
+        direction: expect.objectContaining({ lines: [] }),
+        track: { title: track.title, artist: track.artist },
+      });
+      await emitFor(5_200, 200, 0.3);
+      expect(plainOf(hook.result.current).dropAtMs).toBe(10_500);
+    });
+
+    test('the fixture wins over the sheet while it is active', async () => {
+      clockMs = 10_500;
+      const hook = await setup({ result: plainSheet });
+      const playing: FixturePlayback = {
+        ...playbackOff,
+        active: true,
+        anchor: { offsetMs: 2_500, anchoredAtMonotonicMs: clockMs },
+      };
+      await hook.rerender({ status: 'listening', playback: playing, result: plainSheet });
+      expect(syncedOf(hook.result.current).track).toEqual(FIXTURE_TRACK);
+      const fixtureFrom = sources.findIndex((s) => s.kind === 'synced');
+      for (const s of sources.slice(fixtureFrom)) expect(s.kind).not.toBe('plain');
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: plainSheet });
+      expect(plainOf(hook.result.current).text).toBe(SHEET_TEXT);
+    });
+
+    test('the sheet never feeds the accent line of the surge', async () => {
+      const hook = await setup({ result: plainSheet });
+      expect(hook.result.current.source.kind).toBe('plain');
+      for (let i = 0; i < 30; i += 1) {
+        await act(async () => emitter.emit(frame(i * 20, 0)));
+      }
+      expect(hook.result.current.beatValues.surge.value).toBe(0);
+    });
   });
 
   test('ear frames drive the beat without re-rendering per frame: a hit publishes at once, a steady bed at most every 60 ms', async () => {
@@ -339,6 +597,9 @@ describe('useStageSource', () => {
     expect(values.low.value).toBeCloseTo(0.1, 5);
     expect(values.mid.value).toBeCloseTo(0.1, 5);
     expect(values.confidence.value).toBe(published.confidence);
+    // The room is audible, so the lamp's silence flag is down.
+    expect(published.silence).toBe(false);
+    expect(values.silence.value).toBe(0);
 
     // 10 ms after the last frame (50 ms after the last publish): no new pulse
     // head (rms and low are flat, and mid/high never drive onsets), so the
@@ -560,8 +821,11 @@ describe('useStageSource', () => {
     await act(async () => emitter.emit(frame(900, 0.9)));
     expect(hook.result.current.beat.pulse).toBeGreaterThan(0.5);
 
+    expect(hook.result.current.beatValues.silence.value).toBe(0);
+
     await hook.rerender({ status: 'idle', playback: playbackOff, result: null });
     expect(hook.result.current.beat).toBe(QUIET_BEAT);
+    expect(hook.result.current.beatValues.silence.value).toBe(1);
 
     // Frames that still arrive while not listening are ignored.
     await act(async () => emitter.emit(frame(920, 0.9)));

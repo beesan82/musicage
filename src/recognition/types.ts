@@ -7,6 +7,12 @@ export interface Track {
   artist: string;
   album: string | null;
   artworkUrl: string | null;
+  /**
+   * The track's length in ms when the recognizer knows it, else null. The
+   * LRCLIB search fallback picks a candidate by length when this is set and
+   * by normalised title / artist when it is not (ShazamKit reports none).
+   */
+  durationMs?: number | null;
 }
 
 export interface LyricLine {
@@ -32,6 +38,17 @@ export type LyricResult =
   | { kind: 'lyrics_unavailable'; track: Track }
   | { kind: 'not_recognized' };
 
+/**
+ * A confirmed track the stage cannot follow line by line: no synced lyrics
+ * (plain text only, an instrumental record, or no record at all). The stage
+ * shows its nameplate and answers the music instead (see LyricStage).
+ */
+export type UnsyncedKind = Extract<LyricResult['kind'], 'plain' | 'instrumental' | 'lyrics_unavailable'>;
+
+export function isUnsyncedKind(kind: LyricResult['kind']): kind is UnsyncedKind {
+  return kind === 'plain' || kind === 'instrumental' || kind === 'lyrics_unavailable';
+}
+
 export type RecognitionPhase =
   | 'idle'
   | 'listening'
@@ -53,5 +70,8 @@ export function trackFromRecognition(r: EarRecognition): Track {
     artist: r.artist,
     album: r.album ?? null,
     artworkUrl: r.artworkUrl ?? null,
+    // Only when the recognizer reported one: a track without the field is
+    // the same track as before this field existed.
+    ...(r.durationMs !== undefined ? { durationMs: r.durationMs } : {}),
   };
 }

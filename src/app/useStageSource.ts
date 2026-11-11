@@ -14,12 +14,14 @@ import { directSongByRules } from '../direction/ruleBasedDirector';
 import type { SongDirection } from '../direction/types';
 import { parseLrc } from '../recognition/lrc';
 import { SILENCE_REARM_MS } from '../recognition/autoRecognition';
-import type { LyricLine, LyricResult } from '../recognition/types';
+import { isUnsyncedKind } from '../recognition/types';
+import type { LyricLine, LyricResult, UnsyncedKind } from '../recognition/types';
 import { isPastOutro, scheduleLine } from '../sync/lineScheduler';
 import type { ScheduledLine } from '../sync/lineScheduler';
 import { songPositionMs } from '../sync/lyricClock';
 import type { StageSource } from '../typesetting/LyricStage';
 import type { IdleTrack } from '../typesetting/idleComposition';
+import { plainParagraphs } from '../typesetting/plainSheet';
 import { useBeatSharedValues } from '../typesetting/useBeatSharedValues';
 import type { BeatSharedValues } from '../typesetting/useBeatSharedValues';
 
@@ -70,7 +72,9 @@ const sameLine = (a: ScheduledLine | null, b: ScheduledLine) =>
 /**
  * Everything the lyric stage needs from the app: the beat (one engine fed by
  * the ear stream), the source (the fixture song while it plays, else the
- * recognized song synced to its ShazamKit anchor, else idle), and the
+ * recognized song synced to its ShazamKit anchor, else a recognized song
+ * with plain lyrics only as a `plain` lyric sheet, else a recognized song
+ * without synced lyrics as an `unsynced` nameplate, else idle), and the
  * `performance.now()` clock the scheduled line is on. Ear frames never
  * re-render on their own: the beat is published at once on a new pulse head
  * and otherwise at most every BEAT_PUBLISH_MS; per-frame motion stays in
@@ -107,6 +111,12 @@ export function useStageSource({
   // performance.now() when the computed beat last turned silent; null while
   // there is sound (or the ear is not listening).
   const silentSinceRef = useRef<number | null>(null);
+  // The room has been silent for SILENCE_REARM_MS (the needle was lifted).
+  // State, flipped only on its edges by the ear subscription: the nameplate
+  // gives way to idle while it holds (a synced line does the same through the
+  // scheduler's own tick).
+  const [roomQuiet, setRoomQuiet] = useState(false);
+  const roomQuietRef = useRef(false);
 
   useEffect(() => {
     const engine = engineRef.current!;
@@ -117,11 +127,14 @@ export function useStageSource({
       surgeRef.current = { value: 0, atMs: Number.NaN };
       silentSinceRef.current = null;
       frozenBarRef.current = 0;
+      roomQuietRef.current = false;
+      setRoomQuiet(false);
       beatValues.write(
         { timestampMs: performance.now(), rms: 0, low: 0, mid: 0, high: 0 },
         QUIET_BEAT,
       );
       beatValues.surge.value = 0;
+      beatValues.silence.value = 1;
       setBeat(QUIET_BEAT);
       return undefined;
     }
@@ -141,10 +154,17 @@ export function useStageSource({
       } else {
         silentSinceRef.current ??= performance.now();
       }
+      const silentSince = silentSinceRef.current;
+      const quiet = silentSince !== null && performance.now() - silentSince >= SILENCE_REARM_MS;
+      if (quiet !== roomQuietRef.current) {
+        roomQuietRef.current = quiet;
+        setRoomQuiet(quiet);
+      }
       const next = raw.silence ? { ...raw, bar: frozenBarRef.current } : raw;
       // Every frame reaches the shared values before the throttled publish:
       // worklets derive the continuous beat from them without re-rendering.
       beatValues.write(frame, next);
+      beatValues.silence.value = next.silence ? 1 : 0;
       // The surge: the acoustic detection (guarded inside the profile by the
       // beat confidence, the silence hold-off and the song's history) OR the
       // accent line, on a fast-in / slow-out follower.
@@ -178,10 +198,21 @@ export function useStageSource({
   const timed = result?.kind === 'timestamped' ? result : null;
   const timedLines = timed?.lines ?? null;
   const timedAnchor = timed?.anchor ?? null;
-  const timedTrackId = timed?.track.trackId ?? null;
   const named = result !== null && result.kind !== 'not_recognized' ? result.track : null;
+  const namedTrackId = named?.trackId ?? null;
   const title = named?.title ?? null;
   const artist = named?.artist ?? null;
+  // A confirmed track the stage cannot follow: plain text only, an
+  // instrumental record, or no record. It gets the nameplate, not idle.
+  const unsyncedKind: UnsyncedKind | null =
+    result !== null && isUnsyncedKind(result.kind) ? result.kind : null;
+  // Plain lyrics with something printable get the lyric sheet instead (design
+  // spec §7, 2026-11-10); blank text stays the nameplate.
+  const plainText = result?.kind === 'plain' ? result.text : null;
+  const printablePlain = useMemo(
+    () => (plainText !== null && plainParagraphs(plainText).length > 0 ? plainText : null),
+    [plainText],
+  );
 
   const [schedule, setSchedule] = useState<Schedule | null>(null);
   const previousRef = useRef<ScheduledLine | null>(null);
@@ -250,38 +281,50 @@ export function useStageSource({
   const current = schedule !== null && schedule.lines === lines ? schedule : null;
 
   // The recognition drop (design spec §7): fires once when a song is confirmed,
-  // i.e. when the synced track is a new trackId. A re-anchor of the same
+  // i.e. when the recognized track (synced or not: a song without lyrics is
+  // still a new song on stage) is a new trackId. A re-anchor of the same
   // trackId (re-recognition of the same song, or the same song coming back
-  // after a miss) does not fire; neither does synced → idle. The fixture
+  // after a miss) does not fire; neither does a result → idle. The fixture
   // starting counts as a confirmation so the drop can be seen in Expo Go;
   // the fixture stopping does not.
   const [dropAtMs, setDropAtMs] = useState<number | null>(null);
+  // The recognized trackId this effect has seen. A song without synced lyrics
+  // takes the stage only from the render after the drop fires for it, so the
+  // render in which its result arrives is still idle: that is the render the
+  // stage takes its scattering idle glyphs from (a synced song gets the same
+  // idle render for free, because its first scheduled line also lands a
+  // render later).
+  const [confirmedTrackId, setConfirmedTrackId] = useState<string | null>(null);
   const lastRecognizedRef = useRef<string | null>(null);
   const fixtureWasActiveRef = useRef(false);
   useEffect(() => {
     const fixtureStarted = active && !fixtureWasActiveRef.current;
     fixtureWasActiveRef.current = active;
-    const newSong = timedTrackId !== null && timedTrackId !== lastRecognizedRef.current;
-    if (timedTrackId !== null) lastRecognizedRef.current = timedTrackId;
+    const newSong = namedTrackId !== null && namedTrackId !== lastRecognizedRef.current;
+    if (namedTrackId !== null) lastRecognizedRef.current = namedTrackId;
+    setConfirmedTrackId(namedTrackId);
     if (fixtureStarted || (newSong && !active)) {
       setDropAtMs(performance.now());
       // A new song starts its energy distribution from nothing (a re-anchor
       // of the same song keeps it).
       profileRef.current?.reset();
     }
-  }, [active, timedTrackId]);
+  }, [active, namedTrackId]);
 
   // A re-anchored result keeps its lines and track, so neither is rebuilt.
   const recognizedTrack = useMemo<IdleTrack>(
     () => (title === null || artist === null ? null : { title, artist }),
     [title, artist],
   );
+  // The direction of the recognized song. Without lines (no synced lyrics)
+  // the rules still give it a palette and texture, drawn from the seed, so a
+  // song the stage cannot follow still changes the room's colour.
   const recognizedDirection = useMemo<SongDirection | null>(
     () =>
-      timedLines === null
+      title === null || artist === null
         ? null
         : directSongByRules(
-            timedLines.map((l) => l.text),
+            timedLines?.map((l) => l.text) ?? [],
             `${artist}/${title}`,
           ),
     [timedLines, artist, title],
@@ -309,8 +352,54 @@ export function useStageSource({
         dropAtMs,
       };
     }
+    // The nameplate (and the lyric sheet) waits for the drop effect to have
+    // seen the track (see confirmedTrackId), and never shows under the
+    // fixture: while the fixture is active but its first tick is pending the
+    // stage stays idle, as it does before a recognized song's first line. In
+    // a room quiet for SILENCE_REARM_MS it gives way to idle (with the
+    // track's caption), as a synced line does, and comes back when sound
+    // does: the song is still the one recognized, so there is no new drop.
+    if (
+      !active &&
+      !roomQuiet &&
+      confirmedTrackId === namedTrackId &&
+      recognizedTrack !== null &&
+      recognizedDirection !== null
+    ) {
+      if (printablePlain !== null) {
+        return {
+          kind: 'plain',
+          track: recognizedTrack,
+          direction: recognizedDirection,
+          text: printablePlain,
+          dropAtMs,
+        };
+      }
+      if (unsyncedKind !== null) {
+        return {
+          kind: 'unsynced',
+          track: recognizedTrack,
+          direction: recognizedDirection,
+          reason: unsyncedKind,
+          dropAtMs,
+        };
+      }
+    }
     return { kind: 'idle', direction: recognizedDirection, track: recognizedTrack };
-  }, [active, current, dropAtMs, fixtureDirection, recognizedDirection, recognizedTrack, timedLines]);
+  }, [
+    active,
+    confirmedTrackId,
+    current,
+    dropAtMs,
+    fixtureDirection,
+    namedTrackId,
+    printablePlain,
+    recognizedDirection,
+    recognizedTrack,
+    roomQuiet,
+    timedLines,
+    unsyncedKind,
+  ]);
 
   // The line on stage is chorus-like (`accent`, spec §4): the surge's lyric side.
   accentLineRef.current =

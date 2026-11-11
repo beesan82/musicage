@@ -101,6 +101,37 @@ describe('validateSongDirection', () => {
     });
   });
 
+  describe('the optional lamp colour (palette.light)', () => {
+    const base = direction([line(), line(), line()]);
+    const withoutLight = { ...DEFAULT_PALETTE };
+
+    test('passes and is kept when it is a well-formed colour', () => {
+      const input = { ...base, palette: { ...withoutLight, light: '#F0E6D2' } };
+      expect(validateSongDirection(input, TEXTS)?.palette).toEqual({ ...withoutLight, light: '#F0E6D2' });
+    });
+
+    test('passes when it is left out, and the result has no light', () => {
+      const palette = validateSongDirection({ ...base, palette: withoutLight }, TEXTS)?.palette;
+      expect(palette).toEqual(withoutLight);
+      expect(palette).not.toHaveProperty('light');
+    });
+
+    test('is kept without accentHigh too', () => {
+      const noHigh = { background: withoutLight.background, ink: withoutLight.ink, accent: withoutLight.accent };
+      const input = { ...base, palette: { ...noHigh, light: '#C9D6F2' } };
+      const palette = validateSongDirection(input, TEXTS)?.palette;
+      expect(palette).toEqual({ ...noHigh, light: '#C9D6F2' });
+      expect(palette).not.toHaveProperty('accentHigh');
+    });
+
+    test('fails when it is a broken colour or not a string', () => {
+      for (const light of ['white', '#FFF', '#GGGGGG', 0, null]) {
+        const input = { ...base, palette: { ...withoutLight, light } };
+        expect(validateSongDirection(input, TEXTS)).toBeNull();
+      }
+    });
+  });
+
   test('rejects bad colors, unknown enums and non-objects', () => {
     const base = direction([line(), line(), line()]);
     expect(

@@ -1,5 +1,6 @@
 import { act, fireEvent, render, userEvent, waitFor, within } from '@testing-library/react-native';
 import type { ReactElement } from 'react';
+import { StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { createEarEmitter } from '../audio/earStream';
@@ -8,6 +9,8 @@ import type { EarFeatures, ListeningStatus } from '../audio/types';
 import { useEar } from '../audio/useEar';
 import type { Ear } from '../audio/useNativeEar';
 import { FIXTURE_LRC, FIXTURE_TRACK } from '../dev/fixture/fixtureSong';
+import { DEFAULT_PALETTE } from '../direction/types';
+import { chromeTheme, withAlpha } from '../theme/chrome';
 import { parseLrc } from '../recognition/lrc';
 import { RECOGNITION_COPY } from '../recognition/recognitionCopy';
 import type {
@@ -234,16 +237,31 @@ describe('MusicageApp', () => {
     );
   });
 
-  it('passes a plain-lyrics result as an idle caption only', async () => {
+  it('shows a plain-lyrics result as the lyric sheet, with its honest note', async () => {
     const plain: LyricResult = { kind: 'plain', track, text: '夜の底で' };
     mockApp({ recognition: createRecognition({ ...IDLE_STATE, result: plain }) });
-    await renderApp();
+    const screen = await renderApp();
 
-    expect(lastStageProps().source).toEqual({
-      kind: 'idle',
-      direction: null,
+    expect(lastStageProps().source).toMatchObject({
+      kind: 'plain',
+      text: '夜の底で',
       track: { title: track.title, artist: track.artist },
     });
+    expect(screen.getByTestId('plain-note').props.text).toBe(RECOGNITION_COPY.lyrics_plain_sheet);
+    expect(screen.getByTestId('plain-body')).toBeTruthy();
+    expect(screen.queryByTestId('unsynced-note')).toBeNull();
+    expect(screen.queryByTestId('idle-caption')).toBeNull();
+    // The chrome takes the song's palette, as for a synced song.
+    expect(lastStageProps().source.direction).not.toBeNull();
+  });
+
+  it('keeps a plain result with nothing printable as the nameplate, with its note', async () => {
+    const plain: LyricResult = { kind: 'plain', track, text: '  \n \n' };
+    mockApp({ recognition: createRecognition({ ...IDLE_STATE, result: plain }) });
+    const screen = await renderApp();
+
+    expect(lastStageProps().source).toMatchObject({ kind: 'unsynced', reason: 'plain' });
+    expect(screen.getByTestId('unsynced-note').props.text).toBe(RECOGNITION_COPY.lyrics_unsynced);
   });
 
   it('renders the lyric stage in idle with no track', async () => {
@@ -517,5 +535,73 @@ describe('MusicageApp', () => {
       expect(scheduled()).toBe(idle);
       await fireEvent(screen.getByTestId('fixture-control'), 'longPress');
     });
+  });
+});
+
+describe('MusicageApp chrome (stage F)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const styleOf = (element: { props: { style?: unknown } }) =>
+    StyleSheet.flatten(element.props.style as never) as Record<string, unknown>;
+
+  const stagePalette = () => lastStageProps().source.direction?.palette ?? DEFAULT_PALETTE;
+
+  it('marks the status with a still dot: hollow idle, filled listening, ringed matching', async () => {
+    mockApp({ ear: createEar({ status: 'idle' }) });
+    const screen = await renderApp();
+    expect(screen.getByTestId('status-dot-hollow')).toBeTruthy();
+
+    mockApp();
+    await screen.rerender(app());
+    expect(screen.getByTestId('status-dot-filled')).toBeTruthy();
+
+    mockApp({ recognition: createRecognition({ ...IDLE_STATE, phase: 'listening' }) });
+    await screen.rerender(app());
+    const ring = styleOf(screen.getByTestId('status-dot-ringed'));
+    expect(ring.borderColor).toBe(DEFAULT_PALETTE.accent);
+    expect(ring.borderWidth).toBe(1);
+  });
+
+  it('prints the wordmark and status from the stage palette and follows a palette change', async () => {
+    mockApp();
+    const screen = await renderApp();
+
+    const before = chromeTheme(DEFAULT_PALETTE);
+    expect(styleOf(screen.getByTestId('wordmark'))).toMatchObject({
+      color: withAlpha(before.ink, 0.85),
+      fontSize: 12,
+      letterSpacing: 5,
+    });
+    expect(styleOf(screen.getByText('LISTENING')).color).toBe(before.inkMuted);
+
+    await fireEvent.press(screen.getByTestId('fixture-control'));
+    const fixture = chromeTheme(stagePalette());
+    expect(fixture.ink).not.toBe(before.ink);
+    expect(styleOf(screen.getByTestId('wordmark')).color).toBe(withAlpha(fixture.ink, 0.85));
+    expect(styleOf(screen.getByTestId('recognize-button')).borderColor).toBe(fixture.accent);
+
+    await fireEvent.press(screen.getByTestId('fixture-palette'));
+    const next = chromeTheme(stagePalette());
+    expect(next.ink).not.toBe(fixture.ink);
+    expect(styleOf(screen.getByTestId('wordmark')).color).toBe(withAlpha(next.ink, 0.85));
+    expect(styleOf(screen.getByTestId('fixture-palette')).borderColor).toBe(next.border);
+
+    await fireEvent(screen.getByTestId('fixture-control'), 'longPress');
+  });
+
+  it('uses the system font until fonts are handed in, then the gothic', async () => {
+    mockApp();
+    const screen = await renderApp();
+    expect(styleOf(screen.getByTestId('wordmark')).fontFamily).toBeUndefined();
+
+    await screen.rerender(
+      <SafeAreaProvider initialMetrics={METRICS}>
+        <MusicageApp chromeFonts={{ regular: 'Gothic-R', bold: 'Gothic-B' }} reducedMotion />
+      </SafeAreaProvider>,
+    );
+    expect(styleOf(screen.getByTestId('wordmark')).fontFamily).toBe('Gothic-B');
+    expect(styleOf(screen.getByText('LISTENING')).fontFamily).toBe('Gothic-R');
   });
 });

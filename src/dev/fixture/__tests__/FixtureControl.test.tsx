@@ -1,5 +1,6 @@
 import { act, fireEvent, render } from '@testing-library/react-native';
 
+import { PALETTE_FAMILIES } from '../../../direction/palettes';
 import { useFrameRate } from '../../useFrameRate';
 import { FIXTURE_DIRECTION } from '../fixtureSong';
 import { FixtureControl } from '../FixtureControl';
@@ -21,6 +22,7 @@ const playback = (overrides: Partial<FixturePlayback> = {}): FixturePlayback => 
   playPause: jest.fn(),
   seek: jest.fn(),
   reloadDirection: jest.fn(),
+  cyclePalette: jest.fn(),
   ...overrides,
 });
 
@@ -98,4 +100,40 @@ test('the RELOAD button re-validates the fixture direction', async () => {
   await fireEvent.press(screen.getByTestId('fixture-reload'));
   expect(pb.reloadDirection).toHaveBeenCalledTimes(1);
   expect(pb.seek).not.toHaveBeenCalled();
+});
+
+test('the PAL pill names the current family and cycles the palette on tap', async () => {
+  const pb = playback();
+  const screen = await render(<FixtureControl playback={pb} />);
+  expect(screen.getByText('PAL kohaku')).toBeTruthy();
+  await fireEvent.press(screen.getByTestId('fixture-palette'));
+  expect(pb.cyclePalette).toHaveBeenCalledTimes(1);
+  expect(pb.toggle).not.toHaveBeenCalled();
+  expect(pb.playPause).not.toHaveBeenCalled();
+  expect(pb.reloadDirection).not.toHaveBeenCalled();
+});
+
+test('the PAL pill follows the direction and says PAL ? for a palette outside the families', async () => {
+  const umi = PALETTE_FAMILIES.find((f) => f.key === 'umi')!;
+  const sea = await render(
+    <FixtureControl playback={playback({ direction: { ...FIXTURE_DIRECTION, palette: umi.palette } })} />,
+  );
+  expect(sea.getByText('PAL umi')).toBeTruthy();
+
+  const other = await render(
+    <FixtureControl
+      playback={playback({
+        direction: {
+          ...FIXTURE_DIRECTION,
+          palette: { background: '#000000', ink: '#EEEEEE', accent: '#FF0000' },
+        },
+      })}
+    />,
+  );
+  expect(other.getByText('PAL ?')).toBeTruthy();
+});
+
+test('the PAL pill is hidden when disabled', async () => {
+  const screen = await render(<FixtureControl playback={playback({ enabled: false })} />);
+  expect(screen.queryByTestId('fixture-palette')).toBeNull();
 });

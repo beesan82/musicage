@@ -1,12 +1,16 @@
-import { Modal, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { Modal, StyleSheet, Switch, Text, View } from 'react-native';
 
 import type { Settings } from '../settings/settingsStore';
+import { DEFAULT_CHROME_THEME, chromeFont } from '../theme/chrome';
+import type { ChromeTheme } from '../theme/chrome';
+import { ChromeButton } from './ChromeButton';
 
 export interface SettingsSheetProps {
   visible: boolean;
   settings: Settings;
   onToggleAutoRecognize(next: boolean): void;
   onClose(): void;
+  theme?: ChromeTheme;
 }
 
 export function SettingsSheet({
@@ -14,31 +18,32 @@ export function SettingsSheet({
   settings,
   onToggleAutoRecognize,
   onClose,
+  theme = DEFAULT_CHROME_THEME,
 }: SettingsSheetProps) {
   return (
     <Modal animationType="slide" onRequestClose={onClose} transparent visible={visible}>
-      <View style={styles.backdrop}>
-        <View style={styles.sheet}>
-          <Text style={styles.heading}>設定</Text>
+      <View style={[styles.backdrop, { backgroundColor: theme.scrim }]} testID="settings-backdrop">
+        <View
+          style={[styles.sheet, { backgroundColor: theme.surface, borderTopColor: theme.border }]}
+          testID="settings-sheet"
+        >
+          <Text style={[styles.heading, chromeFont(theme, 'bold'), { color: theme.ink }]}>設定</Text>
           <View style={styles.row}>
-            <Text style={styles.label}>曲の自動読み取り</Text>
+            <Text style={[styles.label, chromeFont(theme, 'regular'), { color: theme.ink }]}>
+              曲の自動読み取り
+            </Text>
             <Switch
               accessibilityLabel="曲の自動読み取り"
               onValueChange={onToggleAutoRecognize}
+              thumbColor={theme.ink}
+              trackColor={{ true: theme.accent, false: theme.border }}
               value={settings.autoRecognize}
             />
           </View>
-          <Text style={styles.description}>
+          <Text style={[styles.description, chromeFont(theme, 'regular'), { color: theme.inkMuted }]}>
             曲が終わった後や無音のあとに音が戻ったとき、自動で曲を読み取ります。
           </Text>
-          <Pressable
-            accessibilityLabel="閉じる"
-            accessibilityRole="button"
-            onPress={onClose}
-            style={({ pressed }) => [styles.close, pressed && styles.closePressed]}
-          >
-            <Text style={styles.closeText}>閉じる</Text>
-          </Pressable>
+          <ChromeButton label="閉じる" onPress={onClose} testID="settings-close" theme={theme} />
         </View>
       </View>
     </Modal>
@@ -47,25 +52,20 @@ export function SettingsSheet({
 
 const styles = StyleSheet.create({
   backdrop: {
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
     flex: 1,
     justifyContent: 'flex-end',
   },
   sheet: {
-    backgroundColor: '#171B1A',
-    borderColor: '#D8D0BA',
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    borderWidth: 1,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    borderTopWidth: 1,
     gap: 14,
     padding: 24,
     paddingBottom: 40,
   },
   heading: {
-    color: '#F7F2E5',
-    fontSize: 16,
-    fontWeight: '800',
-    letterSpacing: 1.2,
+    fontSize: 15,
+    letterSpacing: 2,
   },
   row: {
     alignItems: 'center',
@@ -73,30 +73,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   label: {
-    color: '#F7F2E5',
     fontSize: 14,
-    fontWeight: '700',
   },
   description: {
-    color: '#C8C6B8',
     fontSize: 12,
     lineHeight: 19,
-  },
-  close: {
-    alignItems: 'center',
-    borderColor: '#D8D0BA',
-    borderRadius: 22,
-    borderWidth: 1,
-    justifyContent: 'center',
-    minHeight: 48,
-  },
-  closePressed: {
-    backgroundColor: 'rgba(226, 219, 198, 0.16)',
-  },
-  closeText: {
-    color: '#F7F2E5',
-    fontSize: 12,
-    fontWeight: '800',
-    letterSpacing: 1.2,
   },
 });

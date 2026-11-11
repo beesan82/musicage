@@ -1,6 +1,9 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import type { ListeningStatus } from '../audio/useMicrophoneAnalysis';
+import { DEFAULT_CHROME_THEME, chromeFont } from '../theme/chrome';
+import type { ChromeTheme } from '../theme/chrome';
+import { ChromeButton } from './ChromeButton';
 
 interface ListeningControlsProps {
   status: ListeningStatus;
@@ -8,6 +11,7 @@ interface ListeningControlsProps {
   onRetry(): void;
   onStop(): void;
   onStart(): void;
+  theme?: ChromeTheme;
 }
 
 const DENIED_COPY = 'マイクを許可すると、音に反応する映像が動きます。';
@@ -18,6 +22,7 @@ export function ListeningControls({
   onRetry,
   onStop,
   onStart,
+  theme = DEFAULT_CHROME_THEME,
 }: ListeningControlsProps) {
   const isListening = status === 'listening';
   const isDenied = status === 'denied';
@@ -28,26 +33,19 @@ export function ListeningControls({
       ? 'マイクをもう一度試す'
       : 'マイクを開始する';
   const onPress = isListening ? onStop : isDenied ? onRetry : onStart;
+  const messageStyle = [styles.message, chromeFont(theme, 'regular'), { color: theme.inkMuted }];
 
   return (
     <View style={styles.root} testID="listening-controls">
-      {isDenied ? <Text style={styles.message}>{DENIED_COPY}</Text> : null}
-      {status === 'error' && errorMessage ? (
-        <Text style={styles.message}>{errorMessage}</Text>
-      ) : null}
-      <Pressable
-        accessibilityLabel={accessibleLabel}
-        accessibilityRole="button"
+      {isDenied ? <Text style={messageStyle}>{DENIED_COPY}</Text> : null}
+      {status === 'error' && errorMessage ? <Text style={messageStyle}>{errorMessage}</Text> : null}
+      <ChromeButton
         disabled={isRequesting}
+        label={accessibleLabel}
         onPress={onPress}
-        style={({ pressed }) => [
-          styles.button,
-          isRequesting ? styles.buttonDisabled : null,
-          pressed && !isRequesting ? styles.buttonPressed : null,
-        ]}
-      >
-        <Text style={styles.buttonText}>{accessibleLabel}</Text>
-      </Pressable>
+        testID="microphone-button"
+        theme={theme}
+      />
     </View>
   );
 }
@@ -58,30 +56,8 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   message: {
-    color: '#D8D4CA',
     fontSize: 13,
     lineHeight: 20,
     maxWidth: 280,
-  },
-  button: {
-    alignItems: 'center',
-    borderColor: '#A9AAA4',
-    borderRadius: 22,
-    borderWidth: 1,
-    justifyContent: 'center',
-    minHeight: 48,
-    paddingHorizontal: 18,
-  },
-  buttonDisabled: {
-    opacity: 0.42,
-  },
-  buttonPressed: {
-    opacity: 0.68,
-  },
-  buttonText: {
-    color: '#F4F0E6',
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 1.4,
   },
 });

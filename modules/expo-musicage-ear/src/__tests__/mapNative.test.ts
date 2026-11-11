@@ -17,6 +17,14 @@ test('rejects an empty track id or a negative offset', () => {
   expect(mapNativeRecognition({ trackId: '', title: 'x', artist: 'y', matchedAtNativeMs: 0, currentOffsetMs: 1 }, identity)).toBeNull();
   expect(mapNativeRecognition({ trackId: 't', title: 'x', artist: 'y', matchedAtNativeMs: 0, currentOffsetMs: -1 }, identity)).toBeNull();
 });
+test('passes a positive finite duration through and omits any other', () => {
+  const base = { trackId: 't', title: 'x', artist: 'y', matchedAtNativeMs: 0, currentOffsetMs: 1 };
+  expect(mapNativeRecognition({ ...base, durationMs: 201_000 }, identity)).toMatchObject({ durationMs: 201_000 });
+  for (const durationMs of [null, undefined, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const r = mapNativeRecognition({ ...base, durationMs } as never, identity)!;
+    expect('durationMs' in r).toBe(false);
+  }
+});
 test('recognition exposes exactly the spec fields', () => {
   const r = mapNativeRecognition({ trackId: 't', title: 'x', artist: 'y', album: 'A', artworkUrl: 'https://img', matchedAtNativeMs: 0, currentOffsetMs: 1, raw: {} } as never, identity)!;
   expect(Object.keys(r).sort()).toEqual(['album', 'artist', 'artworkUrl', 'currentOffsetMs', 'matchedAtMonotonicMs', 'title', 'trackId']);

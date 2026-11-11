@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react-native';
 
+import { PALETTE_FAMILIES, paletteFamilyKeyFor } from '../../../direction/palettes';
 import * as validateDirection from '../../../direction/validateDirection';
 import { FIXTURE_DIRECTION } from '../fixtureSong';
 import { fixturePositionMs, useFixturePlayback } from '../useFixturePlayback';
@@ -88,8 +89,41 @@ test('reloadDirection warns and keeps the previous direction when validation fai
   expect(warn.mock.calls[0]?.[0]).toMatch(/FIXTURE_DIRECTION failed validation/);
 });
 
+test('cyclePalette walks the eight families and leaves the line directions alone', async () => {
+  const { result } = await renderHook(() => useFixturePlayback(true));
+  const keys = PALETTE_FAMILIES.map((f) => f.key);
+  const start = keys.indexOf('kohaku');
+  expect(paletteFamilyKeyFor(result.current.direction.palette)).toBe('kohaku');
+
+  for (let step = 1; step <= keys.length; step++) {
+    await act(async () => result.current.cyclePalette());
+    const family = PALETTE_FAMILIES[(start + step) % keys.length]!;
+    expect(result.current.direction.palette).toEqual(family.palette);
+    expect(result.current.direction.texture).toBe(family.texture);
+    expect(result.current.direction.lines).toBe(FIXTURE_DIRECTION.lines);
+    expect(result.current.direction.idleGlyphs).toBe(FIXTURE_DIRECTION.idleGlyphs);
+  }
+  // A full round comes back to kohaku.
+  expect(paletteFamilyKeyFor(result.current.direction.palette)).toBe('kohaku');
+});
+
+test('cyclePalette does not touch the transport, and RELOAD restores kohaku', async () => {
+  const { result } = await renderHook(() => useFixturePlayback(true));
+  await act(async () => result.current.toggle());
+  const anchor = result.current.anchor;
+  await act(async () => result.current.cyclePalette());
+  expect(result.current.active).toBe(true);
+  expect(result.current.anchor).toBe(anchor);
+  expect(paletteFamilyKeyFor(result.current.direction.palette)).toBe('hana');
+
+  await act(async () => result.current.reloadDirection());
+  expect(result.current.direction).toEqual(FIXTURE_DIRECTION);
+});
+
 test('is inert when disabled', async () => {
   const { result } = await renderHook(() => useFixturePlayback(false));
+  await act(async () => result.current.cyclePalette());
+  expect(result.current.direction).toBe(FIXTURE_DIRECTION);
   await act(async () => result.current.toggle());
   expect(result.current.enabled).toBe(false);
   expect(result.current.active).toBe(false);

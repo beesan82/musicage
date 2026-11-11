@@ -4,6 +4,8 @@ import type { EarModule } from '../../modules/expo-musicage-ear/src';
 import type { ListeningStatus } from '../audio/types';
 import { anchorFromRecognition } from '../sync/lyricClock';
 import { LrclibRequestError, lookupLrclib } from './lrclibClient';
+import { createLyricsCache } from './lyricsCache';
+import type { LyricsCache } from './lyricsCache';
 import { RECOGNITION_COPY } from './recognitionCopy';
 import { resolveLyrics } from './resolveLyrics';
 import { trackFromRecognition, type RecognitionViewState } from './types';
@@ -41,6 +43,11 @@ export function useEarRecognition(
   const earStatusRef = useRef(earStatus);
   earStatusRef.current = earStatus;
   const previousStatusRef = useRef(earStatus);
+  // LRCLIB's answers this session, by trackId (lyricsCache.ts). One per hook,
+  // i.e. per app run: memory only.
+  const cacheRef = useRef<LyricsCache | null>(null);
+  cacheRef.current ??= createLyricsCache();
+  const cache = cacheRef.current;
 
   const cancel = useCallback(() => {
     const active = activeRef.current;
@@ -95,11 +102,26 @@ export function useEarRecognition(
       }
 
       const track = trackFromRecognition(r);
+      // Asked before this session (with or without lyrics): answer from
+      // memory, re-anchored on this match, without another LRCLIB request.
+      const known = cache.get(track.trackId);
+      if (known !== undefined) {
+        activeRef.current = null;
+        setState({
+          phase: 'idle',
+          result: resolveLyrics(track, known, anchorFromRecognition(r)),
+          message: null,
+          retryable: false,
+        });
+        return;
+      }
+
       setState((s) => ({ ...s, phase: 'resolving_lyrics', message: null, retryable: false }));
       lookupLrclib(track, undefined, attempt.controller.signal).then(
         (record) => {
           if (activeRef.current !== attempt) return;
           activeRef.current = null;
+          cache.set(track.trackId, record);
           setState({
             phase: 'idle',
             result: resolveLyrics(track, record, anchorFromRecognition(r)),
@@ -151,7 +173,7 @@ export function useEarRecognition(
       recognitionSub.remove();
       errorSub.remove();
     };
-  }, [recognizer]);
+  }, [cache, recognizer]);
 
   useEffect(() => {
     if (previousStatusRef.current === 'listening' && earStatus !== 'listening') cancel();

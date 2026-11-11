@@ -1,5 +1,8 @@
 import { fireEvent, render } from '@testing-library/react-native';
+import { StyleSheet } from 'react-native';
 
+import { PALETTE_FAMILIES } from '../../direction/palettes';
+import { DEFAULT_CHROME_THEME, chromeTheme } from '../../theme/chrome';
 import { RecognitionControls } from '../RecognitionControls';
 import { RECOGNITION_COPY } from '../../recognition/recognitionCopy';
 import type { RecognitionPhase, RecognitionViewState } from '../../recognition/types';
@@ -85,5 +88,39 @@ describe('RecognitionControls', () => {
     const screen = await s.render();
     await fireEvent.press(screen.getByRole('button', { name: '設定' }));
     expect(s.handlers.onOpenSettings).toHaveBeenCalledTimes(1);
+  });
+
+  describe('chrome (stage F)', () => {
+    const styleOf = (element: { props: { style?: unknown } }) =>
+      StyleSheet.flatten(element.props.style as never) as Record<string, unknown>;
+    const kohaku = PALETTE_FAMILIES.find((f) => f.key === 'kohaku')!.palette;
+
+    test('colours come from the theme: recognize is ruled in accent, settings in border', async () => {
+      const theme = chromeTheme(kohaku);
+      const handlers = { onRecognize: jest.fn(), onCancel: jest.fn(), onOpenSettings: jest.fn() };
+      const screen = await render(
+        <RecognitionControls
+          state={{ ...idleState, message: RECOGNITION_COPY.unavailable }}
+          theme={theme}
+          {...handlers}
+        />,
+      );
+      expect(styleOf(screen.getByTestId('recognize-button')).borderColor).toBe(theme.accent);
+      expect(styleOf(screen.getByTestId('settings-button')).borderColor).toBe(theme.border);
+      expect(styleOf(screen.getByText(RECOGNITION_COPY.unavailable))).toMatchObject({
+        color: theme.inkMuted,
+        fontSize: 13,
+      });
+    });
+
+    test('without a theme the colours come from DEFAULT_PALETTE, in the system font', async () => {
+      const screen = await setup({ ...idleState, message: RECOGNITION_COPY.unavailable }).render();
+      expect(styleOf(screen.getByTestId('recognize-button')).borderColor).toBe(
+        DEFAULT_CHROME_THEME.accent,
+      );
+      const message = styleOf(screen.getByText(RECOGNITION_COPY.unavailable));
+      expect(message.color).toBe(DEFAULT_CHROME_THEME.inkMuted);
+      expect(message.fontFamily).toBeUndefined();
+    });
   });
 });

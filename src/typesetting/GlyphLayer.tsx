@@ -1,6 +1,7 @@
-import { Group, Text } from '@shopify/react-native-skia';
+import { Group, LinearGradient, Text } from '@shopify/react-native-skia';
 import type { SkFont, Transforms3d } from '@shopify/react-native-skia';
 import { memo } from 'react';
+import type { ReactElement } from 'react';
 import { interpolateColor, useDerivedValue } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
 
@@ -8,7 +9,18 @@ import type { Entrance, Hold, Palette } from '../direction/types';
 import type { PlacedGlyph } from './layout';
 import { derivePulse, glyphTransform } from './motion';
 import type { GlyphTransform } from './motion';
+import { BODY_FOOT, BODY_TOP } from './surgeColors';
 import type { BeatSharedValues } from './useBeatSharedValues';
+
+/**
+ * The ink's body (visual overhaul spec §3c.1): top-to-bottom gradient colours
+ * for ink glyphs and for accent glyphs, derived once per frame by the stage
+ * and shared by every glyph (see surgeColors `inkBody` / `accentBody`).
+ */
+export interface GlyphBody {
+  ink: SharedValue<string[]>;
+  accent: SharedValue<string[]>;
+}
 
 export interface GlyphLayerProps {
   glyphs: readonly PlacedGlyph[];
@@ -42,6 +54,12 @@ export interface GlyphLayerProps {
    */
   inkValue?: SharedValue<string> | null;
   accentValue?: SharedValue<string> | null;
+  /**
+   * Fill each glyph with the body gradient (one shader child per Text, so the
+   * draw count is unchanged). When omitted the glyphs are filled flat with
+   * their colour.
+   */
+  body?: GlyphBody | null;
   /** Draw emphasized glyphs in `palette.accent` instead of `palette.ink`. */
   accent: boolean;
   /**
@@ -74,6 +92,7 @@ export const GlyphLayer = memo(function GlyphLayer({
   palette,
   inkValue = null,
   accentValue = null,
+  body = null,
   accent,
   testIDPrefix = 'glyph',
   ...motion
@@ -97,6 +116,7 @@ export const GlyphLayer = memo(function GlyphLayer({
             accentColor={palette.accent}
             inkValue={inkValue}
             accentValue={accentValue}
+            body={body}
             emphasisOrder={emphasisOrder}
             emphasisCount={emphasisCount}
             testID={`${testIDPrefix}-${glyph.index}`}
@@ -138,6 +158,7 @@ interface AnimatedGlyphProps extends Pick<
   accentColor: string;
   inkValue: SharedValue<string> | null;
   accentValue: SharedValue<string> | null;
+  body: GlyphBody | null;
   /** Rank among the line's emphasized glyphs; -1 when this glyph is not emphasized. */
   emphasisOrder: number;
   /** How many glyphs of the line are emphasized. */
@@ -150,6 +171,60 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+/**
+ * How far an emphasized glyph has migrated to the accent, 0..1: the line's
+ * progress, sliced so the emphasized glyphs take the accent one after another.
+ */
+function emphasisMigration(
+  timeMs: number,
+  lineStartedAtMs: number,
+  lineEndsAtMs: number,
+  emphasisOrder: number,
+  emphasisCount: number,
+): number {
+  'worklet';
+  const progress = clamp01((timeMs - lineStartedAtMs) / (lineEndsAtMs - lineStartedAtMs));
+  return clamp01(progress * emphasisCount - emphasisOrder);
+}
+
+interface MigratingBodyProps {
+  start: { x: number; y: number };
+  end: { x: number; y: number };
+  body: GlyphBody;
+  time: SharedValue<number>;
+  lineStartedAtMs: number;
+  lineEndsAtMs: number;
+  emphasisOrder: number;
+  emphasisCount: number;
+}
+
+/**
+ * The body of an emphasized glyph while it migrates: each stop goes from the
+ * ink body to the accent body. Only emphasized glyphs (at most a handful per
+ * line) mount this; every other glyph uses the shared gradient as it is.
+ */
+function MigratingBody({
+  start,
+  end,
+  body,
+  time,
+  lineStartedAtMs,
+  lineEndsAtMs,
+  emphasisOrder,
+  emphasisCount,
+}: MigratingBodyProps) {
+  const colors = useDerivedValue<string[]>(() => {
+    const local = emphasisMigration(time.value, lineStartedAtMs, lineEndsAtMs, emphasisOrder, emphasisCount);
+    const ink = body.ink.value;
+    const accentStops = body.accent.value;
+    return [
+      interpolateColor(local, [0, 1], [ink[0]!, accentStops[0]!]),
+      interpolateColor(local, [0, 1], [ink[1]!, accentStops[1]!]),
+    ];
+  }, [body, lineStartedAtMs, lineEndsAtMs, emphasisOrder, emphasisCount]);
+  return <LinearGradient start={start} end={end} colors={colors} />;
+}
+
 function AnimatedGlyph({
   glyph,
   order,
@@ -159,6 +234,7 @@ function AnimatedGlyph({
   accentColor,
   inkValue,
   accentValue,
+  body,
   emphasisOrder,
   emphasisCount,
   testID,
@@ -176,9 +252,13 @@ function AnimatedGlyph({
   seed,
   feel,
 }: AnimatedGlyphProps) {
-  const { bar, confidence, lastOnsetAtMs, nextBeatAtMs, periodMs, low } = beat;
+  const { bar, confidence, lastOnsetAtMs, nextBeatAtMs, periodMs, low, silence } = beat;
   const { emphasized, rotateDeg } = glyph;
   const phaseOffset = glyph.phaseOffset ?? 0;
+  // An idle glyph may be marked accent (drawn in the accent outright, with no
+  // migration) or carry an opacity multiplier (visual overhaul spec §3e).
+  const glyphAccent = glyph.accent === true;
+  const alpha = glyph.alpha ?? 1;
   // The entrance clock: anchored at the landing when the scheduler confirmed
   // the line ahead of a beat head, at the line's start otherwise.
   const anchorMs = lineLandsAtMs ?? lineStartedAtMs;
@@ -207,6 +287,7 @@ function AnimatedGlyph({
         phaseOffset,
         anticipationMs,
         exiting,
+        silent: silence.value >= 0.5,
       }),
     [
       entrance,
@@ -232,7 +313,7 @@ function AnimatedGlyph({
     ],
     [rotateDeg],
   );
-  const opacity = useDerivedValue(() => motion.value.opacity);
+  const opacity = useDerivedValue(() => motion.value.opacity * alpha, [alpha]);
   // Emphasis migrates: across the line's span the emphasized glyphs take the
   // accent colour one after another (each ramps over its own slice of the
   // progress). This states where inside the line we are, in line units only —
@@ -240,13 +321,14 @@ function AnimatedGlyph({
   // are the stage's surge-interpolated colours when it provides them.
   const color = useDerivedValue<string>(() => {
     const inkNow = inkValue === null ? ink : inkValue.value;
-    if (!accent || !emphasized || emphasisOrder < 0) return inkNow;
     const accentNow = accentValue === null ? accentColor : accentValue.value;
+    if (glyphAccent) return accentNow;
+    if (!accent || !emphasized || emphasisOrder < 0) return inkNow;
     if (lineEndsAtMs === null || lineEndsAtMs <= lineStartedAtMs) return accentNow;
-    const progress = clamp01((time.value - lineStartedAtMs) / (lineEndsAtMs - lineStartedAtMs));
-    const local = clamp01(progress * emphasisCount - emphasisOrder);
+    const local = emphasisMigration(time.value, lineStartedAtMs, lineEndsAtMs, emphasisOrder, emphasisCount);
     return interpolateColor(local, [0, 1], [inkNow, accentNow]);
   }, [
+    glyphAccent,
     accent,
     emphasized,
     emphasisOrder,
@@ -268,6 +350,36 @@ function AnimatedGlyph({
     );
   }, [heavy]);
 
+  // The body gradient runs from the glyph's top to its foot in glyph
+  // coordinates; a rotated glyph turns it with the Group. The shader takes the
+  // fill's colour over (`color` still carries the alpha), so a migrating
+  // emphasized glyph needs its own gradient; the rest share the stage's.
+  let fill: ReactElement | null = null;
+  if (body !== null) {
+    const start = { x: glyph.x, y: glyph.y + glyph.sizePx * BODY_TOP };
+    const end = { x: glyph.x, y: glyph.y + glyph.sizePx * BODY_FOOT };
+    if (glyphAccent) {
+      fill = <LinearGradient start={start} end={end} colors={body.accent} />;
+    } else if (!accent || !emphasized || emphasisOrder < 0) {
+      fill = <LinearGradient start={start} end={end} colors={body.ink} />;
+    } else if (lineEndsAtMs === null || lineEndsAtMs <= lineStartedAtMs) {
+      fill = <LinearGradient start={start} end={end} colors={body.accent} />;
+    } else {
+      fill = (
+        <MigratingBody
+          start={start}
+          end={end}
+          body={body}
+          time={time}
+          lineStartedAtMs={lineStartedAtMs}
+          lineEndsAtMs={lineEndsAtMs}
+          emphasisOrder={emphasisOrder}
+          emphasisCount={emphasisCount}
+        />
+      );
+    }
+  }
+
   // Skia's Group types omit testID; it is only read by tests under the Skia mock.
   const testProps = { testID } as object;
   return (
@@ -281,9 +393,13 @@ function AnimatedGlyph({
           color={color}
           style="stroke"
           strokeWidth={strokeWidth}
-        />
+        >
+          {fill}
+        </Text>
       ) : null}
-      <Text x={glyph.x} y={glyph.y} text={glyph.char} font={font} color={color} />
+      <Text x={glyph.x} y={glyph.y} text={glyph.char} font={font} color={color}>
+        {fill}
+      </Text>
     </Group>
   );
 }

@@ -1,5 +1,5 @@
 import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { ListeningStatus } from '../audio/types';
@@ -16,11 +16,44 @@ import { createAutoRecognitionTrigger } from '../recognition/autoRecognition';
 import type { RecognitionPhase } from '../recognition/types';
 import { useEarRecognition } from '../recognition/useEarRecognition';
 import { useSettings } from '../settings/useSettings';
+import { chromeFont, chromeTheme, withAlpha } from '../theme/chrome';
+import type { ChromeFonts, ChromeTheme } from '../theme/chrome';
 import { LyricStage } from '../typesetting/LyricStage';
 import { useStageSource } from './useStageSource';
 
 interface MusicageAppProps {
   reducedMotion?: boolean;
+  /** The bundled gothic once `App` has loaded it; the system font until then. */
+  chromeFonts?: ChromeFonts;
+}
+
+const NO_FONTS: ChromeFonts = {};
+
+type StatusMark = 'hollow' | 'filled' | 'ringed';
+
+/** Idle (and a stopped or failed mic) is hollow, listening is filled, a match in progress is ringed. */
+function statusMark(status: ListeningStatus, phase: RecognitionPhase): StatusMark {
+  if (phase === 'listening' || phase === 'resolving_lyrics') return 'ringed';
+  return status === 'listening' ? 'filled' : 'hollow';
+}
+
+/** A still 6px dot in the spot colour. It never blinks. */
+function StatusDot({ mark, theme }: { mark: StatusMark; theme: ChromeTheme }) {
+  return (
+    <View
+      style={[styles.statusRing, mark === 'ringed' ? { borderColor: theme.accent } : null]}
+      testID={`status-dot-${mark}`}
+    >
+      <View
+        style={[
+          styles.statusDot,
+          mark === 'hollow'
+            ? { borderColor: theme.accent, borderWidth: 1 }
+            : { backgroundColor: theme.accent },
+        ]}
+      />
+    </View>
+  );
 }
 
 function statusLabel(status: ListeningStatus, phase: RecognitionPhase): string {
@@ -38,7 +71,7 @@ function statusLabel(status: ListeningStatus, phase: RecognitionPhase): string {
   }
 }
 
-export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
+export function MusicageApp({ reducedMotion = false, chromeFonts = NO_FONTS }: MusicageAppProps) {
   const ear = useEar();
   const recognition = useEarRecognition(ear.recognizer, ear.status);
   const { settings, ready, update } = useSettings();
@@ -58,6 +91,14 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
   // the text layer so an OLED does not burn the stage and wordmark in.
   useKeepScreenOn(ear.status === 'listening');
   const drift = useBurnInDrift(reducedMotion);
+  // The chrome is printed in the stage's palette. Keyed on the colours, not
+  // the palette object, so it is rebuilt only when the song's colours change.
+  const palette = stage.source.direction?.palette ?? DEFAULT_PALETTE;
+  const { background, ink, accent } = palette;
+  const theme = useMemo(
+    () => chromeTheme({ background, ink, accent }, chromeFonts),
+    [background, ink, accent, chromeFonts],
+  );
 
   useEffect(() => {
     void ear.start();
@@ -120,10 +161,18 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
         </View>
         <SafeAreaView pointerEvents="box-none" style={styles.safeArea}>
           <View pointerEvents="none" style={styles.wordmarkRow}>
-            <Text style={styles.wordmark}>MUSICAGE</Text>
-            <Text style={styles.status}>
-              {statusLabel(ear.status, phase)}
+            <Text
+              style={[styles.wordmark, chromeFont(theme, 'bold'), { color: withAlpha(theme.ink, 0.85) }]}
+              testID="wordmark"
+            >
+              MUSICAGE
             </Text>
+            <View style={styles.statusGroup}>
+              <StatusDot mark={statusMark(ear.status, phase)} theme={theme} />
+              <Text style={[styles.status, chromeFont(theme, 'regular'), { color: theme.inkMuted }]}>
+                {statusLabel(ear.status, phase)}
+              </Text>
+            </View>
           </View>
           <View pointerEvents="box-none" style={styles.content}>
             <View
@@ -136,6 +185,7 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
                 onOpenSettings={() => setSettingsVisible(true)}
                 onRecognize={recognition.recognize}
                 state={recognition.state}
+                theme={theme}
               />
               <ListeningControls
                 errorMessage={ear.errorMessage}
@@ -143,18 +193,20 @@ export function MusicageApp({ reducedMotion = false }: MusicageAppProps) {
                 onStart={ear.start}
                 onStop={ear.stop}
                 status={ear.status}
+                theme={theme}
               />
             </View>
           </View>
         </SafeAreaView>
       </Animated.View>
       <SafeAreaView pointerEvents="box-none" style={styles.fill}>
-        <FixtureControl playback={playback} />
+        <FixtureControl playback={playback} theme={theme} />
       </SafeAreaView>
       <SettingsSheet
         onClose={() => setSettingsVisible(false)}
         onToggleAutoRecognize={toggleAutoRecognize}
         settings={settings}
+        theme={theme}
         visible={settingsVisible}
       />
     </View>
@@ -179,15 +231,32 @@ const styles = StyleSheet.create({
     paddingTop: 12,
   },
   wordmark: {
-    color: '#F4F0E6',
-    fontSize: 13,
-    fontWeight: '700',
-    letterSpacing: 4,
+    fontSize: 12,
+    letterSpacing: 5,
+  },
+  statusGroup: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 6,
+  },
+  // A fixed 10px box, so the word does not shift when the ring appears.
+  statusRing: {
+    alignItems: 'center',
+    borderColor: 'transparent',
+    borderRadius: 5,
+    borderWidth: 1,
+    height: 10,
+    justifyContent: 'center',
+    width: 10,
+  },
+  statusDot: {
+    borderRadius: 3,
+    height: 6,
+    width: 6,
   },
   status: {
-    color: '#A9AAA4',
     fontSize: 10,
-    letterSpacing: 2,
+    letterSpacing: 2.5,
   },
   content: {
     flex: 1,
