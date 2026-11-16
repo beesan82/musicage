@@ -9,6 +9,7 @@ import {
   exitDurationMs,
   exitForEntrance,
   glyphTransform,
+  SETTLED_TRANSFORM,
   TEMPO_FEEL_FACTOR,
   type MotionInput,
 } from '../motion';
@@ -85,6 +86,32 @@ test('trace reveals glyphs in order, 60ms each', () => {
   expect(op(2, 180)).toBeCloseTo(0.5, 5);
   expect(op(2, 240)).toBe(1);
   expect(op(0, 60)).toBeCloseTo(0.5, 5);
+});
+
+test('SETTLED_TRANSFORM is where every still glyph rests once entranceDone, and under reduced motion', () => {
+  // GlyphLayer stops following the clock and holds SETTLED_TRANSFORM in
+  // exactly these cases, so the two must agree for every entrance.
+  expect(SETTLED_TRANSFORM).toEqual(identity);
+  const entrances = Object.keys(ENTRANCE_DURATION_MS) as MotionInput['entrance'][];
+  for (const entrance of entrances) {
+    for (const periodMs of [0, 500, 1300]) {
+      for (const anticipationMs of [0, 200]) {
+        for (const glyphCount of [1, 5, 14]) {
+          const doneAt = entranceDurationMs(entrance, glyphCount, periodMs);
+          for (let glyphIndex = 0; glyphIndex < glyphCount; glyphIndex++) {
+            for (const elapsedMs of [doneAt, doneAt + 1, doneAt + 60_000]) {
+              const input = { entrance, periodMs, anticipationMs, glyphCount, glyphIndex, elapsedMs };
+              expect(entranceDone(entrance, glyphCount, elapsedMs, periodMs)).toBe(true);
+              expect(at({ ...input, low: 1, lastOnsetAtMs: 5, timeMs: 10 })).toEqual(SETTLED_TRANSFORM);
+            }
+            expect(at({ entrance, periodMs, anticipationMs, glyphCount, glyphIndex, elapsedMs: 0, reducedMotion: true })).toEqual(
+              SETTLED_TRANSFORM,
+            );
+          }
+        }
+      }
+    }
+  }
 });
 
 test('fade is opacity-only', () => {

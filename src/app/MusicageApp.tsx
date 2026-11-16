@@ -19,6 +19,7 @@ import { useSettings } from '../settings/useSettings';
 import { chromeFont, chromeTheme, withAlpha } from '../theme/chrome';
 import type { ChromeFonts, ChromeTheme } from '../theme/chrome';
 import { LyricStage } from '../typesetting/LyricStage';
+import { devicePatternBook } from '../visualizer/patternStore';
 import { useStageSource } from './useStageSource';
 
 interface MusicageAppProps {
@@ -86,6 +87,8 @@ export function MusicageApp({ reducedMotion = false, chromeFonts = NO_FONTS }: M
     status: ear.status,
     playback,
     result,
+    // The songs' visualizer patterns, by key only, kept on the device (spec §9.1).
+    patternBook: devicePatternBook(),
   });
   // Always-on object manners: no sleep while listening, and a slow wander of
   // the text layer so an OLED does not burn the stage and wordmark in.

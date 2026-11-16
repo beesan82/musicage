@@ -1,13 +1,13 @@
 import { Group, LinearGradient, Text } from '@shopify/react-native-skia';
 import type { SkFont, Transforms3d } from '@shopify/react-native-skia';
-import { memo } from 'react';
+import { memo, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import { interpolateColor, useDerivedValue } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
 
 import type { Entrance, Hold, Palette } from '../direction/types';
 import type { PlacedGlyph } from './layout';
-import { derivePulse, glyphTransform } from './motion';
+import { derivePulse, entranceDurationMs, glyphTransform, SETTLED_TRANSFORM } from './motion';
 import type { GlyphTransform } from './motion';
 import { BODY_FOOT, BODY_TOP } from './surgeColors';
 import type { BeatSharedValues } from './useBeatSharedValues';
@@ -82,6 +82,62 @@ export interface GlyphLayerProps {
   testIDPrefix?: string;
 }
 
+/** Slack on the timer that stops a still layer's motion once its entrance is over, ms. */
+const SETTLE_SLACK_MS = 50;
+
+interface SettleInput {
+  time: SharedValue<number>;
+  periodMs: SharedValue<number>;
+  entrance: Entrance;
+  hold: Hold;
+  exiting: boolean;
+  reducedMotion: boolean;
+  anchorMs: number;
+  glyphCount: number;
+}
+
+/**
+ * Whether the layer's glyphs rest at SETTLED_TRANSFORM for good, so their
+ * motion can stop following the clock and the beat. A non-leaving layer under
+ * reduced motion rests from the start. One on the `still` hold rests once its
+ * entrance is over (entranceDone with the grid as it is then): one timer per
+ * layer, re-armed if the clock has not got there yet. A new entrance (anchor,
+ * kind or glyph count) starts it following the clock again. Leaving layers and
+ * every other hold keep following the clock, as the beat moves them.
+ */
+function useSettled({
+  time,
+  periodMs,
+  entrance,
+  hold,
+  exiting,
+  reducedMotion,
+  anchorMs,
+  glyphCount,
+}: SettleInput): boolean {
+  const watch = !exiting && !reducedMotion && hold === 'still';
+  const entranceKey = `${entrance}|${anchorMs}|${glyphCount}`;
+  const [settledKey, setSettledKey] = useState<string | null>(null);
+  const settled = (!exiting && reducedMotion) || (watch && settledKey === entranceKey);
+  useEffect(() => {
+    if (!watch || settled) return undefined;
+    let id: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      const remaining = entranceDurationMs(entrance, glyphCount, periodMs.value) - (time.value - anchorMs);
+      if (remaining <= 0) {
+        setSettledKey(entranceKey);
+        return;
+      }
+      id = setTimeout(check, (Number.isFinite(remaining) ? remaining : 0) + SETTLE_SLACK_MS);
+    };
+    check();
+    return () => {
+      if (id !== undefined) clearTimeout(id);
+    };
+  }, [watch, settled, entrance, glyphCount, anchorMs, entranceKey, time, periodMs]);
+  return settled;
+}
+
 /**
  * One animated Skia Group per glyph. The transform and opacity are derived on
  * the UI thread from shared values, so nothing here re-renders per frame.
@@ -97,6 +153,16 @@ export const GlyphLayer = memo(function GlyphLayer({
   testIDPrefix = 'glyph',
   ...motion
 }: GlyphLayerProps) {
+  const settled = useSettled({
+    time: motion.time,
+    periodMs: motion.beat.periodMs,
+    entrance: motion.entrance,
+    hold: motion.hold,
+    exiting: motion.exiting ?? false,
+    reducedMotion: motion.reducedMotion,
+    anchorMs: motion.lineLandsAtMs ?? motion.lineStartedAtMs,
+    glyphCount: glyphs.length,
+  });
   // Emphasized glyphs light up in order as the line progresses, so each one
   // needs its rank among the emphasized and their total.
   const emphasisCount = glyphs.filter((g) => g.emphasized).length;
@@ -121,6 +187,7 @@ export const GlyphLayer = memo(function GlyphLayer({
             emphasisCount={emphasisCount}
             testID={`${testIDPrefix}-${glyph.index}`}
             accent={accent}
+            settled={settled}
             {...motion}
           />
         );
@@ -164,6 +231,8 @@ interface AnimatedGlyphProps extends Pick<
   /** How many glyphs of the line are emphasized. */
   emphasisCount: number;
   testID: string;
+  /** The glyph rests at SETTLED_TRANSFORM for good (useSettled): its motion stops following the clock. */
+  settled: boolean;
 }
 
 function clamp01(v: number): number {
@@ -238,6 +307,7 @@ function AnimatedGlyph({
   emphasisOrder,
   emphasisCount,
   testID,
+  settled,
   time,
   lineStartedAtMs,
   lineLandsAtMs = null,
@@ -265,31 +335,43 @@ function AnimatedGlyph({
   const anticipationMs =
     lineLandsAtMs !== null ? Math.max(0, lineLandsAtMs - lineStartedAtMs) : 0;
 
+  // A derived value re-runs whenever any shared value its worklet captures
+  // changes, whichever branch it takes. So each one below captures the clock
+  // and the beat only while it reads them: a settled glyph's motion captures
+  // none (and is not recomputed every frame), and neither do the colour of a
+  // glyph that does not migrate or the stroke of a glyph that has none.
+  const motionInputs = settled
+    ? null
+    : { time, lastOnsetAtMs, nextBeatAtMs, periodMs, low, bar, confidence, silence };
   const motion = useDerivedValue<GlyphTransform>(
-    () =>
-      glyphTransform({
+    () => {
+      if (motionInputs === null) return SETTLED_TRANSFORM;
+      const now = motionInputs.time.value;
+      return glyphTransform({
         entrance,
         hold,
-        elapsedMs: time.value - anchorMs,
+        elapsedMs: now - anchorMs,
         glyphIndex: order,
         glyphCount,
         emphasized,
-        timeMs: time.value,
-        lastOnsetAtMs: lastOnsetAtMs.value,
-        nextBeatAtMs: nextBeatAtMs.value,
-        periodMs: periodMs.value,
-        low: low.value,
+        timeMs: now,
+        lastOnsetAtMs: motionInputs.lastOnsetAtMs.value,
+        nextBeatAtMs: motionInputs.nextBeatAtMs.value,
+        periodMs: motionInputs.periodMs.value,
+        low: motionInputs.low.value,
         feel,
-        bar: bar.value,
-        confidence: confidence.value,
+        bar: motionInputs.bar.value,
+        confidence: motionInputs.confidence.value,
         reducedMotion,
         seed,
         phaseOffset,
         anticipationMs,
         exiting,
-        silent: silence.value >= 0.5,
-      }),
+        silent: motionInputs.silence.value >= 0.5,
+      });
+    },
     [
+      settled,
       entrance,
       hold,
       anchorMs,
@@ -319,15 +401,30 @@ function AnimatedGlyph({
   // progress). This states where inside the line we are, in line units only —
   // never a guess at which word is being sung. The ink and accent themselves
   // are the stage's surge-interpolated colours when it provides them.
+  const migrates =
+    !glyphAccent &&
+    accent &&
+    emphasized &&
+    emphasisOrder >= 0 &&
+    lineEndsAtMs !== null &&
+    lineEndsAtMs > lineStartedAtMs;
+  const migrationClock = migrates ? time : null;
   const color = useDerivedValue<string>(() => {
     const inkNow = inkValue === null ? ink : inkValue.value;
     const accentNow = accentValue === null ? accentColor : accentValue.value;
     if (glyphAccent) return accentNow;
     if (!accent || !emphasized || emphasisOrder < 0) return inkNow;
-    if (lineEndsAtMs === null || lineEndsAtMs <= lineStartedAtMs) return accentNow;
-    const local = emphasisMigration(time.value, lineStartedAtMs, lineEndsAtMs, emphasisOrder, emphasisCount);
+    if (migrationClock === null || lineEndsAtMs === null || lineEndsAtMs <= lineStartedAtMs) return accentNow;
+    const local = emphasisMigration(
+      migrationClock.value,
+      lineStartedAtMs,
+      lineEndsAtMs,
+      emphasisOrder,
+      emphasisCount,
+    );
     return interpolateColor(local, [0, 1], [inkNow, accentNow]);
   }, [
+    migrates,
     glyphAccent,
     accent,
     emphasized,
@@ -342,11 +439,16 @@ function AnimatedGlyph({
   ]);
   // The stroke twin's width rides the beat's low band (groove analysis 4.3),
   // under the same low-confidence gate as every beat-derived motion.
+  const strokeInputs = heavy ? { time, lastOnsetAtMs, low, confidence } : null;
   const strokeWidth = useDerivedValue<number>(() => {
-    if (!heavy) return 0;
-    const damp = confidence.value < 0.5 ? 0.25 : 1;
+    if (strokeInputs === null) return 0;
+    const damp = strokeInputs.confidence.value < 0.5 ? 0.25 : 1;
     return (
-      glyph.sizePx * 0.02 * derivePulse(time.value, lastOnsetAtMs.value) * low.value * damp
+      glyph.sizePx *
+      0.02 *
+      derivePulse(strokeInputs.time.value, strokeInputs.lastOnsetAtMs.value) *
+      strokeInputs.low.value *
+      damp
     );
   }, [heavy]);
 

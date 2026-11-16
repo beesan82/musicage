@@ -17,7 +17,8 @@ import type { ScheduledLine } from '../sync/lineScheduler';
 import { IDLE_FOCUS } from '../textures/surfaceModel';
 import type { Uv } from '../textures/surfaceModel';
 import { TextureBackground } from '../textures/TextureBackground';
-import { BandMeter } from './BandMeter';
+import type { VisualizerKey, VisualizerStage } from '../visualizer/patterns';
+import { StageVisualizer } from '../visualizer/StageVisualizer';
 import { advanceMeasure } from './fontMeasure';
 import { createStageFont, FONT_SOURCES, useStageTypefaces } from './fonts';
 import type { FontKey, FontWeight } from './fonts';
@@ -59,6 +60,11 @@ export type StageSource =
        * background dips, and the first line drops in (design spec §7).
        */
       dropAtMs?: number | null;
+      /**
+       * The song's visualizer pattern (design spec §9.1), once chosen or
+       * remembered; null or absent until then (the stage shows `bars`).
+       */
+      pattern?: VisualizerKey | null;
     }
   | {
       /**
@@ -74,6 +80,8 @@ export type StageSource =
       reason: UnsyncedKind;
       /** As for `synced`: the recognition drop fires for a new song with or without lyrics. */
       dropAtMs?: number | null;
+      /** As for `synced`: the nameplate shows the song's pattern. */
+      pattern?: VisualizerKey | null;
     }
   | {
       /**
@@ -88,6 +96,8 @@ export type StageSource =
       text: string;
       /** As for `synced`; on the sheet only its heading's title takes the drop. */
       dropAtMs?: number | null;
+      /** As for `synced`, though the sheet always shows `bars-bold` (design spec §9.1). */
+      pattern?: VisualizerKey | null;
     }
   | { kind: 'idle'; direction: SongDirection | null; track: IdleTrack };
 
@@ -148,6 +158,13 @@ const CAPTION_RULE_WIDTH = 12;
 const CAPTION_RULE_HEIGHT = 2;
 const CAPTION_RULE_GAP = 6;
 const FONT_KEYS = Object.keys(FONT_SOURCES) as FontKey[];
+/** testID prefix of each stage's visualizer elements (the clock's and the plates' as before build 15). */
+const VIZ_TEST_ID_PREFIX: Readonly<Record<VisualizerStage, string>> = {
+  clock: 'idle-band-rule',
+  nameplate: 'band-rule',
+  sheet: 'band-rule',
+  synced: 'line-band-rule',
+};
 const CONTEXT_DIRECTION: LineDirection = {
   font: 'gothic',
   weight: 'regular',
@@ -945,6 +962,33 @@ export function LyricStage({
   );
   const exitHeavy = exitWeight === 'bold' || exitFace === 'gothic-heavy';
 
+  // The stage's one visualizer (design spec §9.1, build 15): the clock's
+  // `bars`, the nameplate's and the synced line's song pattern, the sheet's
+  // `bars-bold`, each in the band at the foot of the print area. It is drawn
+  // first in the type canvas (above the texture, below every glyph), and it
+  // belongs to its stage: one per stage kind, so it leaves with its stage.
+  const vizStage: VisualizerStage | null =
+    idle !== null && idleBase !== null
+      ? 'clock'
+      : unsynced !== null && nameplate !== null && scene !== null
+        ? 'nameplate'
+        : plain !== null && sheet !== null && scene !== null
+          ? 'sheet'
+          : lines !== null && scene !== null && area !== null
+            ? 'synced'
+            : null;
+  const vizRow =
+    vizStage === 'clock'
+      ? idle!.meter
+      : vizStage === 'nameplate'
+        ? nameplate!.meter
+        : vizStage === 'sheet'
+          ? sheet!.meter
+          : vizStage === 'synced'
+            ? { x: area!.left, width: area!.right - area!.left, baseline: area!.bottom }
+            : null;
+  const songPattern = source.kind === 'idle' ? null : (source.pattern ?? null);
+
   return (
     <View
       onLayout={onLayout}
@@ -973,6 +1017,22 @@ export function LyricStage({
       </View>
       {fonts !== null ? (
         <Canvas style={styles.layer}>
+          {vizStage !== null && vizRow !== null ? (
+            <StageVisualizer
+              key={`viz-${vizStage}`}
+              stage={vizStage}
+              songPattern={songPattern}
+              row={vizRow}
+              area={area}
+              lineBounds={vizStage === 'synced' ? (scene?.layout.bounds ?? null) : null}
+              beat={beatValues}
+              ink={inkNow}
+              accent={accentNow}
+              time={time}
+              reducedMotion={reducedMotion}
+              testIDPrefix={VIZ_TEST_ID_PREFIX[vizStage]}
+            />
+          ) : null}
           {idleExitByFace !== null && drop !== null
             ? // The idle glyphs at the fire, in the faces they were set in:
               // held in place until the head, then scattered (the exit derived
@@ -1094,8 +1154,8 @@ export function LyricStage({
               {/* The rest of the nameplate (nameplate.ts), beside the title the
                   block above draws as the line on stage: the artist small and
                   flat under its accent rule (no shadow, like the caption), the
-                  band meter on the foot of the print area, the note on the
-                  caption row. The artist arrives with the title (fades in at
+                  note on the caption row (the song's visualizer on the foot of
+                  the print area is drawn first, above). The artist arrives with the title (fades in at
                   the same landing) and otherwise stands still. */}
               {nameplate.artist.glyphs.length > 0 ? (
                 <Group opacity={CAPTION_OPACITY} {...({ testID: 'nameplate-artist' } as object)}>
@@ -1119,14 +1179,6 @@ export function LyricStage({
                   />
                 </Group>
               ) : null}
-              <BandMeter
-                x={nameplate.meter.x}
-                width={nameplate.meter.width}
-                baseline={nameplate.meter.baseline}
-                beat={beatValues}
-                ink={inkNow}
-                reducedMotion={reducedMotion}
-              />
               <Text
                 x={nameplate.note.x}
                 y={nameplate.note.y}
@@ -1155,8 +1207,8 @@ export function LyricStage({
                   that the block above draws as the line on stage: the whole
                   body at once in the palette's own ink (flat, no shadow, no
                   motion, never highlighted, never turned), the artist small
-                  and flat, the accent rule under the heading, the band meter
-                  on the foot of the print area, the note on the caption row. */}
+                  and flat, the accent rule under the heading, the note on the
+                  caption row (its `bars-bold` is drawn first, above). */}
               {shownBody !== null && bodyTiming !== null ? (
                 <PlainBody
                   runs={shownBody.runs}
@@ -1186,14 +1238,6 @@ export function LyricStage({
                 </Group>
               ) : null}
               <Rect {...sheet.rule} color={accentNow} {...({ testID: 'plain-rule' } as object)} />
-              <BandMeter
-                x={sheet.meter.x}
-                width={sheet.meter.width}
-                baseline={sheet.meter.baseline}
-                beat={beatValues}
-                ink={inkNow}
-                reducedMotion={reducedMotion}
-              />
               <Text
                 x={sheet.note.x}
                 y={sheet.note.y}
@@ -1235,20 +1279,6 @@ export function LyricStage({
                   />
                 ))}
               </Group>
-              {/* The clock's band meter (spec §5, 2026-11-11 evening): the
-                  nameplate's meter in the nameplate's place, lying at its base
-                  in silence. It belongs to the clock, so it leaves with it:
-                  when a drop brings a song's stage on, only that stage's own
-                  meter (if any) stands there. */}
-              <BandMeter
-                x={idle.meter.x}
-                width={idle.meter.width}
-                baseline={idle.meter.baseline}
-                beat={beatValues}
-                ink={inkNow}
-                reducedMotion={reducedMotion}
-                testIDPrefix="idle-band-rule"
-              />
               {idle.caption !== null ? (
                 <Rect
                   x={idle.caption.x}

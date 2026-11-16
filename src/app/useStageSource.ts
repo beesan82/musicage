@@ -24,11 +24,18 @@ import type { IdleTrack } from '../typesetting/idleComposition';
 import { plainParagraphs } from '../typesetting/plainSheet';
 import { useBeatSharedValues } from '../typesetting/useBeatSharedValues';
 import type { BeatSharedValues } from '../typesetting/useBeatSharedValues';
+import type { VisualizerKey } from '../visualizer/patterns';
+import { createPatternBook, memoryPatternStore } from '../visualizer/patternStore';
+import type { PatternBook } from '../visualizer/patternStore';
+import { createPatternObserver } from '../visualizer/selectPattern';
+import type { PatternObserver } from '../visualizer/selectPattern';
 
 const SCHEDULER_INTERVAL_MS = 50;
 /** A steady bed publishes the beat at most this often; a new pulse head at once. */
 export const BEAT_PUBLISH_MS = 60;
 const FIXTURE_LINES = parseLrc(FIXTURE_LRC);
+/** The fixture's place among the chosen patterns: kept for the session, never in the book. */
+const FIXTURE_PATTERN_ID = 'fixture';
 
 export const QUIET_BEAT: BeatState = {
   bpm: null,
@@ -47,6 +54,12 @@ export interface StageSourceInput {
   status: ListeningStatus;
   playback: FixturePlayback;
   result: LyricResult | null;
+  /**
+   * Where the songs' chosen visualizer patterns are remembered (the app
+   * passes the device's book); without one, the hook keeps them for its own
+   * lifetime only.
+   */
+  patternBook?: PatternBook;
 }
 
 export interface StageInputs {
@@ -85,9 +98,17 @@ export function useStageSource({
   status,
   playback,
   result,
+  patternBook,
 }: StageSourceInput): StageInputs {
   const engineRef = useRef<BeatEngine | null>(null);
   engineRef.current ??= createBeatEngine();
+  const sessionBookRef = useRef<PatternBook | null>(null);
+  const book = patternBook ?? (sessionBookRef.current ??= createPatternBook(memoryPatternStore()));
+  // The song's visualizer pattern (design spec §9.1): while a confirmed song
+  // has none yet, the ear subscription feeds its observer; the verdict goes
+  // to `choose` (set below, read by the subscription without resubscribing).
+  const watchRef = useRef<{ id: string; observer: PatternObserver } | null>(null);
+  const chooseRef = useRef<(id: string, key: VisualizerKey) => void>(() => {});
   // The surge (design spec §4): the acoustic profile of the song so far, OR'd
   // with the accent line on stage, smoothed, written to `beatValues.surge`
   // on every ear frame. The accent flag is set in render and read by the ear
@@ -165,6 +186,23 @@ export function useStageSource({
       // worklets derive the continuous beat from them without re-rendering.
       beatValues.write(frame, next);
       beatValues.silence.value = next.silence ? 1 : 0;
+      const watch = watchRef.current;
+      if (watch !== null) {
+        const verdict = watch.observer.push({
+          timestampMs: frame.timestampMs,
+          bpm: next.bpm,
+          confidence: next.confidence,
+          energy: next.energy,
+          low: frame.low,
+          mid: frame.mid,
+          high: frame.high,
+          silence: next.silence,
+        });
+        if (verdict.status !== 'observing') {
+          watchRef.current = null;
+          if (verdict.status === 'chosen') chooseRef.current(watch.id, verdict.key);
+        }
+      }
       // The surge: the acoustic detection (guarded inside the profile by the
       // beat confidence, the silence hold-off and the song's history) OR the
       // accent line, on a fast-in / slow-out follower.
@@ -331,6 +369,52 @@ export function useStageSource({
   );
   const fixtureDirection = playback.direction;
 
+  // The song's visualizer pattern (design spec §9.1, §9.4 decided 2026-11-16).
+  // A confirmed song (a new trackId, or the fixture starting) is watched until
+  // its observer has heard enough (selectPattern.ts), unless the book already
+  // has its key: then that key, at once, so recognizing the same song again,
+  // in this session or after a restart, gives the same pattern. Only the key
+  // goes into the book. The fixture's choice lasts the session only.
+  const patternId = active ? FIXTURE_PATTERN_ID : namedTrackId;
+  const patternSeed = active
+    ? `${FIXTURE_TRACK!.artist}/${FIXTURE_TRACK!.title}`
+    : artist !== null && title !== null
+      ? `${artist}/${title}`
+      : null;
+  const [chosen, setChosen] = useState<{ id: string; key: VisualizerKey } | null>(null);
+  const fixturePatternRef = useRef<VisualizerKey | null>(null);
+  chooseRef.current = (id, key) => {
+    if (id === FIXTURE_PATTERN_ID) fixturePatternRef.current = key;
+    else book.remember(id, key);
+    setChosen({ id, key });
+  };
+  useEffect(() => {
+    watchRef.current = null;
+    if (patternId === null || patternSeed === null) return undefined;
+    const fixture = patternId === FIXTURE_PATTERN_ID;
+    const known = fixture ? (fixturePatternRef.current ?? undefined) : book.recall(patternId);
+    if (known !== undefined) {
+      setChosen({ id: patternId, key: known });
+      return undefined;
+    }
+    const watch = { id: patternId, observer: createPatternObserver(patternSeed) };
+    watchRef.current = watch;
+    if (fixture) return undefined;
+    // The stored keys may still be on their way: a song found there stops watching.
+    let live = true;
+    void book.ready.then(() => {
+      if (!live || watchRef.current !== watch) return;
+      const stored = book.recall(patternId);
+      if (stored === undefined) return;
+      watchRef.current = null;
+      setChosen({ id: patternId, key: stored });
+    });
+    return () => {
+      live = false;
+    };
+  }, [book, patternId, patternSeed]);
+  const songPattern = chosen !== null && chosen.id === patternId ? chosen.key : null;
+
   const source = useMemo<StageSource>(() => {
     if (current !== null && active) {
       return {
@@ -340,6 +424,7 @@ export function useStageSource({
         scheduled: current.line,
         track: FIXTURE_TRACK,
         dropAtMs,
+        pattern: songPattern,
       };
     }
     if (current !== null && timedLines !== null && recognizedDirection !== null) {
@@ -350,6 +435,7 @@ export function useStageSource({
         scheduled: current.line,
         track: recognizedTrack,
         dropAtMs,
+        pattern: songPattern,
       };
     }
     // The nameplate (and the lyric sheet) waits for the drop effect to have
@@ -373,6 +459,7 @@ export function useStageSource({
           direction: recognizedDirection,
           text: printablePlain,
           dropAtMs,
+          pattern: songPattern,
         };
       }
       if (unsyncedKind !== null) {
@@ -382,6 +469,7 @@ export function useStageSource({
           direction: recognizedDirection,
           reason: unsyncedKind,
           dropAtMs,
+          pattern: songPattern,
         };
       }
     }
@@ -397,6 +485,7 @@ export function useStageSource({
     recognizedDirection,
     recognizedTrack,
     roomQuiet,
+    songPattern,
     timedLines,
     unsyncedKind,
   ]);

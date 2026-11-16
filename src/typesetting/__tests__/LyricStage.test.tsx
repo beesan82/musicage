@@ -14,7 +14,16 @@ import type { LyricLine, UnsyncedKind } from '../../recognition/types';
 import { IDLE_FOCUS } from '../../textures/surfaceModel';
 import * as textureBackground from '../../textures/TextureBackground';
 import { dropDip, hexToRgb01 } from '../../textures/textureShader';
-import { METER_BASE_HEIGHT, METER_MAX_HEIGHT, METER_RULE_COUNT, METER_RULE_WIDTH } from '../bandMeter';
+import { VIZ_GAIN } from '../../visualizer/discipline';
+import { PATTERN_RENDERERS } from '../../visualizer/registry';
+import type { PatternRendererProps } from '../../visualizer/registry';
+import {
+  METER_BASE_HEIGHT,
+  METER_BOLD_RULE_COUNT,
+  METER_MAX_HEIGHT,
+  METER_RULE_COUNT,
+  METER_RULE_WIDTH,
+} from '../bandMeter';
 import * as fonts from '../fonts';
 import * as idleComposition from '../idleComposition';
 import { composeClock, UNRECOGNIZED_IDLE_FACES } from '../idleComposition';
@@ -1876,7 +1885,8 @@ describe('a recognised song with plain lyrics only: the lyric sheet, the whole t
     expect(view.getAllByTestId(/^plain-artist-glyph-/)).toHaveLength(4);
     expect(view.getByTestId('plain-artist').props.opacity).toBe(0.6);
     expect(view.getByTestId('plain-rule').props).toMatchObject({ x: 24, width: 12, height: 2 });
-    expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_RULE_COUNT);
+    // The sheet's meter is `bars-bold` whatever the song's pattern (design spec §9.1, decided 2026-11-16).
+    expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_BOLD_RULE_COUNT);
     const note = view.getByTestId('plain-note').props;
     expect(note.text).toBe(RECOGNITION_COPY.lyrics_plain_sheet);
     expect(note).toMatchObject({ x: 24, y: STAGE_AREA.captionBaseline, opacity: 0.6 });
@@ -2215,5 +2225,122 @@ describe('anchoredTime', () => {
   test('never moves backwards when a later anchor lags the clock', () => {
     expect(anchoredTime(2000, 500, 500, 2010)).toBe(2010);
     expect(anchoredTime(2000, 500, 530, 2010)).toBe(2030);
+  });
+});
+
+describe('the stage’s visualizer (design spec §9.1, build 15a)', () => {
+  type Box = { x: number; y: number; width: number; height: number };
+  const track = { title: '架空の歌', artist: '架空の人' };
+  const songDirection = directSongByRules([], 'v');
+  const withPattern = (source: LyricStageProps['source'], pattern: string | null) =>
+    ({ ...source, pattern }) as LyricStageProps['source'];
+  const nameplate = (pattern: string | null) =>
+    withPattern(
+      { kind: 'unsynced', track, direction: songDirection, reason: 'lyrics_unavailable', dropAtMs: null },
+      pattern,
+    );
+  const sheet = (pattern: string | null) =>
+    withPattern({ kind: 'plain', track, direction: songDirection, text: '灯のない部屋\n針を下ろす', dropAtMs: null }, pattern);
+  const at = (source: LyricStageProps['source']) =>
+    inProvider(<LyricStage beatValues={beatValues} source={source} beat={beat} nowMonotonicMs={10_000} />);
+  // The registry's entries, writable here: a test registers a back pattern the way build 15b will.
+  type Renderers = Record<string, { Component: (props: PatternRendererProps) => unknown; budget: unknown } | undefined>;
+  const renderers = PATTERN_RENDERERS as unknown as Renderers;
+  let nowSpy: jest.SpyInstance;
+  beforeEach(() => {
+    nowSpy = jest.spyOn(performance, 'now').mockReturnValue(10_000);
+  });
+  afterEach(() => {
+    nowSpy.mockRestore();
+    delete renderers.ripple;
+  });
+
+  test('the clock shows `bars` at the visualizer gain', async () => {
+    const spy = jest.spyOn(renderers.bars!, 'Component');
+    const view = await render(at({ kind: 'idle', direction: null, track: null }));
+    expect(view.getByTestId('pattern-idle-band-rule-bars')).toBeTruthy();
+    expect(view.getAllByTestId(/^idle-band-rule-/)).toHaveLength(METER_RULE_COUNT);
+    expect(spy).toHaveBeenCalled();
+    for (const [props] of spy.mock.calls) expect((props as PatternRendererProps).gain).toBe(VIZ_GAIN);
+  });
+
+  test('the nameplate shows the song’s pattern; one without a renderer yet falls back to `bars`', async () => {
+    const view = await render(at(nameplate('bars-bold')));
+    expect(view.getByTestId('pattern-band-rule-bars-bold')).toBeTruthy();
+    expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_BOLD_RULE_COUNT);
+    expect(view.getAllByTestId(/^peak-band-rule-/)).toHaveLength(METER_BOLD_RULE_COUNT);
+
+    await view.rerender(at(nameplate('curtain')));
+    expect(view.getByTestId('pattern-band-rule-bars')).toBeTruthy();
+    expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_RULE_COUNT);
+  });
+
+  test('the nameplate hands `bars` over to the song’s pattern once it is chosen, by a crossfade that then lets go', async () => {
+    const view = await render(at(nameplate(null)));
+    expect(view.getByTestId('pattern-band-rule-bars')).toBeTruthy();
+    expect(view.queryAllByTestId(/^leaving-band-rule-/)).toHaveLength(0);
+
+    await view.rerender(at(nameplate('bars-bold')));
+    expect(view.getByTestId('pattern-band-rule-bars-bold')).toBeTruthy();
+    expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_BOLD_RULE_COUNT);
+    expect(view.getAllByTestId(/^leaving-band-rule-/)).toHaveLength(METER_RULE_COUNT);
+
+    // PATTERN_CROSSFADE_MS (1200) and the timer's slack (80).
+    await act(async () => {
+      jest.advanceTimersByTime(1300);
+    });
+    expect(view.queryAllByTestId(/^leaving-band-rule-/)).toHaveLength(0);
+    expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_BOLD_RULE_COUNT);
+  });
+
+  test('the lyric sheet always shows `bars-bold`, whatever the song’s pattern', async () => {
+    const view = await render(at(sheet(null)));
+    expect(view.getByTestId('pattern-band-rule-bars-bold')).toBeTruthy();
+    for (const pattern of ['bars', 'ripple', 'landscape', 'wave']) {
+      await view.rerender(at(sheet(pattern)));
+      expect(view.getByTestId('pattern-band-rule-bars-bold')).toBeTruthy();
+      expect(view.getAllByTestId(/^band-rule-/)).toHaveLength(METER_BOLD_RULE_COUNT);
+    }
+  });
+
+  test('the synced stage shows the song’s pattern; a foot pattern stands in the band at the foot of the print area', async () => {
+    const view = await render(at(withPattern(synced(TEXTS, 0), null)));
+    expect(view.getByTestId('pattern-line-band-rule-bars')).toBeTruthy();
+    const rules = view.getAllByTestId(/^line-band-rule-/);
+    expect(rules).toHaveLength(METER_RULE_COUNT);
+    for (const rule of rules) {
+      const rect = (rule.props.rect as { value: Box }).value;
+      expect(rect.y + rect.height).toBeCloseTo(STAGE_AREA.bottom, 6);
+    }
+
+    await view.rerender(at(withPattern(synced(TEXTS, 0), 'bars-bold')));
+    expect(view.getByTestId('pattern-line-band-rule-bars-bold')).toBeTruthy();
+    expect(view.getAllByTestId(/^line-band-rule-/)).toHaveLength(METER_BOLD_RULE_COUNT);
+  });
+
+  test('a back pattern on the synced stage (registered as build 15b will) is dimmed to 0.6 and kept 16 px clear of the line', async () => {
+    const Back = jest.fn((_props: PatternRendererProps) => null);
+    renderers.ripple = { Component: Back, budget: renderers.bars!.budget };
+    const view = await render(at(withPattern(synced(TEXTS, 0), 'ripple')));
+    expect(view.getByTestId('pattern-line-band-rule-ripple').props.opacity.value).toBeCloseTo(0.6, 9);
+    // No foot row under a back pattern.
+    expect(view.queryAllByTestId(/^line-band-rule-/)).toHaveLength(0);
+    const props = Back.mock.calls.at(-1)![0];
+    expect(props.opacityScale).toBeCloseTo(0.6, 9);
+    expect(props.gain).toBe(VIZ_GAIN);
+    const bounds = stageLayout(TEXTS[0]!, direction.lines[0]!).bounds;
+    expect(props.clearance).toEqual({
+      x: bounds.x - 16,
+      y: bounds.y - 16,
+      width: bounds.width + 32,
+      height: bounds.height + 32,
+    });
+
+    // The same pattern on the nameplate: its own opacity, nothing cut away.
+    await view.rerender(at(nameplate('ripple')));
+    const plate = Back.mock.calls.at(-1)![0];
+    expect(plate.opacityScale).toBe(1);
+    expect(plate.clearance).toBeNull();
+    expect(view.getByTestId('pattern-band-rule-ripple').props.opacity.value).toBe(1);
   });
 });

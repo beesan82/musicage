@@ -14,7 +14,17 @@ import {
   meterRuleX,
   meterShape,
   meterTarget,
+  METER_BOLD_RULE_COUNT,
+  METER_KICK_SIDE,
+  METER_PEAK_FALL_MS,
+  METER_PEAK_HEIGHT,
+  meterKickFlash,
+  meterKickSide,
+  meterPeakFollow,
+  meterPeakTop,
+  meterRuleCount,
 } from '../bandMeter';
+import { VIZ_GAIN, VIZ_GAIN_REFERENCE } from '../../visualizer/discipline';
 
 const FRAME_MS = 1000 / 60;
 const TRAVEL = METER_MAX_HEIGHT - METER_BASE_HEIGHT;
@@ -109,8 +119,16 @@ describe('meterRuleHeight', () => {
 });
 
 describe('meterTarget: what the follower heads for', () => {
+  test('the band at the visualizer gain (build 15: VIZ_GAIN by default), saturating at 1', () => {
+    // At the old meter's place on the mock's slider the reading is as it was.
+    expect(meterTarget(0.4, 0, VIZ_GAIN_REFERENCE)).toBeCloseTo(0.4);
+    // At VIZ_GAIN the same reading reaches about 2.6 × as far.
+    expect(meterTarget(0.2, 0)).toBeCloseTo(0.2 * (VIZ_GAIN / VIZ_GAIN_REFERENCE), 9);
+    expect(meterTarget(0.2, 0, VIZ_GAIN)).toBe(meterTarget(0.2, 0));
+    expect(meterTarget(0.4, 0)).toBe(1);
+  });
+
   test('the band clamped to 0..1, a broken reading as 0', () => {
-    expect(meterTarget(0.4, 0)).toBeCloseTo(0.4);
     expect(meterTarget(7, 0)).toBe(1);
     expect(meterTarget(-3, 0)).toBe(0);
     expect(meterTarget(Number.NaN, 0)).toBe(0);
@@ -186,5 +204,56 @@ describe('meterRuleX', () => {
 
   test('a single rule stands at the left edge', () => {
     expect(meterRuleX(0, 1, 24, 342)).toBe(24);
+  });
+});
+
+describe('bars-bold: the lyric sheet’s row (design spec §9.1)', () => {
+  test('48 rules (bars keeps 24), the same width, height and opacity', () => {
+    expect(meterRuleCount('bars')).toBe(METER_RULE_COUNT);
+    expect(meterRuleCount('bars-bold')).toBe(METER_BOLD_RULE_COUNT);
+    expect(METER_BOLD_RULE_COUNT).toBe(48);
+    expect(METER_PEAK_HEIGHT).toBe(2);
+  });
+
+  test('a peak jumps up to its rule and falls the full reach over 600 ms, never below the rule', () => {
+    expect(meterPeakFollow(0.2, 0.8, FRAME_MS)).toBe(0.8);
+    let peak = 1;
+    let elapsed = 0;
+    while (peak > 0 && elapsed < 2000) {
+      peak = meterPeakFollow(peak, 0, FRAME_MS);
+      elapsed += FRAME_MS;
+    }
+    expect(elapsed).toBeCloseTo(METER_PEAK_FALL_MS, -2);
+    // Never below the rule it marks.
+    expect(meterPeakFollow(0.9, 0.85, 500)).toBe(0.85);
+  });
+
+  test('a late frame counts as METER_MAX_DT_MS for the peak too; broken values stay within 0..1', () => {
+    expect(meterPeakFollow(1, 0, 1000)).toBeCloseTo(1 - METER_MAX_DT_MS / METER_PEAK_FALL_MS, 9);
+    for (const v of [Number.NaN, Infinity, -Infinity, 7, -3]) {
+      const p = meterPeakFollow(v, v, FRAME_MS);
+      expect(p).toBeGreaterThanOrEqual(0 - 1 / 30);
+      expect(p).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test('a tick sits just over its reach and never above the band', () => {
+    const baseline = 700;
+    expect(meterPeakTop(0, baseline)).toBe(baseline - METER_BASE_HEIGHT - 1 - METER_PEAK_HEIGHT);
+    for (const peak of [0.9, 1, 5, Infinity]) {
+      expect(meterPeakTop(peak, baseline)).toBeGreaterThanOrEqual(baseline - METER_MAX_HEIGHT);
+    }
+  });
+
+  test('a kick lights the low third only, with the beat pulse weighted by the low reading, never in silence', () => {
+    const lit = Array.from({ length: METER_BOLD_RULE_COUNT }, (_, i) => meterKickSide(i, METER_BOLD_RULE_COUNT));
+    expect(lit[0]).toBe(true);
+    expect(lit.at(-1)).toBe(false);
+    expect(lit.filter(Boolean).length / METER_BOLD_RULE_COUNT).toBeLessThanOrEqual(METER_KICK_SIDE + 0.02);
+    expect(meterKickFlash(1, 1, 0)).toBe(1);
+    expect(meterKickFlash(1, 0.25, 0)).toBeCloseTo(0.5);
+    expect(meterKickFlash(0, 1, 0)).toBe(0);
+    expect(meterKickFlash(1, 1, 1)).toBe(0);
+    expect(meterKickFlash(Number.NaN, Number.NaN, 0)).toBe(0);
   });
 });

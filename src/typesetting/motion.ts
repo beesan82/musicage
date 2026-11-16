@@ -368,6 +368,20 @@ function exitTransform(input: MotionInput): GlyphTransform {
   return { ...zero, opacity: 1 - p };
 }
 
+/**
+ * Where a glyph rests for good: what glyphTransform gives a non-leaving glyph
+ * under reduced motion, and one on the `still` hold once entranceDone (every
+ * entrance ends exactly on identity). GlyphLayer holds this instead of
+ * following the clock in those cases.
+ */
+export const SETTLED_TRANSFORM: Readonly<GlyphTransform> = {
+  dx: 0,
+  dy: 0,
+  scale: 1,
+  opacity: 1,
+  rotateDeg: 0,
+};
+
 export function glyphTransform(input: MotionInput): GlyphTransform {
   'worklet';
   let dx = 0;

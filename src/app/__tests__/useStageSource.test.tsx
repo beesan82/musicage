@@ -8,6 +8,9 @@ import type { FixturePlayback } from '../../dev/fixture/useFixturePlayback';
 import { parseLrc } from '../../recognition/lrc';
 import type { LyricResult, TimestampedLyricResult, Track } from '../../recognition/types';
 import type { StageSource } from '../../typesetting/LyricStage';
+import { isVisualizerKey } from '../../visualizer/patterns';
+import { createPatternBook, memoryPatternStore } from '../../visualizer/patternStore';
+import type { PatternBook } from '../../visualizer/patternStore';
 import { QUIET_BEAT, useStageSource } from '../useStageSource';
 import type { StageInputs } from '../useStageSource';
 
@@ -830,5 +833,107 @@ describe('useStageSource', () => {
     // Frames that still arrive while not listening are ignored.
     await act(async () => emitter.emit(frame(920, 0.9)));
     expect(hook.result.current.beat).toBe(QUIET_BEAT);
+  });
+
+  describe('the song’s visualizer pattern (design spec §9.1, §9.4 decided 2026-11-16)', () => {
+    // A song without synced lyrics: its nameplate stays on while time passes.
+    const unavailable: LyricResult = { kind: 'lyrics_unavailable', track };
+    const other: LyricResult = { kind: 'lyrics_unavailable', track: { ...track, trackId: 'shazam-2', title: '別の歌' } };
+    const setupWith = (patternBook: PatternBook, initial: LyricResult | null = unavailable) =>
+      renderHook(
+        (props: Props): StageInputs => useStageSource({ earStream: emitter, ...props, patternBook }),
+        { initialProps: { status: 'listening', playback: playbackOff, result: initial } as Props },
+      );
+    /** The pattern the source carries; undefined for idle (the clock is always `bars`). */
+    const patternOf = (inputs: StageInputs) =>
+      inputs.source.kind === 'idle' ? undefined : (inputs.source.pattern ?? null);
+    /** Sound for `forMs` from `fromMs` (song time from 10 s), 50 ms frames, a second per act. */
+    const emitSound = async (fromMs: number, forMs: number) => {
+      for (let t = fromMs; t < fromMs + forMs; t += 1000) {
+        await act(async () => {
+          for (let s = t; s < t + 1000 && s < fromMs + forMs; s += 50) {
+            clockMs = 10_000 + s;
+            emitter.emit(frame(clockMs, 0.3));
+          }
+        });
+      }
+    };
+
+    test('`bars` (no pattern) until the song has been heard for 8 s, then one pattern, chosen once', async () => {
+      const store = memoryPatternStore();
+      const book = createPatternBook(store);
+      const hook = await setupWith(book);
+      expect(patternOf(hook.result.current)).toBeNull();
+
+      await emitSound(0, 5_000);
+      expect(patternOf(hook.result.current)).toBeNull();
+
+      await emitSound(5_000, 7_000);
+      const key = patternOf(hook.result.current);
+      expect(isVisualizerKey(key)).toBe(true);
+
+      // More sound of the same song never changes it.
+      await emitSound(12_000, 3_000);
+      expect(patternOf(hook.result.current)).toBe(key);
+    });
+
+    test('only the key is stored, by trackId', async () => {
+      const store = memoryPatternStore();
+      const hook = await setupWith(createPatternBook(store));
+      await emitSound(0, 12_000);
+      const key = patternOf(hook.result.current);
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(JSON.parse(store.saved!)).toEqual({ patterns: { [track.trackId]: key } });
+      // Nothing else: no feature values, no title, no artist.
+      expect(store.saved).not.toContain(track.title);
+      expect(store.saved).not.toMatch(/bpm|energy|low|mid|high|confidence/);
+    });
+
+    test('the same song recognized again (in the session, or after a restart) gets the same pattern at once', async () => {
+      const store = memoryPatternStore();
+      const book = createPatternBook(store);
+      const hook = await setupWith(book);
+      await emitSound(0, 12_000);
+      const key = patternOf(hook.result.current);
+      expect(isVisualizerKey(key)).toBe(true);
+
+      // Lost, then recognized again: the same pattern, without a new window.
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: { kind: 'not_recognized' } });
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: unavailable });
+      expect(patternOf(hook.result.current)).toBe(key);
+      await hook.unmount();
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+
+      // A restart: a new book over the same store, the same song, no sound yet.
+      const restarted = await setupWith(createPatternBook(store));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(patternOf(restarted.result.current)).toBe(key);
+    });
+
+    test('a different song starts again from `bars`', async () => {
+      const book = createPatternBook(memoryPatternStore());
+      const hook = await setupWith(book);
+      await emitSound(0, 12_000);
+      expect(isVisualizerKey(patternOf(hook.result.current))).toBe(true);
+
+      await hook.rerender({ status: 'listening', playback: playbackOff, result: other });
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+      expect(patternOf(hook.result.current)).toBeNull();
+    });
+
+    test('a room without sound never chooses (silent frames do not count)', async () => {
+      const store = memoryPatternStore();
+      const hook = await setupWith(createPatternBook(store));
+      for (let t = 0; t < 12_000; t += 1000) {
+        await act(async () => {
+          for (let s = t; s < t + 1000; s += 50) {
+            clockMs = 10_000 + s;
+            emitter.emit(frame(clockMs, 0));
+          }
+        });
+      }
+      expect(hook.result.current.source.kind === 'idle' || patternOf(hook.result.current) === null).toBe(true);
+      expect(store.saved).toBeNull();
+    });
   });
 });
